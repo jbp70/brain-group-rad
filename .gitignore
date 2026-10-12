@@ -1,0 +1,56 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+.ipynb_checkpoints/
+
+# ---- Virtual environments ----
+.venv/
+venv/
+env/
+.conda/
+
+# ---- Editor / OS ----
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# ---- Secrets / local config ----
+.env
+*.local
+
+# ---- Data (never commit medical imaging data) ----
+data/
+datasets/
+*.nii
+*.nii.gz
+*.mgz
+*.mnc
+*.npy
+*.npz
+*.h5
+*.hdf5
+
+# ---- Model artifacts / training outputs ----
+checkpoints/
+ckpt/
+weights/
+*.ckpt
+*.pb
+saved_model/
+logs/
+runs/
+tensorboard/
+wandb/
+outputs/
+results/
+
+# ---- Keep Kiro project files tracked (do NOT ignore .kiro) ----
