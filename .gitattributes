@@ -1,0 +1,7 @@
+# Keep LF line endings for files that run on Linux (WSL / cluster),
+# even when checked out on Windows with core.autocrlf=true.
+* text=auto
+*.sh text eol=lf
+*.py text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
