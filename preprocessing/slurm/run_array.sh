@@ -15,7 +15,7 @@
 #
 #SBATCH --job-name=bgr_preproc
 # EDIT: CPU partition (suggested: basic)
-#SBATCH --partition=PLACEHOLDER_PARTITION
+#SBATCH --partition=basic
 # Martinos MLSC rule: always account qtim (never entre)
 #SBATCH --account=qtim
 # EDIT: uncomment (single #) only if your cluster requires a QOS

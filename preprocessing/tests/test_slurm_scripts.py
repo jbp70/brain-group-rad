@@ -47,9 +47,15 @@ def _mem_gb(v):
 @pytest.mark.parametrize("path", SLURM, ids=os.path.basename)
 def test_slurm_placeholders(path):
     text = open(path).read()
-    for key in ("--partition=PLACEHOLDER", "--account=qtim", "--time=", "--mem=", "--cpus-per-task=",
+    for key in ("--account=qtim", "--time=", "--mem=", "--cpus-per-task=",
                 "--nodes=1", "--ntasks-per-node=1", "--output=%s/logs/" % PROJ, "--error=%s/logs/" % PROJ):
         assert "#SBATCH " + key in text, key
+    # Partition: a placeholder or one of the partitions allowed by the cluster rules (TF 2.10-capable GPUs,
+    # no Blackwell qtim/pubgpu-req, no L40S, no lab-private lcn*/west).
+    part = re.search(r"^#SBATCH --partition=(\S+)$", text, re.M)
+    assert part, "missing #SBATCH --partition"
+    assert part.group(1).startswith("PLACEHOLDER") or set(part.group(1).split(",")) <= {
+        "basic", "rtx8000", "rtx6000", "dgx-a100", "pubgpu"}, part.group(1)
     # Workspace cluster rules: never the entre account; an unedited QOS placeholder must stay inactive.
     assert "entre" not in text.replace("(never entre)", "")
     assert "\n#SBATCH --qos" not in text and "##SBATCH --qos=PLACEHOLDER" in text

@@ -354,7 +354,7 @@ $RIC build-manifest --dataset lumir --root $LUMIR --out $D/manifests/lumir.csv \
 head -3 $D/manifests/lumir.csv
 
 # (4) Target grid from imagesVal, then check the overlay
-$RIC build-target-grid --config $CFG --lumir-root $LUMIR --split val --out-dir $D/target_grid
+$RIC build-target-grid --config $CFG --lumir-root $LUMIR --split val --out-dir $D/target_grid --force-flip no
 #   exit 2 = ambiguous x-flip: inspect target_grid_candidates.json, rerun with --force-flip yes|no
 #   freeview needs X: run it on the host (glacier), not in the container
 freeview $D/target_grid/lumir_mean.nii.gz $D/target_grid/template_lumirgrid.nii.gz:colormap=heat:opacity=0.4

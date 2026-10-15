@@ -15,7 +15,7 @@
 #
 #SBATCH --job-name=bgr_synthseg
 # EDIT: GPU partition (suggested: rtx8000; avoid qtim/pubgpu-req Blackwell and L40S nodes with TF 2.10)
-#SBATCH --partition=PLACEHOLDER_GPU_PARTITION
+#SBATCH --partition=rtx8000
 # Martinos MLSC rule: always account qtim (never entre)
 #SBATCH --account=qtim
 # EDIT: uncomment (single #) only if your cluster requires a QOS
