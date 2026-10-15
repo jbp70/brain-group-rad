@@ -1,0 +1,113 @@
+import argparse
+
+import numpy as np
+
+from preprocessing.builders import BUILDERS, apply_exclude
+from preprocessing.builders.bids import parse_bids_name
+
+from . import phantoms as ph
+
+
+def _nii(path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    ph.save(str(path), np.zeros((2, 2, 2)), np.eye(4))
+
+
+def _args(dataset, argv=()):
+    p = argparse.ArgumentParser(conflict_handler="resolve")
+    for mod in BUILDERS.values():
+        mod.add_arguments(p.add_argument_group())
+    return p.parse_args(list(argv))
+
+
+def test_lumir(tmp_path):
+    for d, ids in (("imagesTr", ("0001", "0002")), ("imagesVal", ("3454",))):
+        for i in ids:
+            _nii(tmp_path / d / ("LUMIRMRI_%s_0000.nii.gz" % i))
+    _nii(tmp_path / "labelsVal" / "LUMIRMRI_3454.nii.gz")
+    rows = BUILDERS["lumir"].build(str(tmp_path), _args("lumir", ["--label-glob", "labelsVal/{id}.nii.gz"]))
+    assert [r.subject for r in rows] == ["LUMIRMRI_0001", "LUMIRMRI_0002", "LUMIRMRI_3454"]
+    assert [r.split for r in rows] == ["train", "train", "val"]
+    assert all(r.skull_stripped and r.in_template_space and r.bias_corrected for r in rows)
+    assert list(rows[2].label_paths) == ["lumir10"] and not rows[0].label_paths
+
+
+def test_neurite_oasis_ignores_aligned(tmp_path):
+    for s in ("OASIS_OAS1_0001_MR1", "OASIS_OAS1_0002_MR1"):
+        for f in ("orig", "norm", "seg35", "seg4", "aligned_norm", "aligned_seg35", "slice_norm"):
+            _nii(tmp_path / s / ("%s.nii.gz" % f))
+    (tmp_path / "OASIS_OAS1_0002_MR1" / "seg4.nii.gz").unlink()
+    rows = BUILDERS["neurite_oasis"].build(str(tmp_path), _args("neurite_oasis"))
+    assert [r.subject for r in rows] == ["OASIS_OAS1_0001_MR1", "OASIS_OAS1_0002_MR1"]
+    assert rows[0].image_path.endswith("/OASIS_OAS1_0001_MR1/norm.nii.gz")
+    assert list(rows[0].label_paths) == ["seg35", "seg4"] and list(rows[1].label_paths) == ["seg35"]
+    assert all("aligned" not in p for r in rows for p in [r.image_path] + list(r.label_paths.values()))
+    assert rows[0].skull_stripped and rows[0].bias_corrected and not rows[0].in_template_space
+    orig = BUILDERS["neurite_oasis"].build(str(tmp_path), _args("neurite_oasis", ["--image", "orig"]))
+    assert orig[0].image_path.endswith("orig.nii.gz") and not orig[0].skull_stripped
+    # exclude list
+    ex = tmp_path / "ex.txt"
+    ex.write_text("# leakage\nOASIS_OAS1_0002_MR1\nNOT_THERE\n")
+    assert [r.subject for r in apply_exclude(rows, str(ex))] == ["OASIS_OAS1_0001_MR1"]
+
+
+def test_ultracortex_bids(tmp_path):
+    _nii(tmp_path / "sub-01" / "anat" / "sub-01_T1w.nii.gz")
+    _nii(tmp_path / "sub-02" / "ses-1" / "anat" / "sub-02_ses-1_T1w.nii.gz")
+    _nii(tmp_path / "sub-02" / "ses-2" / "anat" / "sub-02_ses-2_T1w.nii.gz")
+    _nii(tmp_path / "sub-03" / "anat" / "sub-03_acq-mp2rage_T1w.nii.gz")
+    d = tmp_path / "derivatives"
+    _nii(d / "synthstrip" / "sub-01" / "anat" / "sub-01_desc-brain_mask.nii.gz")
+    _nii(d / "synthstrip" / "sub-01" / "anat" / "sub-01_desc-brain_T1w.nii.gz")      # stripped image, ignored
+    _nii(d / "synthstrip" / "sub-02" / "ses-2" / "anat" / "sub-02_ses-2_desc-brain_mask.nii.gz")
+    _nii(d / "manual_segmentations" / "sub-02" / "ses-1" / "anat" / "sub-02_ses-1_desc-manual_dseg.nii.gz")
+    _nii(d / "freesurfer" / "sub-01" / "ribbon.nii.gz")                              # no BIDS entities
+    rows = BUILDERS["ultracortex"].build(str(tmp_path), _args("ultracortex"))
+    key = {(r.subject, r.session): r for r in rows}
+    assert len(rows) == 4
+    assert key[("sub-01", "")].mask_path.endswith("sub-01_desc-brain_mask.nii.gz")
+    assert key[("sub-02", "1")].mask_path == "" and list(key[("sub-02", "1")].label_paths) == ["manual"]
+    assert key[("sub-02", "2")].mask_path.endswith("ses-2_desc-brain_mask.nii.gz")
+    assert key[("sub-03", "")].contrast == "acq-mp2rage_T1w"
+    assert all(not r.skull_stripped and not r.bias_corrected for r in rows)
+    rows = BUILDERS["ultracortex"].build(str(tmp_path), _args("ultracortex", ["--ignore-provided-masks"]))
+    assert all(r.mask_path == "" for r in rows)
+
+
+def test_generic_bids_and_folder(tmp_path):
+    b = tmp_path / "bids"
+    b.mkdir()
+    (b / "dataset_description.json").write_text("{}")
+    _nii(b / "sub-0001" / "ses-d0100" / "anat" / "sub-0001_ses-d0100_T2w.nii.gz")
+    _nii(b / "sub-0001" / "ses-d0100" / "anat" / "sub-0001_ses-d0100_T1w.nii.gz")
+    rows = BUILDERS["generic"].build(str(b), _args("generic", ["--name", "oasis3", "--suffix", "T2w"]))
+    assert len(rows) == 1 and rows[0].dataset == "oasis3" and rows[0].contrast == "T2w"
+    assert rows[0].session == "d0100" and rows[0].subject == "sub-0001"
+    m = tmp_path / "mb"
+    for s in ("OASIS-TRT-20-1", "OASIS-TRT-20-2"):
+        _nii(m / "OASIS-TRT-20_volumes" / s / "t1weighted.nii.gz")
+        _nii(m / "OASIS-TRT-20_volumes" / s / "labels.DKT31.manual+aseg.nii.gz")
+    rows = BUILDERS["generic"].build(str(m), _args("generic", [
+        "--name", "mindboggle", "--image-glob", "*/*/t1weighted.nii.gz",
+        "--label", "manual=*/{subject}/labels.DKT31.manual+aseg.nii.gz"]))
+    assert [r.subject for r in rows] == ["OASIS-TRT-20-1", "OASIS-TRT-20-2"]
+    assert rows[0].label_paths["manual"].endswith("OASIS-TRT-20-1/labels.DKT31.manual+aseg.nii.gz")
+    assert not rows[0].skull_stripped and rows[0].contrast == "T1w"
+
+
+def test_generic_globs_use_raw_folder_name(tmp_path):
+    m = tmp_path / "raw"
+    _nii(m / "subj 01 (scan)" / "t1.nii.gz")
+    _nii(m / "subj 01 (scan)" / "brainmask.nii.gz")
+    _nii(m / "subj 01 (scan)" / "aseg.nii.gz")
+    rows = BUILDERS["generic"].build(str(m), _args("generic", [
+        "--image-glob", "*/t1.nii.gz", "--mask-glob", "{subject}/brainmask.nii.gz",
+        "--label", "aseg={subject}/aseg.nii.gz"]))
+    assert len(rows) == 1 and rows[0].subject == "subj_01__scan_"
+    assert rows[0].mask_path.endswith("brainmask.nii.gz")
+    assert rows[0].label_paths["aseg"].endswith("aseg.nii.gz")
+
+
+def test_parse_bids_name():
+    assert parse_bids_name("sub-01_ses-2_acq-x_run-1_T1w.nii.gz") == (
+        {"sub": "01", "ses": "2", "acq": "x", "run": "1"}, "T1w")

@@ -1,0 +1,83 @@
+# Example config for `python -m preprocessing <command> --config <this file>`.
+# On the Martinos cluster run every command through the container wrapper:
+#   preprocessing/run_in_container.sh <command> --config <this file> ...
+# Copy it, then edit every line marked PLACEHOLDER. Omitted keys use the
+# defaults in preprocessing/config.py. Paths may use ${VAR} (expanded with the
+# environment produced by env_setup).
+
+# Shell lines run once (bash -c, inside the container) to build the tool
+# environment. Confirmed on glacier inside tf10_nv.sif (2026-10-14):
+# FreeSurfer dev build (needs the -B /usr/local/freesurfer bind), FSL and
+# ANTs 2.4.4 via their real /autofs paths (/usr/pubsw is a host symlink that is
+# not visible inside the container). Singularity does not pass the host PATH.
+env_setup:
+  - "export FREESURFER_HOME=/usr/local/freesurfer/dev"
+  - "export FSLDIR=/autofs/cluster/pubsw/2/pubsw/Linux2-2.3-x86_64/packages/fsl.64bit/5.0.7"
+  - "export FSLOUTPUTTYPE=NIFTI_GZ"
+  - "export PATH=$FREESURFER_HOME/bin:$FSLDIR/bin:/autofs/cluster/pubsw/2/pubsw/Linux2-2.3-x86_64/packages/ANTS/2.4.4/bin:$PATH"
+
+# Executable names (resolved on the PATH above; check-tools prints the
+# absolute path each one resolves to) or absolute paths.
+tools:
+  mri_synthstrip: mri_synthstrip
+  mri_synthseg: mri_synthseg
+  antsRegistration: antsRegistration
+  antsApplyTransforms: antsApplyTransforms
+  N4BiasFieldCorrection: N4BiasFieldCorrection
+  flirt: flirt
+  fslreorient2std: fslreorient2std
+
+threads: 4                  # overridden by --threads (SLURM passes $SLURM_CPUS_PER_TASK)
+grid_tolerance_mm: 0.001
+lumir_expected_shape: [160, 224, 192]
+
+# Temporary files of the external tools (exported to them as TMPDIR).
+# null = $TMPDIR if it exists inside the container (SLURM: /scratch/$SLURM_JOBID),
+# else <out-root>/_tmp.
+tmp_dir: null
+
+# Output folder of `build-target-grid` (target_grid.json, template_lumirgrid*.nii.gz),
+# built from LUMIR at /autofs/space/crater_001/datasets/public/LUMIR2025.
+target_dir: /autofs/space/crater_001/users/jn85/BrainRegProjects/GroupwiseReg/data/target_grid
+
+# Registration targets ($FSLDIR/data/standard of the FSL above).
+# MNI152_T1_1mm_brain: 182x218x182, LAS (confirmed on the cluster).
+mni_templates:
+  T1:
+    image_1mm: /autofs/cluster/pubsw/2/pubsw/Linux2-2.3-x86_64/packages/fsl.64bit/5.0.7/data/standard/MNI152_T1_1mm_brain.nii.gz
+    mask_1mm: /autofs/cluster/pubsw/2/pubsw/Linux2-2.3-x86_64/packages/fsl.64bit/5.0.7/data/standard/MNI152_T1_1mm_brain_mask.nii.gz
+    image_2mm: /autofs/cluster/pubsw/2/pubsw/Linux2-2.3-x86_64/packages/fsl.64bit/5.0.7/data/standard/MNI152_T1_2mm_brain.nii.gz
+  T2:
+    image_1mm: /PLACEHOLDER/templates/MNI152_T2_1mm_brain.nii.gz   # PLACEHOLDER: not shipped with FSL
+    mask_1mm: /autofs/cluster/pubsw/2/pubsw/Linux2-2.3-x86_64/packages/fsl.64bit/5.0.7/data/standard/MNI152_T1_1mm_brain_mask.nii.gz
+    image_2mm: /PLACEHOLDER/templates/MNI152_T2_2mm_brain.nii.gz   # PLACEHOLDER
+contrast_template: {T1w: T1, T2w: T2, FLAIR: T2, PDw: T2}
+
+mask: {threshold: 0.0, fill_holes: true, largest_component: true}
+normalization: {upper_percentile: 99.5, lower_percentile: null}
+
+synthstrip:
+  extra_args: []            # e.g. ["-t", "8"] or ["-g"]; verify with `mri_synthstrip --help`
+
+n4: {shrink_factor: 4, bspline_fitting: "[200]", convergence: "[50x50x50x50,0.0]"}
+
+registration:
+  backend: flirt            # flirt (OpenBHB/LUMIR recipe, 9 DOF) or ants
+  reorient: nibabel         # flirt backend only: nibabel | fslreorient2std | none
+  flirt:
+    dof: 9
+    cost: corratio
+    search_range: 30        # -searchr{x,y,z} -30 30
+    estimate_at_2mm: true   # estimate against the 2 mm template (OpenBHB quick mode)
+    image_interp: spline
+    extra_args: []
+  ants:
+    transform: Affine       # Affine (12 DOF) or Similarity (7 DOF); ANTs has no 9-DOF
+    random_seed: 42         # null omits --random-seed
+    use_masks: false
+
+resample: {antialias: true, target_spacing_mm: 1.0, min_spacing_ratio: 0.95}
+
+synthseg: {parc: true, robust: true, cpu: false, threads: 8, vol: true, qc: true, extra_args: []}
+
+qc: {png: true, mad_threshold: 4.0}

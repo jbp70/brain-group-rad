@@ -54,3 +54,6 @@ outputs/
 results/
 
 # ---- Keep Kiro project files tracked (do NOT ignore .kiro) ----
+
+# ---- Kiro steering (local-only: internal cluster access rules, not for the public repo) ----
+.kiro/steering/

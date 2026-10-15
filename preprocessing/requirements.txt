@@ -1,0 +1,12 @@
+# Python packages the pipeline needs. Nothing has to be installed on the cluster:
+# there the pipeline runs inside the Singularity image
+#   /autofs/space/crater_001/users/jn85/Singularity_Files/tf10_nv.sif
+# (via preprocessing/run_in_container.sh), which ships exactly these versions
+# with Python 3.8.10. The code is kept version-agnostic; local testing uses an
+# env that matches the container (tests/run_tests_wsl.sh bgr_preproc38) and a
+# newer Python 3.9 env (requirements-test-py39.txt).
+numpy==1.21.1
+scipy==1.4.1
+nibabel==3.1.1
+PyYAML==6.0
+matplotlib==3.5.0
