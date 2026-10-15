@@ -1,0 +1,72 @@
+Container adaptation: local test log (iteration 1, 2026-10-14)
+==============================================================
+
+Everything ran locally in WSL Ubuntu (no cluster/glacier access). External tools
+(FreeSurfer/FSL/ANTs) and `singularity` are fakes in the tests.
+
+Env creation (bgr_preproc38)
+----------------------------
+- WSL has no DNS (getent hosts pypi.org -> nothing); repo.anaconda.com and
+  conda.anaconda.org were unreachable from Windows too (connection reset / timeout),
+  so `conda create -n bgr_preproc38 python=3.8` was not possible. No python 3.8
+  package in the local conda cache.
+- Workaround: `conda create --offline -n bgr_preproc38` (empty env) + CPython 3.8.20
+  from python-build-standalone (release 20241002, x86_64-unknown-linux-gnu
+  install_only, downloaded on Windows from GitHub) copied into the env prefix,
+  then pip install --no-index from linux cp38 wheels downloaded on Windows with
+  `pip download --platform manylinux... --python-version 38`.
+  (One-off helper script and downloads were in .agents/tmp_py38/; deleted afterwards.)
+- Resulting versions (printed by run_tests_wsl.sh):
+  python 3.8.20 numpy 1.21.1 scipy 1.4.1 nibabel 3.1.1 pyyaml 6.0 matplotlib 3.5.0 pytest 8.3.5
+  Container: python 3.8.10 -> local 3.8.20 (nearest available 3.8; no 3.8.10 build
+  obtainable offline). All library pins exact. pytest 8.3.5 = last release for 3.8.
+
+Baseline before any Python/config edits (bgr_preproc38, old package code): all tests passed -> the
+existing code already ran on Python 3.8 + numpy 1.21 / scipy 1.4 / nibabel 3.1 /
+matplotlib 3.5. A grep audit found no 3.9-only syntax/APIs (PEP 585 generics,
+removeprefix, dict |, functools.cache, math.lcm, zoneinfo, BooleanOptionalAction,
+np.quantile(method=), ndimage.value_indices); shlex.join is 3.8+.
+
+Final runs (after the last edit)
+--------------------------------
+1) Primary
+   Command: wsl -d Ubuntu bash /mnt/d/Research/Brain_Registration_Projects/brain-group-rad/preprocessing/tests/run_tests_wsl.sh bgr_preproc38
+   env bgr_preproc38: python 3.8.20 numpy 1.21.1 scipy 1.4.1 nibabel 3.1.1 pyyaml 6.0 matplotlib 3.5.0 pytest 8.3.5
+   bash -n OK (6 .sh files: run_in_container.sh, 4 slurm/*.sh, tests/run_tests_wsl.sh)
+   pytest: 102 passed, 0 failed, 0 skipped, 140 warnings in 84.32s
+     (all warnings are DeprecationWarnings raised inside scipy 1.4.1 / nibabel 3.1.1
+      for np.int/np.bool/np.float/np.typeDict/numpy.dual; none from preprocessing/)
+   CLI --help smoke test for all 8 subcommands: OK
+   Exit status 0, "ALL CHECKS PASSED (bgr_preproc38)"
+
+2) Secondary
+   Command: wsl -d Ubuntu bash /mnt/d/Research/Brain_Registration_Projects/brain-group-rad/preprocessing/tests/run_tests_wsl.sh bgr_preproc
+   env bgr_preproc: python 3.9.18 numpy 1.26.4 scipy 1.11.4 nibabel 5.2.1 pyyaml 6.0.2 matplotlib 3.9.2 pytest 8.3.3
+   bash -n OK
+   pytest: 102 passed, 0 failed, 0 skipped, 14 warnings in 83.95s
+     (matplotlib/pyparsing deprecation notices only)
+   CLI --help smoke test: OK
+   Exit status 0, "ALL CHECKS PASSED (bgr_preproc)"
+
+New tests in this iteration (included in the 102)
+- tests/test_container.py
+  * test_wrapper_passes_args_verbatim: fake `singularity` on PATH records its argv and
+    runs the rest on the host; asserts the exact argv (exec, --nv, -B binds with a
+    missing bind skipped, image, env FREESURFER_HOME/FSLDIR/FSLOUTPUTTYPE/BGR_ANTS_BIN/
+    BGR_REPO_DIR/BGR_WORKDIR/BGR_PYTHON/TMPDIR, bash -c <fixed script> run_in_container
+    <args>); a manifest name with spaces, ;, $(...), backticks, quotes and & reaches
+    python unchanged (n-chunks prints 2) and nothing is executed (no PWNED file).
+  * test_wrapper_gpu_flag: --nv with USE_GPU=1 or auto + nvidia-smi listing a GPU;
+    none with USE_GPU=0, failing nvidia-smi, or no nvidia-smi.
+  * test_wrapper_errors: no args / missing image -> exit 2, singularity never called.
+  * test_wrapper_defaults_are_martinos_values.
+  * test_resolve_tmp_dir, test_runner_exports_tmp_dir,
+    test_tools_temp_files_go_to_work_dir_not_tmpdir: with TMPDIR pointing to a
+    non-existent (unbound) path, every fake tool's tempfile.mkstemp() lands in
+    <out-root>/_tmp (run) or the configured tmp_dir (synthseg), never TMPDIR or /tmp.
+- tests/test_config.py: Martinos env_setup defaults, real FSL template paths, tmp_dir validation.
+- tests/test_tools.py: FreeSurfer dev build stamp accepted by check-tools; tool lines show absolute paths.
+- tests/test_slurm_scripts.py: wrapper use, no conda/PY_ENV_ACTIVATE/eval, qtim, nodes/ntasks=1,
+  --gpus=1 with <=3 CPUs/<=128G, CPU jobs <=15 GB/core, %2 array throttle, absolute log paths.
+
+Cleanup: no __pycache__ / .pytest_cache in the repo; .agents/tmp_py38 removed.

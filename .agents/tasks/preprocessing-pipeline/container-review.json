@@ -1,0 +1,9 @@
+{
+  "verdict": "APPROVED",
+  "findings": [
+    "Non-blocking (likely): Glacier multi-GPU exposure. In USE_GPU=auto with CUDA_VISIBLE_DEVICES unset, --nv exposes all GPUs and TF in mri_synthseg allocates memory on all of them. Add a wrapper guard that warns or refuses when nvidia-smi lists more than one GPU and CUDA_VISIBLE_DEVICES is empty.",
+    "Non-blocking (confirmed): Relative MANIFEST resolves against REPO_DIR. run_array.sh and synthseg_batch.sh cd to REPO_DIR before passing --manifest, while the usage comments compute N from M.csv in the submit directory. Document that the path must be absolute, or resolve it with realpath before the cd.",
+    "Non-blocking (possible, already disclosed): mri_synthseg has not been run inside tf10_nv.sif. FreeSurfer's bundled TF or model files may conflict with the image or the GPU. Jay's one-subject smoke test is the check."
+  ],
+  "reviewDoc": "d:\\Research\\Brain_Registration_Projects\\brain-group-rad\\.agents\\tasks\\preprocessing-pipeline/container-review.md"
+}

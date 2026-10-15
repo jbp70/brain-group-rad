@@ -1,0 +1,26 @@
+{
+  "verdict": "APPROVED",
+  "findings": [
+    {
+      "id": 1,
+      "severity": "low",
+      "blocking": false,
+      "label": "Non-atomic qc.json rewrite in SynthSeg batch",
+      "location": "preprocessing/synthseg.py refresh_qc; preprocessing/qc.py summarize",
+      "confidence": "likely",
+      "detail": "refresh_qc writes qc.json in place from the SynthSeg batch path without resetting the qc step record; a kill mid-write leaves a truncated qc.json still trusted as done, and qc-summary's unguarded json.load then fails for the whole dataset.",
+      "action": "Write qc.json via temp file + os.replace (like write_meta_atomic)."
+    },
+    {
+      "id": 2,
+      "severity": "info",
+      "blocking": false,
+      "label": "FSL convention only self-consistent in tests",
+      "location": "preprocessing/tests/fake_impl.py vs preprocessing/nifti.py flirt_to_world/world_to_flirt",
+      "confidence": "likely",
+      "detail": "The fake flirt re-implements the same FSL scaled-voxel convention as the production code, so a convention error would not be caught locally.",
+      "action": "Verify the first real flirt row on the cluster with a freeview overlay of image.nii.gz on template_lumirgrid.nii.gz."
+    }
+  ],
+  "reviewDoc": "d:\\Research\\Brain_Registration_Projects\\brain-group-rad\\.agents\\tasks\\preprocessing-pipeline/review.md"
+}

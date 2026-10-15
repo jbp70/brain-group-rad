@@ -1,0 +1,35 @@
+# wsl -d Ubuntu bash /mnt/d/Research/Brain_Registration_Projects/brain-group-rad/preprocessing/tests/run_tests_wsl.sh
+# run: 2026-10-14T19:56:09
+bash -n OK
+........................................................................ [ 79%]
+...................                                                      [100%]
+=============================== warnings summary ===============================
+preprocessing/tests/test_pipeline.py::test_lumir_row_keeps_array_and_gets_corrected_affine
+  /home/jbpatel/miniconda3/envs/bgr_preproc/lib/python3.9/site-packages/matplotlib/_fontconfig_pattern.py:64: PyparsingDeprecationWarning: 'oneOf' deprecated - use 'one_of'
+    prop = Group((name + Suppress("=") + comma_separated(value)) | oneOf(_CONSTANTS))
+
+preprocessing/tests/test_pipeline.py::test_lumir_row_keeps_array_and_gets_corrected_affine
+preprocessing/tests/test_pipeline.py::test_lumir_row_keeps_array_and_gets_corrected_affine
+preprocessing/tests/test_pipeline.py::test_lumir_row_keeps_array_and_gets_corrected_affine
+preprocessing/tests/test_pipeline.py::test_lumir_row_keeps_array_and_gets_corrected_affine
+preprocessing/tests/test_pipeline.py::test_lumir_row_keeps_array_and_gets_corrected_affine
+preprocessing/tests/test_pipeline.py::test_lumir_row_keeps_array_and_gets_corrected_affine
+  /home/jbpatel/miniconda3/envs/bgr_preproc/lib/python3.9/site-packages/matplotlib/_fontconfig_pattern.py:85: PyparsingDeprecationWarning: 'parseString' deprecated - use 'parse_string'
+    parse = parser.parseString(pattern)
+
+preprocessing/tests/test_pipeline.py::test_lumir_row_keeps_array_and_gets_corrected_affine
+preprocessing/tests/test_pipeline.py::test_lumir_row_keeps_array_and_gets_corrected_affine
+preprocessing/tests/test_pipeline.py::test_lumir_row_keeps_array_and_gets_corrected_affine
+preprocessing/tests/test_pipeline.py::test_lumir_row_keeps_array_and_gets_corrected_affine
+preprocessing/tests/test_pipeline.py::test_lumir_row_keeps_array_and_gets_corrected_affine
+preprocessing/tests/test_pipeline.py::test_lumir_row_keeps_array_and_gets_corrected_affine
+  /home/jbpatel/miniconda3/envs/bgr_preproc/lib/python3.9/site-packages/matplotlib/_fontconfig_pattern.py:89: PyparsingDeprecationWarning: 'resetCache' deprecated - use 'reset_cache'
+    parser.resetCache()
+
+preprocessing/tests/test_pipeline.py::test_lumir_row_keeps_array_and_gets_corrected_affine
+  /home/jbpatel/miniconda3/envs/bgr_preproc/lib/python3.9/site-packages/matplotlib/_mathtext.py:45: PyparsingDeprecationWarning: 'enablePackrat' deprecated - use 'enable_packrat'
+    ParserElement.enablePackrat()
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+91 passed, 14 warnings in 62.41s (0:01:02)
+ALL CHECKS PASSED
