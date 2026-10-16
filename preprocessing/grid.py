@@ -21,9 +21,10 @@ target_grid_candidates.json; verify independently, then use force_flip.
 The MNI brain is nearly symmetric, so the x flip is often ambiguous (LUMIR:
 NCC 0.97107 no-flip vs 0.97127 flip). Verify with organizer labels that know
 the sides (LUMIR2025 SanityCheckLabelsTr, SLANT ids: 47/48 = Right/Left
-hippocampus) or with the population left/right SynthSeg asymmetry check of
-`qc-summary`. For LUMIR both showed that the flip is REQUIRED (subject left =
-low voxel x): use --force-flip yes. Voxel data is never changed; only the
+hippocampus; Right-* structures must land on the subject's right in the
+corrected affine). For LUMIR this was settled as --force-flip yes (subject
+left = low voxel x), verified against the organizers' SanityCheckLabelsTr
+labels. Voxel data is never changed; only the
 affine stamped on the outputs differs.
 
 Outputs in out_dir: target_grid.json, template_lumirgrid.nii.gz (MNI brain on
@@ -311,11 +312,10 @@ def build_target_grid(lumir_paths: Sequence[str], mni_path: str, out_dir: str, c
         raise GridAmbiguityError(
             "ambiguous LUMIR orientation: best %s (ncc %.5f) beats %s (ncc %.5f) by only %.5f < min_margin %.5f. "
             "Candidates written to %s. The image correlation cannot tell left from right here; verify "
-            "independently before choosing --force-flip yes|no: (a) organizer labels with known sides (LUMIR2025 "
-            "SanityCheckLabelsTr: Right-* structures must land on the subject's right in the corrected affine), "
-            "or (b) process ~20+ cases with each candidate and run qc-summary: its left/right SynthSeg "
-            "asymmetry check warns when the population pattern is reversed. For LUMIR this was settled on "
-            "2026-10-15: --force-flip yes."
+            "independently before choosing --force-flip yes|no with organizer labels that know the sides "
+            "(LUMIR2025 SanityCheckLabelsTr: SLANT ids 47/48 = Right/Left hippocampus; Right-* structures must "
+            "land on the subject's right in the corrected affine). For LUMIR this was settled as "
+            "--force-flip yes, verified against the organizers' SanityCheckLabelsTr labels."
             % (valid[0]["name"], valid[0]["ncc"], valid[1]["name"], valid[1]["ncc"], margin, min_margin, cand_path))
     t = np.asarray(chosen["voxel_map"], float)
     if use_subvoxel and "subvoxel_shift" in chosen:

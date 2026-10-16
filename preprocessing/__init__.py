@@ -17,8 +17,8 @@ Output layout:
       with qc-summary --png), work/ (keep_work; otherwise deleted once the row is done)
       Without mask.nii.gz the mask is image > 0 (loses filled interior holes and
       in-mask voxels normalized to 0, i.e. at/below the normalization lower bound).
-  <out_root>/<dataset>/{manifest_processed.csv, qc_summary.csv, qc_summary.json,
-      lr_asymmetry.csv}   (written by qc-summary)
+  <out_root>/<dataset>/{manifest_processed.csv, qc_summary.csv, qc_summary.json}
+      (written by qc-summary)
   <out_root>/_tmp/   tool temp files when $TMPDIR is unusable (config tmp_dir)
 
 Runs with Python >= 3.8 (the cluster container tf10_nv.sif has Python 3.8.10,

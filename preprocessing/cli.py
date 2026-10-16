@@ -6,8 +6,8 @@ Commands:
   build-target-grid  estimate the LUMIR voxel -> MNI world mapping; write template_lumirgrid
   run                per-row pipeline (reorient/strip/n4/register/resample/normalize[/synthseg]/qc)
   synthseg           SynthSeg in batch mode over processed rows (one mri_synthseg call)
-  qc-summary         per-dataset QC table with outlier flags, left/right asymmetry check,
-                     manifest_processed.csv; optional on-demand qc.png (--png)
+  qc-summary         per-dataset QC table with outlier flags, manifest_processed.csv;
+                     optional on-demand qc.png (--png)
   export-npy         processed NIfTI -> .npy (float16 image, uint8 LUT-remapped labels)
   cleanup            delete work/, mask.nii.gz and/or qc.png of completed rows (--dry-run first)
   n-chunks           number of SLURM array tasks for a manifest and chunk size
@@ -134,8 +134,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--min-margin", type=float, default=0.01, help="required NCC margin over the runner-up")
     s.add_argument("--force-flip", choices=("no", "yes"), default=None,
                    help="use this x-flip state regardless of the margin, only after independent verification "
-                        "(organizer labels with known sides, or the qc-summary left/right asymmetry check); "
-                        "LUMIR: yes")
+                        "with organizer labels that know the sides (LUMIR2025 SanityCheckLabelsTr: SLANT ids "
+                        "47/48 = Right/Left hippocampus; Right-* structures must land on the subject's right "
+                        "in the corrected affine); LUMIR: yes")
     s.add_argument("--no-subvoxel", action="store_true", help="skip the sub-voxel translation report")
     s.add_argument("--use-subvoxel", action="store_true", help="apply the sub-voxel shift (default: integer map)")
 
@@ -164,17 +165,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--dry-run", action="store_true")
     _add_work_flags(s, clean=False)
 
-    s = sub.add_parser("qc-summary", help="dataset QC summary, L/R check and manifest_processed.csv",
+    s = sub.add_parser("qc-summary", help="dataset QC summary and manifest_processed.csv",
                        formatter_class=argparse.RawDescriptionHelpFormatter,
                        description=__import__("preprocessing.qc", fromlist=["x"]).__doc__)
     s.add_argument("--out-root", required=True)
     s.add_argument("--dataset", required=True)
     s.add_argument("--mad-threshold", type=float, default=4.0)
-    s.add_argument("--lr-min-cases", type=int, default=20,
-                   help="cases with SynthSeg volumes needed before the left/right warning can fire (default 20)")
-    s.add_argument("--lr-reversed-below", type=float, default=0.4,
-                   help="a structure counts as reversed when the fraction of cases with the expected "
-                        "asymmetry is below this (default 0.4)")
     s.add_argument("--png", default="none", metavar="MODE",
                    help="render qc.png on demand: none (default), flagged, all, or sample:N (needs --config)")
     s.add_argument("--png-seed", type=int, default=0, help="seed for --png sample:N (default 0)")
@@ -275,8 +271,8 @@ def cmd_build_target_grid(a) -> int:
     if info["ncc_margin"] < a.min_margin:
         print("NOTE: the flip margin is below --min-margin, so left/right is NOT determined by the images. "
               "Make sure --force-flip was verified with organizer labels that know the sides (LUMIR2025 "
-              "SanityCheckLabelsTr) or with the left/right asymmetry check of qc-summary on >= 20 processed "
-              "cases (it warns when the population pattern is reversed). LUMIR: --force-flip yes.")
+              "SanityCheckLabelsTr: SLANT ids 47/48 = Right/Left hippocampus; Right-* structures must land "
+              "on the subject's right in the corrected affine). LUMIR: --force-flip yes.")
     print("corrected affine:\n%s" % "\n".join("  %s" % row for row in info["affine"]))
     print("Set in your config:\n  target_dir: %s" % os.path.abspath(out_dir))
     print("Verify: freeview %s %s:colormap=heat:opacity=0.4" % (info["outputs"]["lumir_mean"],
@@ -334,7 +330,6 @@ def cmd_synthseg(a) -> int:
 
 
 def cmd_qc_summary(a) -> int:
-    import json
     from .qc import parse_png_mode, render_qc_png, select_png_dirs, summarize
     try:
         png_mode, png_n = parse_png_mode(a.png)
@@ -346,24 +341,8 @@ def cmd_qc_summary(a) -> int:
     if not os.path.isdir(d):
         log.error("no such dataset folder: %s", d)
         return 1
-    n, flagged = summarize(d, a.mad_threshold, a.lr_min_cases, a.lr_reversed_below)
+    n, flagged = summarize(d, a.mad_threshold)
     print("%d subjects, %d flagged -> %s" % (n, flagged, os.path.join(d, "qc_summary.csv")))
-    with open(os.path.join(d, "qc_summary.json"), "r", encoding="utf-8") as f:
-        lr = json.load(f)["lr_check"]
-    print("left/right SynthSeg asymmetry over %d cases (fraction with Left > Right; expected: thalamus, "
-          "pallidum, lateral ventricle mostly L > R, hippocampus mostly R > L):" % lr["n_cases"])
-    for s in lr["structures"]:
-        print("  %-18s n=%-4d frac_left_larger=%s%s" % (
-            s["structure"], s["n"], "n/a" if s["frac_left_larger"] is None else "%.2f" % s["frac_left_larger"],
-            "  REVERSED" if s["reversed"] else ""))
-    if not lr["evaluated"]:
-        print("  (not evaluated: fewer than %d cases with synthseg_vols.csv)" % lr["min_cases"])
-    elif lr["lr_reversed_warning"]:
-        print("WARNING: LEFT/RIGHT LOOKS REVERSED for %s (%d of %d structures). The target grid x-flip is "
-              "probably wrong: rebuild it with the other --force-flip and reprocess. Population heuristic, "
-              "see lr_asymmetry.csv." % (a.dataset, lr["n_structures_reversed"], lr["n_structures_evaluated"]))
-    else:
-        print("  left/right pattern OK (no warning)")
     if png_mode != "none":
         from .config import load_config
         from .grid import Target

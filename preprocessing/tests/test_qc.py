@@ -82,7 +82,7 @@ def test_summarize_flags_outlier(tmp_path):
     assert man[0]["mask"].endswith("mask.nii.gz")
     assert summarize(root, 4.0) == (8, 2)
     summary = json.load(open(os.path.join(root, "qc_summary.json")))
-    assert summary["n_flagged"] == 2 and summary["lr_reversed_warning"] is False
+    assert summary["n_flagged"] == 2
 
 
 def test_png_on_demand(tmp_path, config_file, capsys):
@@ -123,59 +123,3 @@ def test_compute_qc_without_saved_mask(tmp_path):
     os.remove(os.path.join(d, "mask.nii.gz"))
     q = compute_qc(d, img.astype(np.float32), ph.target_affine(), mask > 0, meta=meta)
     assert q["mask_source"] == "image>0" and q["mask_volume_cc"] == pytest.approx(1.999)
-
-
-LR_HEADER = ["subject", "total intracranial", "left cerebral white matter", "left lateral ventricle",
-             "left inferior lateral ventricle", "left thalamus", "left pallidum", "left hippocampus",
-             "right lateral ventricle", "right inferior lateral ventricle", "right thalamus", "right pallidum",
-             "right hippocampus"]
-
-
-def _vols(d, lv, th, pa, hi, swap=False):
-    """Write a SynthSeg-style vols CSV; (L, R) pairs, swapped for a flipped grid."""
-    def lr(p):
-        return (p[1], p[0]) if swap else p
-    lv, th, pa, hi = lr(lv), lr(th), lr(pa), lr(hi)
-    vals = ["x", "1500000", "220000", lv[0], 400, th[0], pa[0], hi[0], lv[1], 410, th[1], pa[1], hi[1]]
-    os.makedirs(d, exist_ok=True)
-    with open(os.path.join(d, "synthseg_vols.csv"), "w", newline="") as f:
-        w = csv.writer(f)
-        w.writerow(LR_HEADER)
-        w.writerow([str(v) for v in vals])
-
-
-@pytest.mark.parametrize("swap", [False, True])
-def test_left_right_check(tmp_path, swap, capsys):
-    root = str(tmp_path / "out" / "ds")
-    rng = np.random.default_rng(0)
-    for i in range(25):
-        d = os.path.join(root, "s%02d" % i)
-        os.makedirs(d)
-        with open(os.path.join(d, "meta.json"), "w") as f:
-            json.dump({"status": "completed", "row": {"subject": "s%02d" % i}}, f)
-        # Population pattern: L > R for LV/thalamus/pallidum, R > L for hippocampus (with some exceptions).
-        s = 1.0 if i % 6 else -1.0
-        lv = (8000 + s * 400 * rng.random() + s * 100, 7500)
-        th = (8000 + 200, 7900 - 50 * rng.random())
-        pa = (2000 + 60, 1950)
-        hi = (4100 - s * 150, 4150 + 50 * rng.random())
-        _vols(d, lv, th, pa, hi, swap=swap)
-    assert main(["qc-summary", "--out-root", str(tmp_path / "out"), "--dataset", "ds"]) == 0
-    text = capsys.readouterr().out
-    summary = json.load(open(os.path.join(root, "qc_summary.json")))
-    lr = {s["structure"]: s for s in summary["lr_check"]["structures"]}
-    assert summary["lr_check"]["n_cases"] == 25
-    if swap:
-        assert summary["lr_reversed_warning"] is True and "WARNING: LEFT/RIGHT LOOKS REVERSED" in text
-        assert lr["thalamus"]["frac_left_larger"] == 0.0 and lr["hippocampus"]["frac_left_larger"] > 0.5
-    else:
-        assert summary["lr_reversed_warning"] is False and "pattern OK" in text
-        assert lr["thalamus"]["frac_left_larger"] == 1.0 and lr["hippocampus"]["frac_left_larger"] < 0.5
-    rows = list(csv.DictReader(open(os.path.join(root, "lr_asymmetry.csv"))))
-    assert [r["structure"] for r in rows] == ["thalamus", "pallidum", "lateral ventricle", "hippocampus"]
-    # Too few cases -> evaluated, but never a warning.
-    assert main(["qc-summary", "--out-root", str(tmp_path / "out"), "--dataset", "ds",
-                 "--lr-min-cases", "30"]) == 0
-    s2 = json.load(open(os.path.join(root, "qc_summary.json")))
-    assert s2["lr_reversed_warning"] is False and s2["lr_check"]["evaluated"] is False
-    assert "not evaluated" in capsys.readouterr().out

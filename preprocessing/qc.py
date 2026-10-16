@@ -18,15 +18,6 @@ OUTLIER_METRICS; |z| > mad_threshold flags the subject. Hard flags:
 grid_mismatch, affine_match_final false, synthseg with < 1 label, status !=
 completed. Writes qc_summary.csv, qc_summary.json and manifest_processed.csv.
 
-Left/right check (when <subject>/synthseg_vols.csv exist): per dataset, the
-fraction of cases with SynthSeg Left volume > Right for thalamus, pallidum and
-lateral ventricle (expected mostly L > R) and hippocampus (expected mostly
-R > L) goes to lr_asymmetry.csv and qc_summary.json. If most of these
-structures go the unexpected way in a dataset with >= lr_min_cases cases, a
-WARNING is printed and "lr_reversed_warning" is set: the target grid's x-flip
-(build-target-grid --force-flip) is probably wrong. This is a population-level
-heuristic (individual subjects can be reversed); it says nothing per subject.
-
 PNGs on demand (needs --config for the template):
     python -m preprocessing qc-summary --out-root /data/processed --dataset lumir --config cfg.yaml --png flagged
     ... --png sample:20   (20 random rows, --png-seed)   ... --png all
@@ -164,95 +155,6 @@ def render_qc_png(subject_dir: str, template: np.ndarray) -> str:
     return out
 
 
-# ---------------------------------------------------------------- left/right check
-# structure -> expected larger side in the healthy population.
-LR_STRUCTURES = [("thalamus", "left"), ("pallidum", "left"), ("lateral ventricle", "left"),
-                 ("hippocampus", "right")]
-
-
-def _norm_col(name: str) -> str:
-    return " ".join(name.lower().replace("-", " ").replace("_", " ").split())
-
-
-def _lr_columns(header: List[str], structure: str) -> Optional[Tuple[int, int]]:
-    """Column indices of (left, right) volumes in a SynthSeg vols CSV header."""
-    cols = {_norm_col(h): i for i, h in enumerate(header)}
-    out = []
-    for side in ("left", "right"):
-        idx = None
-        for cand in ("%s %s" % (side, structure), "%s %s proper" % (side, structure)):
-            if cand in cols:
-                idx = cols[cand]
-                break
-        if idx is None:
-            return None
-        out.append(idx)
-    return out[0], out[1]
-
-
-def read_lr_volumes(path: str) -> Dict[str, Tuple[float, float]]:
-    """{structure: (left, right)} from one SynthSeg --vol CSV (first data row); missing ones omitted."""
-    with open(path, "r", newline="", encoding="utf-8") as f:
-        rows = [r for r in csv.reader(f) if r]
-    if len(rows) < 2:
-        return {}
-    header, vals = rows[0], rows[1]
-    out = {}
-    for s, _ in LR_STRUCTURES:
-        idx = _lr_columns(header, s)
-        if idx is None:
-            continue
-        try:
-            out[s] = (float(vals[idx[0]]), float(vals[idx[1]]))
-        except (ValueError, IndexError):
-            continue
-    return out
-
-
-def check_left_right(subject_dirs: List[str], min_cases: int = 20, reversed_below: float = 0.4
-                     ) -> Dict[str, Any]:
-    """Population L/R asymmetry check over SynthSeg volumes.
-
-    For each structure, frac_left_larger = fraction of cases with Left > Right.
-    frac_as_expected is that fraction (or 1 - it for hippocampus). A structure
-    counts as reversed when frac_as_expected < reversed_below; the warning is
-    raised when more than half of the evaluated structures are reversed and
-    at least min_cases cases have volumes.
-    """
-    per: Dict[str, List[bool]] = {s: [] for s, _ in LR_STRUCTURES}
-    n_files = 0
-    for d in subject_dirs:
-        p = os.path.join(d, "synthseg_vols.csv")
-        if not os.path.isfile(p):
-            continue
-        vols = read_lr_volumes(p)
-        if vols:
-            n_files += 1
-        for s, (left, right) in vols.items():
-            if left != right:
-                per[s].append(left > right)
-    structures = []
-    n_rev = 0
-    n_eval = 0
-    for s, expected in LR_STRUCTURES:
-        v = per[s]
-        rec: Dict[str, Any] = {"structure": s, "expected_larger": expected, "n": len(v),
-                               "frac_left_larger": None, "frac_as_expected": None, "reversed": None}
-        if v:
-            fl = float(np.mean(v))
-            fe = fl if expected == "left" else 1.0 - fl
-            rec.update({"frac_left_larger": round(fl, 4), "frac_as_expected": round(fe, 4),
-                        "reversed": bool(fe < reversed_below)})
-            n_eval += 1
-            n_rev += int(fe < reversed_below)
-        structures.append(rec)
-    warning = bool(n_files >= min_cases and n_eval > 0 and n_rev > n_eval / 2.0)
-    return {"n_cases": n_files, "min_cases": int(min_cases), "reversed_below": float(reversed_below),
-            "n_structures_evaluated": n_eval, "n_structures_reversed": n_rev,
-            "lr_reversed_warning": warning, "evaluated": bool(n_files >= min_cases and n_eval > 0),
-            "structures": structures}
-
-
 def parse_png_mode(text: str) -> Tuple[str, int]:
     """'none' | 'flagged' | 'all' | 'sample:N' -> (mode, N)."""
     t = (text or "none").strip().lower()
@@ -305,9 +207,8 @@ def _subject_dirs(dataset_dir: str) -> List[str]:
     return sorted(os.path.dirname(p) for p in glob.glob(os.path.join(dataset_dir, "*", "meta.json")))
 
 
-def summarize(dataset_dir: str, mad_threshold: float = 4.0, lr_min_cases: int = 20,
-              lr_reversed_below: float = 0.4) -> Tuple[int, int]:
-    """Write qc_summary.csv/.json, lr_asymmetry.csv and manifest_processed.csv; returns (n_subjects, n_flagged)."""
+def summarize(dataset_dir: str, mad_threshold: float = 4.0) -> Tuple[int, int]:
+    """Write qc_summary.csv/.json and manifest_processed.csv; returns (n_subjects, n_flagged)."""
     rows: List[Dict[str, Any]] = []
     for d in _subject_dirs(dataset_dir):
         with open(os.path.join(d, "meta.json"), "r", encoding="utf-8") as f:
@@ -375,23 +276,10 @@ def summarize(dataset_dir: str, mad_threshold: float = 4.0, lr_min_cases: int = 
                         "labels": format_label_paths(label_files(d)),
                         "affine_to_template": aff if os.path.isfile(aff) else ""})
             w.writerow({c: row.get(c, "") for c in pcols})
-    lr = check_left_right([r["dir"] for r in rows if r["meta"].get("status") == "completed"],
-                          lr_min_cases, lr_reversed_below)
-    with open(os.path.join(dataset_dir, "lr_asymmetry.csv"), "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=["structure", "expected_larger", "n", "frac_left_larger",
-                                          "frac_as_expected", "reversed"])
-        w.writeheader()
-        w.writerows(lr["structures"])
-    summary = {"n_subjects": len(rows), "n_flagged": n_flag, "mad_threshold": mad_threshold,
-               "lr_check": lr, "lr_reversed_warning": lr["lr_reversed_warning"]}
+    summary = {"n_subjects": len(rows), "n_flagged": n_flag, "mad_threshold": mad_threshold}
     tmp = os.path.join(dataset_dir, "qc_summary.json.tmp")
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
     os.replace(tmp, os.path.join(dataset_dir, "qc_summary.json"))
-    if lr["lr_reversed_warning"]:
-        log.warning("LEFT/RIGHT LOOKS REVERSED in %s: %d of %d structures have the unexpected SynthSeg "
-                    "asymmetry over %d cases (see lr_asymmetry.csv). The target grid x-flip is probably "
-                    "wrong: rebuild it with the other --force-flip and reprocess.", dataset_dir,
-                    lr["n_structures_reversed"], lr["n_structures_evaluated"], lr["n_cases"])
     log.info("qc-summary %s: %d subjects, %d flagged", dataset_dir, len(rows), n_flag)
     return len(rows), n_flag

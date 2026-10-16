@@ -391,15 +391,14 @@ For a LUMIR row only SynthSeg runs a tool (no strip/N4/FLIRT). To exercise FLIRT
 
 ### Left/right: the LUMIR grid needs the x flip
 
-build-target-grid could not decide the x flip from image correlation on LUMIR (NCC 0.97107 no flip vs 0.97127 flip; margin 0.0002, below the 0.01 minimum), and the validation run used `--force-flip no`. Two independent checks show that choice is wrong:
+build-target-grid could not decide the x flip from image correlation on LUMIR (NCC 0.97107 no flip vs 0.97127 flip; margin 0.0002, below the 0.01 minimum), and the validation run used `--force-flip no`. The organizer labels show that choice is wrong (the second check below was retracted):
 
 - Organizer labels (`LUMIR2025/SanityCheckLabelsTr`, SLANT/Neuromorphometrics ids, e.g. 47 = Right and 48 = Left Hippocampus) put Right structures at high voxel x (~89–105) and Left at low x (~51–68) in all 5 cases. Our SynthSeg, with the no-flip header, put Left-Hippocampus (17) at x=104 and Right (53) at x=52.
-- SynthSeg volume asymmetries over the 49 cases run against well-known population asymmetries. Fraction of cases where our "Left" was larger: thalamus 0.00, pallidum 0.02, lateral ventricle 0.20, hippocampus 0.76 (expected: mostly L > R for the first three, mostly R > L for hippocampus).
+- ~~SynthSeg volume asymmetries over the 49 cases run against well-known population asymmetries. Fraction of cases where our "Left" was larger: thalamus 0.00, pallidum 0.02, lateral ventricle 0.20, hippocampus 0.76 (expected: mostly L > R for the first three, mostly R > L for hippocampus).~~ Retracted: after the flip the asymmetry fractions did not change, so they reflect SynthSeg labeling bias, not anatomy.
 
 So in LUMIR voxel space the subject's left is at low x. The correct grid is the flipped candidate `-x+y+z` (offset [9, -2, -20]; corrected affine x-row [1, 0, 0, ...], RAS-like in x): use `--force-flip yes`. Voxel data is never changed, only the affine stamped on the outputs.
 
-- `qc-summary` now runs this check automatically when `synthseg_vols.csv` files exist. It writes `lr_asymmetry.csv` and `qc_summary.json` (`lr_reversed_warning`), and prints `WARNING: LEFT/RIGHT LOOKS REVERSED` when more than half of the 4 structures show the unexpected pattern in a dataset with at least 20 cases (`--lr-min-cases`, `--lr-reversed-below 0.4`). It is a population heuristic, not a per-subject test.
-- `build-target-grid` (ambiguity error, `--force-flip` help and the printed output when the margin is small) now recommends checking with organizer labels or this asymmetry check before choosing `--force-flip`.
+- `build-target-grid` (ambiguity error, `--force-flip` help and the printed output when the margin is small) now recommends checking with organizer labels that know the sides before choosing `--force-flip`.
 
 ### New storage defaults (config `outputs`)
 
@@ -470,17 +469,22 @@ $RIC build-manifest --dataset lumir --root $LUMIR --out $D/manifests/lumir_val.c
 tail -n +2 $D/manifests/lumir_val.csv | cut -d, -f4 | sort | uniq -c   # T1w / unknown0001 counts
 grep -c lumir10 $D/manifests/lumir_val.csv                              # rows with labels
 
-# 4. Pipeline, SynthSeg, QC with the left/right check (expected: "left/right pattern OK", no WARNING;
-#    roughly thalamus/pallidum frac_left_larger near 1, lateral ventricle ~0.8, hippocampus ~0.2-0.3)
+# 4. Pipeline, SynthSeg, QC
 $RIC run --config $CFG --manifest $D/manifests/lumir_val.csv --out-root $D/processed --threads 3
 $RIC synthseg --config $CFG --manifest $D/manifests/lumir_val.csv --out-root $D/processed --threads 3
 $RIC qc-summary --out-root $D/processed --dataset lumir --config $CFG --png sample:5
 du -sh $D/processed/lumir; ls $D/processed/lumir/LUMIRMRI_3454_T1w/   # no work/, mask.nii.gz; qc.png only for the 5 sampled
 
 # 5. Export (float16 image, uint8 remapped labels)
-$RIC export-npy --out-root $D/processed --export-root $D/npy --dataset lumir --include-template --config $CFG
+$RIC export-npy --out-root $D/processed --export-root $D/npy --dataset lumir --include-template --image-dtype float32 --config $CFG
 head -3 $D/npy/export_manifest.csv; du -sh $D/npy/lumir
 exit
 ```
 
 If export stops with `label values [...] are not in the fixed LUT (LUMIR25 coarse labels ...)`, the lumir10 ids aren't 0..10. Send me the values; `--no-remap-labels` works in the meantime.
+
+### Correction (2026-10-16)
+
+- The flip (`--force-flip yes`) is kept. It is consistent with the organizers' SLANT labels in `SanityCheckLabelsTr` (Left structures at low voxel x; after the flip our SynthSeg Left-Hippocampus sits at x=52, matching them).
+- Whether that matches true anatomy is not independently verified: the organizers' labeling tool may have trusted the identity header too.
+- The SynthSeg left/right asymmetry check was removed from `qc-summary` (no more `lr_asymmetry.csv`, `lr_check`/`lr_reversed_warning` in `qc_summary.json`, `--lr-min-cases`/`--lr-reversed-below`, or the warning). It is invalid: the asymmetry fractions stayed the same after the flip (thalamus 0.00, pallidum 0.02→0.08, hippocampus 0.76→0.78), so they measure SynthSeg's labeling bias, not anatomy.
