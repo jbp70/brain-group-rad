@@ -1,0 +1,21 @@
+Storage / left-right update: local WSL test results (2026-10-15), run after the last edit
+(iteration 3: review fix -- rerun recipe step 2 now also deletes $D/npy/template (stale float32,
+unflipped-grid template arrays); docs-only change, full suites rerun so this log reflects the final state)
+
+Command 1: wsl -d Ubuntu bash /mnt/d/Research/Brain_Registration_Projects/brain-group-rad/preprocessing/tests/run_tests_wsl.sh bgr_preproc38
+Exit status: 0
+env bgr_preproc38: python 3.8.20 numpy 1.21.1 scipy 1.4.1 nibabel 3.1.1 pyyaml 6.0 matplotlib 3.5.0
+118 passed, 155 warnings in 71.52s (0:01:11)
+ALL CHECKS PASSED (bgr_preproc38)
+Result: 118 passed, 0 failed, 0 skipped (warnings come from scipy 1.4 / nibabel 3.1 deprecated numpy aliases)
+
+Command 2: wsl -d Ubuntu bash /mnt/d/Research/Brain_Registration_Projects/brain-group-rad/preprocessing/tests/run_tests_wsl.sh bgr_preproc
+Exit status: 0
+env bgr_preproc: python 3.9.18 numpy 1.26.4 scipy 1.11.4 nibabel 5.2.1 pyyaml 6.0.2 matplotlib 3.9.2
+118 passed, 14 warnings in 71.43s (0:01:11)
+ALL CHECKS PASSED (bgr_preproc)
+Result: 118 passed, 0 failed, 0 skipped
+
+Both runs include bash -n on every .sh file and --help for all 9 subcommands (incl. cleanup).
+New tests overall: test_cleanup.py (2), test_export.py (6, incl. test_reexport_into_existing_root), test_qc.py (+4 incl. both L/R orientations), test_pipeline.py (+2), test_synthseg.py (+1), test_builders.py (+1), test_config.py (+1), test_cli.py (+1 cleanup --help).
+Not run: anything on the Martinos cluster (real mri_synthseg vols CSV column names, real lumir10 label ids, Jay's existing $D/npy contents).

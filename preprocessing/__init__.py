@@ -10,10 +10,15 @@ Pipeline (manifest-driven; each step resumable):
 
 Output layout:
   <out_root>/<dataset>/<subject>[_ses-<session>][_<contrast>]/
-      image.nii.gz (float32 [0,1]), mask.nii.gz (uint8), labels_synthseg.nii.gz (uint16),
-      labels_<name>.nii.gz, affine_to_template.mat, [affine_to_template_world.txt],
-      meta.json, qc.json, qc.png, logs/, work/
-  <out_root>/<dataset>/{manifest_processed.csv, qc_summary.csv}   (written by qc-summary)
+      image.nii.gz (float32 [0,1]), labels_synthseg.nii.gz (uint16), labels_<name>.nii.gz,
+      affine_to_template.mat, [affine_to_template_world.txt], meta.json, qc.json,
+      synthseg_vols.csv, synthseg_qc.csv, logs/
+      optional (config outputs): mask.nii.gz (save_mask), qc.png (save_qc_png; or on demand
+      with qc-summary --png), work/ (keep_work; otherwise deleted once the row is done)
+      Without mask.nii.gz the mask is image > 0 (loses filled interior holes and
+      in-mask voxels normalized to 0, i.e. at/below the normalization lower bound).
+  <out_root>/<dataset>/{manifest_processed.csv, qc_summary.csv, qc_summary.json,
+      lr_asymmetry.csv}   (written by qc-summary)
   <out_root>/_tmp/   tool temp files when $TMPDIR is unusable (config tmp_dir)
 
 Runs with Python >= 3.8 (the cluster container tf10_nv.sif has Python 3.8.10,

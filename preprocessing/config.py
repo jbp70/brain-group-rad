@@ -100,7 +100,14 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "resample": {"antialias": True, "target_spacing_mm": 1.0, "min_spacing_ratio": 0.95},
     "synthseg": {"parc": True, "robust": True, "cpu": False, "threads": 8, "vol": True,
                  "qc": True, "extra_args": []},
-    "qc": {"png": True, "mad_threshold": 4.0},
+    # What stays on disk per subject (storage). work/ (intermediates, ~8 MB for LUMIR)
+    # is deleted once the row is fully done; mask.nii.gz and qc.png are optional
+    # because QC/export/qc-summary re-derive the mask as image > 0 (a subset of the
+    # saved mask: no filled holes, and in-mask voxels normalized to 0, i.e. at or
+    # below the normalization lower bound, drop out) and `qc-summary --png ...`
+    # renders PNGs on demand. qc.json is always written.
+    "outputs": {"keep_work": False, "save_mask": False, "save_qc_png": False},
+    "qc": {"mad_threshold": 4.0},
 }
 
 _BACKENDS = ("flirt", "ants")
@@ -167,6 +174,8 @@ def validate(cfg: Dict[str, Any]) -> None:
              "synthseg.threads must be a positive int")
     for name, t in cfg["mni_templates"].items():
         _require(isinstance(t, dict) and "image_1mm" in t, "mni_templates.%s needs image_1mm" % name)
+    for key, val in cfg["outputs"].items():
+        _require(isinstance(val, bool), "outputs.%s must be true or false" % key)
 
 
 def load_config(path: Optional[str] = None, threads: Optional[int] = None,
@@ -179,6 +188,9 @@ def load_config(path: Optional[str] = None, threads: Optional[int] = None,
         user = json.loads(text) if str(path).endswith(".json") else (yaml.safe_load(text) or {})
         if not isinstance(user, dict):
             raise ConfigError("%s: top level must be a mapping" % path)
+    if isinstance(user.get("qc"), Mapping) and "png" in user["qc"]:
+        raise ConfigError("%s: qc.png was replaced by outputs.save_qc_png (default false; render PNGs on "
+                          "demand with `qc-summary --png ...`); remove qc.png from the config" % path)
     cfg = deep_merge(DEFAULT_CONFIG, user)
     apply_overrides(cfg, threads=threads, synthseg_cpu=synthseg_cpu)
     validate(cfg)

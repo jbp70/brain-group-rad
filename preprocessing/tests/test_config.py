@@ -19,6 +19,20 @@ def test_defaults_and_overrides():
     assert DEFAULT_CONFIG["threads"] == 4  # defaults not mutated
 
 
+def test_storage_defaults_and_legacy_qc_png(tmp_path):
+    cfg = load_config(None)
+    assert cfg["outputs"] == {"keep_work": False, "save_mask": False, "save_qc_png": False}
+    assert load_config(EXAMPLE)["outputs"] == cfg["outputs"]
+    p = tmp_path / "c.yaml"
+    p.write_text(yaml.safe_dump({"qc": {"png": True}}))
+    with pytest.raises(ConfigError) as ei:
+        load_config(str(p))
+    assert "outputs.save_qc_png" in str(ei.value)
+    p.write_text(yaml.safe_dump({"outputs": {"save_mask": "yes"}}))
+    with pytest.raises(ConfigError):
+        load_config(str(p))
+
+
 def test_example_config_loads():
     cfg = load_config(EXAMPLE)
     assert cfg["registration"]["flirt"]["dof"] == 9

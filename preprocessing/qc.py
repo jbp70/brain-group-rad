@@ -1,16 +1,35 @@
-"""Quality control: per-subject metrics + PNG, and per-dataset summaries.
+"""Quality control: per-subject metrics + optional PNG, and per-dataset summaries.
 
-Per subject (qc.json, qc.png):
+Per subject (qc.json, always written; qc.png only with outputs.save_qc_png):
   shape, affine_match_final, intensity p1/p50/p99 in mask, frac_clipped_high,
   mask_volume_cc, n_labels_<name>, dice_mask_synthseg (mask vs synthseg>0),
-  dice_mask_template, ncc_to_template (inside the template mask), grid_mismatch.
+  dice_mask_template, ncc_to_template (inside the template mask), grid_mismatch,
+  mask_source. The mask is mask.nii.gz when it was saved (outputs.save_mask),
+  else image > 0 ("image>0"). That is a subset of the saved mask: normalization
+  clips to [0, 1] and zeroes outside the mask, so the derived mask loses filled
+  interior holes and every in-mask voxel normalized to 0 (original intensity at or
+  below the lower bound: <= 0 by default, the whole lower_percentile tail when that
+  is set). mask_volume_cc and the Dice values can therefore be slightly smaller.
 qc.png: 2x3 mid-slices -- row 1 subject image + mask contour (red) + SynthSeg
 boundaries (cyan); row 2 template + subject mask contour (registration check).
 
 Dataset summary (`qc-summary`): robust z = (x - median) / (1.4826 MAD) for
 OUTLIER_METRICS; |z| > mad_threshold flags the subject. Hard flags:
 grid_mismatch, affine_match_final false, synthseg with < 1 label, status !=
-completed. Writes qc_summary.csv and manifest_processed.csv.
+completed. Writes qc_summary.csv, qc_summary.json and manifest_processed.csv.
+
+Left/right check (when <subject>/synthseg_vols.csv exist): per dataset, the
+fraction of cases with SynthSeg Left volume > Right for thalamus, pallidum and
+lateral ventricle (expected mostly L > R) and hippocampus (expected mostly
+R > L) goes to lr_asymmetry.csv and qc_summary.json. If most of these
+structures go the unexpected way in a dataset with >= lr_min_cases cases, a
+WARNING is printed and "lr_reversed_warning" is set: the target grid's x-flip
+(build-target-grid --force-flip) is probably wrong. This is a population-level
+heuristic (individual subjects can be reversed); it says nothing per subject.
+
+PNGs on demand (needs --config for the template):
+    python -m preprocessing qc-summary --out-root /data/processed --dataset lumir --config cfg.yaml --png flagged
+    ... --png sample:20   (20 random rows, --png-seed)   ... --png all
 
     python -m preprocessing qc-summary --out-root /data/processed --dataset neurite_oasis
 """
@@ -19,6 +38,7 @@ import glob
 import json
 import logging
 import os
+import random
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -48,13 +68,27 @@ def _pearson(a: np.ndarray, b: np.ndarray) -> Optional[float]:
     return float((a * b).sum() / den) if den > 0 else None
 
 
+def load_mask(subject_dir: str, image: Optional[np.ndarray] = None) -> Tuple[np.ndarray, str]:
+    """(bool mask, source): mask.nii.gz if saved, else image.nii.gz > 0.
+
+    image > 0 drops filled interior holes and every in-mask voxel normalized to 0
+    (intensity <= the normalization lower bound), see the module docstring.
+    """
+    p = os.path.join(subject_dir, "mask.nii.gz")
+    if os.path.isfile(p):
+        return nifti.load_data(p, np.uint8)[0] > 0, "mask.nii.gz"
+    if image is None:
+        image = nifti.load_data(os.path.join(subject_dir, "image.nii.gz"))[0]
+    return np.asarray(image) > 0, "image>0"
+
+
 def compute_qc(subject_dir: str, template: np.ndarray, template_affine, template_mask: np.ndarray,
                tol: float = 1e-3, meta: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Metrics for one processed subject directory."""
     meta = meta or {}
     img_data, img = nifti.load_data(os.path.join(subject_dir, "image.nii.gz"))
-    mask = nifti.load_data(os.path.join(subject_dir, "mask.nii.gz"), np.uint8)[0] > 0
-    q: Dict[str, Any] = {"shape": list(img_data.shape)}
+    mask, mask_source = load_mask(subject_dir, img_data)
+    q: Dict[str, Any] = {"shape": list(img_data.shape), "mask_source": mask_source}
     q["affine_match_final"] = nifti.grid_matches(img_data.shape, img.affine, template.shape,
                                                  template_affine, tol)
     v = img_data[mask]
@@ -119,6 +153,139 @@ def write_qc_png(path: str, image: np.ndarray, mask: np.ndarray, template: np.nd
     plt.close(fig)
 
 
+def render_qc_png(subject_dir: str, template: np.ndarray) -> str:
+    """Write <subject_dir>/qc.png from the files on disk (mask via load_mask); returns the path."""
+    img = nifti.load_data(os.path.join(subject_dir, "image.nii.gz"))[0]
+    mask = load_mask(subject_dir, img)[0].astype(np.uint8)
+    lp = os.path.join(subject_dir, "labels_synthseg.nii.gz")
+    lab = nifti.load_data(lp, np.int32)[0] if os.path.isfile(lp) else None
+    out = os.path.join(subject_dir, "qc.png")
+    write_qc_png(out, img, mask, template, lab, title=os.path.basename(subject_dir))
+    return out
+
+
+# ---------------------------------------------------------------- left/right check
+# structure -> expected larger side in the healthy population.
+LR_STRUCTURES = [("thalamus", "left"), ("pallidum", "left"), ("lateral ventricle", "left"),
+                 ("hippocampus", "right")]
+
+
+def _norm_col(name: str) -> str:
+    return " ".join(name.lower().replace("-", " ").replace("_", " ").split())
+
+
+def _lr_columns(header: List[str], structure: str) -> Optional[Tuple[int, int]]:
+    """Column indices of (left, right) volumes in a SynthSeg vols CSV header."""
+    cols = {_norm_col(h): i for i, h in enumerate(header)}
+    out = []
+    for side in ("left", "right"):
+        idx = None
+        for cand in ("%s %s" % (side, structure), "%s %s proper" % (side, structure)):
+            if cand in cols:
+                idx = cols[cand]
+                break
+        if idx is None:
+            return None
+        out.append(idx)
+    return out[0], out[1]
+
+
+def read_lr_volumes(path: str) -> Dict[str, Tuple[float, float]]:
+    """{structure: (left, right)} from one SynthSeg --vol CSV (first data row); missing ones omitted."""
+    with open(path, "r", newline="", encoding="utf-8") as f:
+        rows = [r for r in csv.reader(f) if r]
+    if len(rows) < 2:
+        return {}
+    header, vals = rows[0], rows[1]
+    out = {}
+    for s, _ in LR_STRUCTURES:
+        idx = _lr_columns(header, s)
+        if idx is None:
+            continue
+        try:
+            out[s] = (float(vals[idx[0]]), float(vals[idx[1]]))
+        except (ValueError, IndexError):
+            continue
+    return out
+
+
+def check_left_right(subject_dirs: List[str], min_cases: int = 20, reversed_below: float = 0.4
+                     ) -> Dict[str, Any]:
+    """Population L/R asymmetry check over SynthSeg volumes.
+
+    For each structure, frac_left_larger = fraction of cases with Left > Right.
+    frac_as_expected is that fraction (or 1 - it for hippocampus). A structure
+    counts as reversed when frac_as_expected < reversed_below; the warning is
+    raised when more than half of the evaluated structures are reversed and
+    at least min_cases cases have volumes.
+    """
+    per: Dict[str, List[bool]] = {s: [] for s, _ in LR_STRUCTURES}
+    n_files = 0
+    for d in subject_dirs:
+        p = os.path.join(d, "synthseg_vols.csv")
+        if not os.path.isfile(p):
+            continue
+        vols = read_lr_volumes(p)
+        if vols:
+            n_files += 1
+        for s, (left, right) in vols.items():
+            if left != right:
+                per[s].append(left > right)
+    structures = []
+    n_rev = 0
+    n_eval = 0
+    for s, expected in LR_STRUCTURES:
+        v = per[s]
+        rec: Dict[str, Any] = {"structure": s, "expected_larger": expected, "n": len(v),
+                               "frac_left_larger": None, "frac_as_expected": None, "reversed": None}
+        if v:
+            fl = float(np.mean(v))
+            fe = fl if expected == "left" else 1.0 - fl
+            rec.update({"frac_left_larger": round(fl, 4), "frac_as_expected": round(fe, 4),
+                        "reversed": bool(fe < reversed_below)})
+            n_eval += 1
+            n_rev += int(fe < reversed_below)
+        structures.append(rec)
+    warning = bool(n_files >= min_cases and n_eval > 0 and n_rev > n_eval / 2.0)
+    return {"n_cases": n_files, "min_cases": int(min_cases), "reversed_below": float(reversed_below),
+            "n_structures_evaluated": n_eval, "n_structures_reversed": n_rev,
+            "lr_reversed_warning": warning, "evaluated": bool(n_files >= min_cases and n_eval > 0),
+            "structures": structures}
+
+
+def parse_png_mode(text: str) -> Tuple[str, int]:
+    """'none' | 'flagged' | 'all' | 'sample:N' -> (mode, N)."""
+    t = (text or "none").strip().lower()
+    if t in ("none", "flagged", "all"):
+        return t, 0
+    if t.startswith("sample:"):
+        try:
+            n = int(t.split(":", 1)[1])
+        except ValueError:
+            n = -1
+        if n > 0:
+            return "sample", n
+    raise ValueError("--png must be none, flagged, all or sample:N (N > 0), got %r" % text)
+
+
+def select_png_dirs(dataset_dir: str, mode: str, n: int = 0, seed: int = 0) -> List[str]:
+    """Subject dirs to render, using qc_summary.csv (written by summarize) for 'flagged'."""
+    dirs = [d for d in _subject_dirs(dataset_dir) if os.path.isfile(os.path.join(d, "image.nii.gz"))]
+    if mode == "none":
+        return []
+    if mode == "all":
+        return dirs
+    if mode == "sample":
+        k = min(n, len(dirs))
+        return sorted(random.Random(seed).sample(dirs, k))
+    flagged = set()
+    with open(os.path.join(dataset_dir, "qc_summary.csv"), "r", newline="", encoding="utf-8") as f:
+        for r in csv.DictReader(f):
+            if r.get("flagged") == "True":
+                flagged.add(r["subject_dir"])
+    return [d for d in dirs if os.path.basename(d) in flagged]
+
+
 def robust_z(values: List[Optional[float]]) -> np.ndarray:
     """Robust z-scores; None/NaN -> 0; MAD == 0 -> all zeros."""
     x = np.array([np.nan if v is None else float(v) for v in values], dtype=float)
@@ -138,8 +305,9 @@ def _subject_dirs(dataset_dir: str) -> List[str]:
     return sorted(os.path.dirname(p) for p in glob.glob(os.path.join(dataset_dir, "*", "meta.json")))
 
 
-def summarize(dataset_dir: str, mad_threshold: float = 4.0) -> Tuple[int, int]:
-    """Write qc_summary.csv and manifest_processed.csv; returns (n_subjects, n_flagged)."""
+def summarize(dataset_dir: str, mad_threshold: float = 4.0, lr_min_cases: int = 20,
+              lr_reversed_below: float = 0.4) -> Tuple[int, int]:
+    """Write qc_summary.csv/.json, lr_asymmetry.csv and manifest_processed.csv; returns (n_subjects, n_flagged)."""
     rows: List[Dict[str, Any]] = []
     for d in _subject_dirs(dataset_dir):
         with open(os.path.join(d, "meta.json"), "r", encoding="utf-8") as f:
@@ -200,10 +368,30 @@ def summarize(dataset_dir: str, mad_threshold: float = 4.0) -> Tuple[int, int]:
                 row[b] = "true" if row.get(b) else "false"
             d = r["dir"]
             aff = os.path.join(d, "affine_to_template.mat")
+            mpath = os.path.join(d, "mask.nii.gz")
             row.update({"status": r["meta"].get("status", "unknown"), "out_dir": d,
-                        "image": os.path.join(d, "image.nii.gz"), "mask": os.path.join(d, "mask.nii.gz"),
+                        "image": os.path.join(d, "image.nii.gz"),
+                        "mask": mpath if os.path.isfile(mpath) else "",   # empty: use image > 0
                         "labels": format_label_paths(label_files(d)),
                         "affine_to_template": aff if os.path.isfile(aff) else ""})
             w.writerow({c: row.get(c, "") for c in pcols})
+    lr = check_left_right([r["dir"] for r in rows if r["meta"].get("status") == "completed"],
+                          lr_min_cases, lr_reversed_below)
+    with open(os.path.join(dataset_dir, "lr_asymmetry.csv"), "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=["structure", "expected_larger", "n", "frac_left_larger",
+                                          "frac_as_expected", "reversed"])
+        w.writeheader()
+        w.writerows(lr["structures"])
+    summary = {"n_subjects": len(rows), "n_flagged": n_flag, "mad_threshold": mad_threshold,
+               "lr_check": lr, "lr_reversed_warning": lr["lr_reversed_warning"]}
+    tmp = os.path.join(dataset_dir, "qc_summary.json.tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2)
+    os.replace(tmp, os.path.join(dataset_dir, "qc_summary.json"))
+    if lr["lr_reversed_warning"]:
+        log.warning("LEFT/RIGHT LOOKS REVERSED in %s: %d of %d structures have the unexpected SynthSeg "
+                    "asymmetry over %d cases (see lr_asymmetry.csv). The target grid x-flip is probably "
+                    "wrong: rebuild it with the other --force-flip and reprocess.", dataset_dir,
+                    lr["n_structures_reversed"], lr["n_structures_evaluated"], lr["n_cases"])
     log.info("qc-summary %s: %d subjects, %d flagged", dataset_dir, len(rows), n_flag)
     return len(rows), n_flag

@@ -18,6 +18,13 @@ over every plausible crop/pad plus a margin. The corrected affine is
 If the best candidate does not beat the runner-up by ``min_margin`` NCC, the
 search refuses (GridAmbiguityError; the CLI exits non-zero) and writes only
 target_grid_candidates.json; verify independently, then use force_flip.
+The MNI brain is nearly symmetric, so the x flip is often ambiguous (LUMIR:
+NCC 0.97107 no-flip vs 0.97127 flip). Verify with organizer labels that know
+the sides (LUMIR2025 SanityCheckLabelsTr, SLANT ids: 47/48 = Right/Left
+hippocampus) or with the population left/right SynthSeg asymmetry check of
+`qc-summary`. For LUMIR both showed that the flip is REQUIRED (subject left =
+low voxel x): use --force-flip yes. Voxel data is never changed; only the
+affine stamped on the outputs differs.
 
 Outputs in out_dir: target_grid.json, template_lumirgrid.nii.gz (MNI brain on
 the corrected grid), template_lumirgrid_mask.nii.gz, lumir_mean.nii.gz.
@@ -303,8 +310,12 @@ def build_target_grid(lumir_paths: Sequence[str], mni_path: str, out_dir: str, c
             json.dump(_jsonable(info), f, indent=2)
         raise GridAmbiguityError(
             "ambiguous LUMIR orientation: best %s (ncc %.5f) beats %s (ncc %.5f) by only %.5f < min_margin %.5f. "
-            "Candidates written to %s. Verify the orientation independently (e.g. view a LUMIR image next to its "
-            "source scan, or check a known asymmetry), then rerun with --force-flip yes|no."
+            "Candidates written to %s. The image correlation cannot tell left from right here; verify "
+            "independently before choosing --force-flip yes|no: (a) organizer labels with known sides (LUMIR2025 "
+            "SanityCheckLabelsTr: Right-* structures must land on the subject's right in the corrected affine), "
+            "or (b) process ~20+ cases with each candidate and run qc-summary: its left/right SynthSeg "
+            "asymmetry check warns when the population pattern is reversed. For LUMIR this was settled on "
+            "2026-10-15: --force-flip yes."
             % (valid[0]["name"], valid[0]["ncc"], valid[1]["name"], valid[1]["ncc"], margin, min_margin, cand_path))
     t = np.asarray(chosen["voxel_map"], float)
     if use_subvoxel and "subvoxel_shift" in chosen:

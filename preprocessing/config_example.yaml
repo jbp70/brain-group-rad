@@ -80,4 +80,12 @@ resample: {antialias: true, target_spacing_mm: 1.0, min_spacing_ratio: 0.95}
 
 synthseg: {parc: true, robust: true, cpu: false, threads: 8, vol: true, qc: true, extra_args: []}
 
-qc: {png: true, mad_threshold: 4.0}
+# Per-subject files kept on disk. Defaults keep only image, labels_*, meta/qc json,
+# logs (~9 MB/case for LUMIR instead of ~17 MB):
+#   keep_work: false    delete work/ once the row is fully done (CLI --keep-work keeps it)
+#   save_mask: false    QC/export/qc-summary use image > 0 instead (loses filled holes and
+#                       in-mask voxels normalized to 0, i.e. at/below the lower bound)
+#   save_qc_png: false  render on demand: qc-summary --config <cfg> --png flagged|all|sample:N
+outputs: {keep_work: false, save_mask: false, save_qc_png: false}
+
+qc: {mad_threshold: 4.0}

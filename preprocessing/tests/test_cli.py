@@ -10,7 +10,7 @@ from preprocessing.manifest import ManifestRow
 from . import phantoms as ph
 
 COMMANDS = ["check-tools", "build-manifest", "build-target-grid", "run", "synthseg", "qc-summary",
-            "export-npy", "n-chunks"]
+            "export-npy", "cleanup", "n-chunks"]
 
 
 @pytest.mark.parametrize("cmd", COMMANDS)

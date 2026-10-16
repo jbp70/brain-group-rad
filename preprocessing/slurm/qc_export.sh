@@ -35,7 +35,7 @@ OUT_ROOT=${OUT_ROOT:-$PROJ/data/processed}
 DATASET=${DATASET:-lumir}
 DO_EXPORT=${DO_EXPORT:-0}
 EXPORT_ROOT=${EXPORT_ROOT:-$PROJ/data/npy}
-IMAGE_DTYPE=${IMAGE_DTYPE:-float32}
+IMAGE_DTYPE=${IMAGE_DTYPE:-float16}
 # Container settings (BGR_SIF, BGR_BINDS, BGR_TMPDIR, ...) are read by
 # run_in_container.sh; defaults are the Martinos values, TMPDIR=/scratch/$SLURM_JOB_ID.
 export USE_GPU=${USE_GPU:-0}

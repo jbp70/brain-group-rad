@@ -47,7 +47,7 @@ export MPLBACKEND=Agg
 export PYTHONDONTWRITEBYTECODE=1
 python -m pytest preprocessing/tests -q -p no:cacheprovider "$@"
 python -m preprocessing --help >/dev/null
-for c in check-tools build-manifest build-target-grid run synthseg qc-summary export-npy n-chunks; do
+for c in check-tools build-manifest build-target-grid run synthseg qc-summary export-npy cleanup n-chunks; do
     python -m preprocessing "$c" --help >/dev/null
 done
 echo "ALL CHECKS PASSED (${ENV_NAME})"

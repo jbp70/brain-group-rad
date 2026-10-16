@@ -354,7 +354,7 @@ $RIC build-manifest --dataset lumir --root $LUMIR --out $D/manifests/lumir.csv \
 head -3 $D/manifests/lumir.csv
 
 # (4) Target grid from imagesVal, then check the overlay
-$RIC build-target-grid --config $CFG --lumir-root $LUMIR --split val --out-dir $D/target_grid --force-flip no
+$RIC build-target-grid --config $CFG --lumir-root $LUMIR --split val --out-dir $D/target_grid --force-flip yes
 #   exit 2 = ambiguous x-flip: inspect target_grid_candidates.json, rerun with --force-flip yes|no
 #   freeview needs X: run it on the host (glacier), not in the container
 freeview $D/target_grid/lumir_mean.nii.gz $D/target_grid/template_lumirgrid.nii.gz:colormap=heat:opacity=0.4
@@ -386,3 +386,101 @@ For a LUMIR row only SynthSeg runs a tool (no strip/N4/FLIRT). To exercise FLIRT
 - **`python` inside the image**: the wrapper calls `python` (fact: Python 3.8.10). Set `BGR_PYTHON=python3` if `python` is not on the container PATH.
 - **Wrapper on the real hosts**: only tested with a fake `singularity`. The real `singularity exec` passing the host env, and `env`/`bash` existing in the image, are assumed.
 - **SLURM**: the templates are still syntax/policy-checked only.
+
+## Storage and left/right update (2026-10-15)
+
+### Left/right: the LUMIR grid needs the x flip
+
+build-target-grid could not decide the x flip from image correlation on LUMIR (NCC 0.97107 no flip vs 0.97127 flip; margin 0.0002, below the 0.01 minimum), and the validation run used `--force-flip no`. Two independent checks show that choice is wrong:
+
+- Organizer labels (`LUMIR2025/SanityCheckLabelsTr`, SLANT/Neuromorphometrics ids, e.g. 47 = Right and 48 = Left Hippocampus) put Right structures at high voxel x (~89–105) and Left at low x (~51–68) in all 5 cases. Our SynthSeg, with the no-flip header, put Left-Hippocampus (17) at x=104 and Right (53) at x=52.
+- SynthSeg volume asymmetries over the 49 cases run against well-known population asymmetries. Fraction of cases where our "Left" was larger: thalamus 0.00, pallidum 0.02, lateral ventricle 0.20, hippocampus 0.76 (expected: mostly L > R for the first three, mostly R > L for hippocampus).
+
+So in LUMIR voxel space the subject's left is at low x. The correct grid is the flipped candidate `-x+y+z` (offset [9, -2, -20]; corrected affine x-row [1, 0, 0, ...], RAS-like in x): use `--force-flip yes`. Voxel data is never changed, only the affine stamped on the outputs.
+
+- `qc-summary` now runs this check automatically when `synthseg_vols.csv` files exist. It writes `lr_asymmetry.csv` and `qc_summary.json` (`lr_reversed_warning`), and prints `WARNING: LEFT/RIGHT LOOKS REVERSED` when more than half of the 4 structures show the unexpected pattern in a dataset with at least 20 cases (`--lr-min-cases`, `--lr-reversed-below 0.4`). It is a population heuristic, not a per-subject test.
+- `build-target-grid` (ambiguity error, `--force-flip` help and the printed output when the margin is small) now recommends checking with organizer labels or this asymmetry check before choosing `--force-flip`.
+
+### New storage defaults (config `outputs`)
+
+| Key | Default | Effect |
+|---|---|---|
+| `outputs.keep_work` | `false` | `work/` is deleted once a row is fully done: status `completed` and every requested step done, including SynthSeg when it is in `run --steps`. The `synthseg` batch writes and re-reads `labels_synthseg.nii.gz`, refreshes QC, then removes `work/` (its raw output) for completed rows. `--keep-work` (run, synthseg) keeps it; `run --clean-work` forces deletion even if the config keeps it. Partial/failed rows keep `work/`. |
+| `outputs.save_mask` | `false` | `mask.nii.gz` is not written (still computed and used for normalization). QC, export and qc-summary use `image > 0` instead (`qc.json` → `mask_source`). That is a subset of the saved mask: normalization clips to [0, 1], so it loses filled interior holes and every in-mask voxel normalized to 0 (intensity at or below the lower bound: <= 0 by default, the whole `lower_percentile` tail when that is set). |
+| `outputs.save_qc_png` | `false` | `qc.png` is not written; `qc.json` always is. |
+
+- Resume still works after cleanup: meta.json `work_cleaned` lets `run` skip finished rows, and the SynthSeg batch only needs `image.nii.gz`. Rerunning a single step that needs `work/` (e.g. `--steps normalize --overwrite`) fails with a hint to rerun all steps with `--overwrite`.
+- The old config key `qc.png` now raises a config error that names `outputs.save_qc_png`. Re-copy `config_example.yaml` or delete that key from `$CFG`.
+- LUMIR per case: ~16.6 MB before, ~7.8 MB of NIfTI masters now (image 7.2 MB, synthseg 0.55 MB, plus lumir10 0.4 MB where labels exist, and small json/csv/logs).
+
+PNGs on demand and cleanup of existing outputs:
+
+```bash
+$RIC qc-summary --out-root $D/processed --dataset lumir --config $CFG --png flagged    # or all, sample:20 [--png-seed 0]
+$RIC cleanup --out-root $D/processed --dataset lumir --work --mask --qc-png --dry-run  # prints paths + bytes
+$RIC cleanup --out-root $D/processed --dataset lumir --work --mask --qc-png
+```
+
+`cleanup` only deletes `<subject>/work/`, `mask.nii.gz` and `qc.png`. It refuses rows that are not `completed` or that have any step not `done` (exit status 3), and never follows symlinks.
+
+### export-npy defaults
+
+- The image is float16 (`--image-dtype float32` to keep full precision).
+- Labels are remapped to contiguous ids with a fixed LUT per label name (`preprocessing/luts.py`):
+  - `synthseg`: the 32 structures of SynthSeg's labels table plus DK parcels 1001–1035/2001–2035, 103 ids → uint8;
+  - `lumir10` 0..10, `seg4` 0..4, `seg35` 0..35 are identity LUTs whose values are unverified.
+- Any value outside a LUT fails the export loudly. The LUTs go to `label_luts.json`; `export_manifest.csv` records `image_dtype`, `label_dtypes` and `label_luts`. uint16 is used when a LUT has more than 256 ids, and `--no-remap-labels` keeps the raw uint16 ids.
+- No `mask.npy` by default (`--include-mask` derives it as above).
+- About 21 MB/case uncompressed (image 13.8 + synthseg 6.9 MB, +6.9 MB for lumir10) vs ~41 MB before.
+- `slurm/qc_export.sh` defaults to `IMAGE_DTYPE=float16`.
+- Without `--overwrite`, an existing `.npy` is kept only if its dtype and shape match this run; otherwise the export fails and names the file. Kept files are counted in a warning. Their contents aren't re-checked, so after reprocessing pass `--overwrite` or delete the old export folder.
+
+### LUMIR builder
+
+- `LUMIRMRI_<id>_0001.nii.gz` (LUMIR25 extra validation cases, non-T1) now get contrast `unknown0001` and subject `LUMIRMRI_<id>_0001`, so their folders are `LUMIRMRI_<id>_0001_unknown0001`. `_0000` files keep contrast `T1w` and subject `LUMIRMRI_<id>`.
+- The default image glob is `**/images*/LUMIRMRI_*_000[0-9].nii.gz`. It is restricted to `images*` folders because `simplelabelsVal`/`SanityCheckLabelsTr` reuse the image names. The old default `**/LUMIRMRI_*_0000.nii.gz` would have picked those files up as images; build-target-grid's default had the same problem, and `--split val` avoided it.
+- `--label-glob 'simplelabelsVal/{id}*.nii.gz'` never matches another channel's label file. `{name}` (the image stem) is available too.
+- LUMIR rows skip registration, so no contrast-dependent template choice is made; SynthSeg and normalization treat both channels the same. build-target-grid still averages only `_0000`.
+
+### Rerun the validation set (on a compute node or glacier; never on mlsc-login)
+
+```bash
+srun -A qtim -p rtx8000 --gpus 1 --time=02:00:00 --mem=32G --cpus-per-task=3 --ntasks-per-node=1 --pty bash
+# (glacier instead: nvidia-smi, then export CUDA_VISIBLE_DEVICES=<one free GPU>)
+PROJ=/autofs/space/crater_001/users/jn85/BrainRegProjects/GroupwiseReg
+D=$PROJ/data; LUMIR=/autofs/space/crater_001/datasets/public/LUMIR2025; CFG=$D/preproc_config.yaml
+RIC="bash $PROJ/brain-group-rad/preprocessing/run_in_container.sh"
+cd $PROJ/brain-group-rad && git pull
+cp preprocessing/config_example.yaml $CFG      # or just delete the old `qc: {png: ...}` key from $CFG
+
+# 1. Target grid with the x flip (prints the corrected affine: x-row should start 1, 0, 0)
+$RIC build-target-grid --config $CFG --lumir-root $LUMIR --split val --out-dir $D/target_grid --force-flip yes
+
+# 2. Old validation outputs were stamped with the wrong affine; they are regenerable.
+#    This also removes any LUMIR training rows already processed (same lumir folder);
+#    they carry the wrong affine too, so that is intended. The old .npy export holds
+#    float32 images and raw L/R-swapped SynthSeg labels, so it goes as well. The old
+#    npy/template/ (template.npy float32, template_mask.npy) was sampled on the
+#    unflipped grid; a stale float32 template.npy would also abort step 5.
+rm -rf $D/processed/lumir $D/processed/_synthseg_batches $D/npy/lumir $D/npy/template
+
+# 3. Manifest with both channels and the 10-class labels (check: _0001 rows have contrast unknown0001)
+$RIC build-manifest --dataset lumir --root $LUMIR --out $D/manifests/lumir_val.csv \
+    --image-glob 'imagesVal/LUMIRMRI_*_000[0-9].nii.gz' --label-glob 'simplelabelsVal/{id}*.nii.gz'
+tail -n +2 $D/manifests/lumir_val.csv | cut -d, -f4 | sort | uniq -c   # T1w / unknown0001 counts
+grep -c lumir10 $D/manifests/lumir_val.csv                              # rows with labels
+
+# 4. Pipeline, SynthSeg, QC with the left/right check (expected: "left/right pattern OK", no WARNING;
+#    roughly thalamus/pallidum frac_left_larger near 1, lateral ventricle ~0.8, hippocampus ~0.2-0.3)
+$RIC run --config $CFG --manifest $D/manifests/lumir_val.csv --out-root $D/processed --threads 3
+$RIC synthseg --config $CFG --manifest $D/manifests/lumir_val.csv --out-root $D/processed --threads 3
+$RIC qc-summary --out-root $D/processed --dataset lumir --config $CFG --png sample:5
+du -sh $D/processed/lumir; ls $D/processed/lumir/LUMIRMRI_3454_T1w/   # no work/, mask.nii.gz; qc.png only for the 5 sampled
+
+# 5. Export (float16 image, uint8 remapped labels)
+$RIC export-npy --out-root $D/processed --export-root $D/npy --dataset lumir --include-template --config $CFG
+head -3 $D/npy/export_manifest.csv; du -sh $D/npy/lumir
+exit
+```
+
+If export stops with `label values [...] are not in the fixed LUT (LUMIR25 coarse labels ...)`, the lumir10 ids aren't 0..10. Send me the values; `--no-remap-labels` works in the meantime.

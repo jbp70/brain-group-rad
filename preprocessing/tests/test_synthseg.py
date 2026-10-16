@@ -76,3 +76,24 @@ def test_run_with_synthseg_step_and_dry_run(tmp_path, fake_tools, config_file, c
     meta = json.load(open(os.path.join(d, "meta.json")))
     assert meta["status"] == "completed" and meta["steps"]["synthseg"]["status"] == "done"
     assert os.path.isfile(os.path.join(d, "labels_synthseg.nii.gz"))
+    # synthseg in the plan: work/ (incl. the raw output) is deleted only after synthseg + qc.
+    assert not os.path.exists(os.path.join(d, "work")) and meta["work_cleaned"]
+    assert json.load(open(os.path.join(d, "qc.json")))["n_labels_synthseg"] >= 1
+
+
+def test_batch_keep_work_and_partial_rows_keep_work(tmp_path, fake_tools, config_file):
+    rows = [ds.lumir_row(str(tmp_path / "in")), ds.lumir_row(str(tmp_path / "in"), "LUMIRMRI_0002")]
+    man = ds.write_rows(str(tmp_path / "m.csv"), rows)
+    out = str(tmp_path / "out")
+    assert main(["run", "--config", config_file, "--manifest", man, "--out-root", out, "--rows", "0"]) == 0
+    # Row 1 stops before qc -> "partial".
+    assert main(["run", "--config", config_file, "--manifest", man, "--out-root", out, "--rows", "1",
+                 "--steps", "strip,resample,normalize"]) == 0
+    d0, d1 = [os.path.join(out, r.dataset, subject_dir_name(r)) for r in rows]
+    assert main(["synthseg", "--config", config_file, "--manifest", man, "--out-root", out, "--rows", "0",
+                 "--keep-work"]) == 0
+    assert os.path.isfile(os.path.join(d0, "work", "synthseg_raw.nii.gz"))
+    assert main(["synthseg", "--config", config_file, "--manifest", man, "--out-root", out, "--rows", "1"]) == 0
+    m1 = json.load(open(os.path.join(d1, "meta.json")))
+    assert m1["status"] == "partial" and m1["steps"]["synthseg"]["status"] == "done"
+    assert os.path.isfile(os.path.join(d1, "work", "synthseg_raw.nii.gz"))  # not done -> kept

@@ -30,6 +30,34 @@ def test_lumir(tmp_path):
     assert [r.split for r in rows] == ["train", "train", "val"]
     assert all(r.skull_stripped and r.in_template_space and r.bias_corrected for r in rows)
     assert list(rows[2].label_paths) == ["lumir10"] and not rows[0].label_paths
+    assert all(r.contrast == "T1w" for r in rows)
+
+
+def test_lumir_extra_channel_contrast_subject_and_labels(tmp_path):
+    from preprocessing.config import contrast_key, load_config
+    from preprocessing.manifest import subject_dir_name
+    for f in ("LUMIRMRI_3454_0000", "LUMIRMRI_4033_0001", "LUMIRMRI_4033_0000", "LUMIRMRI_4040_0001"):
+        _nii(tmp_path / "imagesVal" / ("%s.nii.gz" % f))
+    _nii(tmp_path / "imagesVal" / "other_0001.nii.gz")          # not LUMIR naming
+    (tmp_path / "imagesVal" / "LUMIRMRI_5000_0000.json").write_text("{}")  # not NIfTI
+    for f in ("LUMIRMRI_3454_0000", "LUMIRMRI_4033_0001", "LUMIRMRI_4040_0001"):
+        _nii(tmp_path / "simplelabelsVal" / ("%s.nii.gz" % f))
+    rows = BUILDERS["lumir"].build(str(tmp_path), _args("lumir", ["--label-glob", "simplelabelsVal/{id}*.nii.gz"]))
+    by = {r.subject: r for r in rows}
+    assert len(rows) == 4 and all("/imagesVal/" in r.image_path for r in rows)  # label folder not scanned
+    assert sorted(by) == ["LUMIRMRI_3454", "LUMIRMRI_4033", "LUMIRMRI_4033_0001", "LUMIRMRI_4040_0001"]
+    assert by["LUMIRMRI_3454"].contrast == "T1w" and by["LUMIRMRI_4033"].contrast == "T1w"
+    assert by["LUMIRMRI_4033_0001"].contrast == "unknown0001"
+    assert subject_dir_name(by["LUMIRMRI_4033_0001"]) == "LUMIRMRI_4033_0001_unknown0001"
+    assert by["LUMIRMRI_3454"].label_paths["lumir10"].endswith("simplelabelsVal/LUMIRMRI_3454_0000.nii.gz")
+    assert by["LUMIRMRI_4033_0001"].label_paths["lumir10"].endswith("simplelabelsVal/LUMIRMRI_4033_0001.nii.gz")
+    assert not by["LUMIRMRI_4033"].label_paths       # never the _0001 channel's label
+    assert all(r.in_template_space and r.split == "val" for r in rows)
+    # {name} = image stem placeholder works as well.
+    rows = BUILDERS["lumir"].build(str(tmp_path), _args("lumir", ["--label-glob", "simplelabelsVal/{name}.nii.gz"]))
+    assert sum(1 for r in rows if r.label_paths) == 3
+    # The neutral contrast tag maps to the default template key (never used: LUMIR skips registration).
+    assert contrast_key(load_config(None), "unknown0001") == "T1"
 
 
 def test_neurite_oasis_ignores_aligned(tmp_path):

@@ -31,18 +31,24 @@ def _meta(d):
         return json.load(f)
 
 
-def _check_outputs(d, labels=()):
+def _check_outputs(d, labels=(), saved=False):
+    """Check the row outputs; saved=True: mask.nii.gz/qc.png/work expected (outputs.* true)."""
     img, im = nifti.load_data(os.path.join(d, "image.nii.gz"))
-    mask, mm = nifti.load_data(os.path.join(d, "mask.nii.gz"), np.uint8)
     assert img.shape == ph.TARGET_SHAPE and im.get_data_dtype() == np.float32
-    assert mm.get_data_dtype() == np.uint8 and set(np.unique(mask)) <= {0, 1}
     np.testing.assert_allclose(im.affine, ph.target_affine(), atol=1e-4)
-    np.testing.assert_allclose(mm.affine, ph.target_affine(), atol=1e-4)
+    if saved:
+        mask, mm = nifti.load_data(os.path.join(d, "mask.nii.gz"), np.uint8)
+        assert mm.get_data_dtype() == np.uint8 and set(np.unique(mask)) <= {0, 1}
+        np.testing.assert_allclose(mm.affine, ph.target_affine(), atol=1e-4)
+    else:
+        mask = (img > 0).astype(np.uint8)
+        for f in ("mask.nii.gz", "qc.png"):
+            assert not os.path.exists(os.path.join(d, f)), f
     assert img.min() >= 0 and img.max() == pytest.approx(1.0) and np.all(img[mask == 0] == 0)
     for name in labels:
         lab, li = nifti.load_data(os.path.join(d, "labels_%s.nii.gz" % name), np.int64)
         assert li.get_data_dtype() == np.uint16 and lab.shape == ph.TARGET_SHAPE
-    for f in ("meta.json", "qc.json", "qc.png"):
+    for f in ("meta.json", "qc.json") + (("qc.png",) if saved else ()):
         assert os.path.isfile(os.path.join(d, f)), f
     return img, mask
 
@@ -117,8 +123,9 @@ def test_neurite_row_flirt(tmp_path, fake_tools, config_file, mni_files):
     assert "n4" not in meta["steps"] and meta["steps"]["register"]["status"] == "done"
 
 
-def test_flirt_world_shift_is_composed_once(tmp_path, fake_tools, config_file, monkeypatch):
+def test_flirt_world_shift_is_composed_once(tmp_path, fake_tools, target_dir, mni_files, monkeypatch):
     monkeypatch.setenv("FAKE_FLIRT_SHIFT", "2,0,0")
+    config_file = write_config(tmp_path / "c.yaml", target_dir, mni_files, outputs={"save_mask": True})
     row = ds.neurite_row(str(tmp_path / "in"))
     man = ds.write_rows(str(tmp_path / "m.csv"), [row])
     out = str(tmp_path / "out")
@@ -135,7 +142,7 @@ def test_ultracortex_row_strip_n4_antialias(tmp_path, fake_tools, config_file):
     row = ds.ultracortex_row(str(tmp_path / "in"))
     man = ds.write_rows(str(tmp_path / "m.csv"), [row])
     out = str(tmp_path / "out")
-    assert _run(config_file, man, out) == 0
+    assert _run(config_file, man, out, "--keep-work") == 0
     assert ds.calls_by_tool(fake_tools.calls()) == {"mri_synthstrip": 1, "N4BiasFieldCorrection": 1, "flirt": 3}
     d = _sd(out, row)
     assert os.path.basename(d) == "sub-01_ses-1_T1w"
@@ -187,29 +194,86 @@ def test_dry_run_prints_and_creates_nothing(tmp_path, fake_tools, config_file, c
     assert "PY strip(derived mask)" in text and "PY normalize" in text and "PY resample(antialias" in text
 
 
-def test_resume_overwrite_and_clean_work(tmp_path, fake_tools, config_file):
+def test_resume_overwrite_and_clean_work(tmp_path, fake_tools, target_dir, mni_files):
     rows = [ds.neurite_row(str(tmp_path / "in")), ds.ultracortex_row(str(tmp_path / "in"))]
     man = ds.write_rows(str(tmp_path / "m.csv"), rows)
     out = str(tmp_path / "out")
-    assert _run(config_file, man, out) == 0
+    config_file = write_config(tmp_path / "c.yaml", target_dir, mni_files)
+    assert _run(config_file, man, out, "--keep-work") == 0
     n = len(fake_tools.calls())
-    assert _run(config_file, man, out) == 0
+    assert _run(config_file, man, out, "--keep-work") == 0
     assert len(fake_tools.calls()) == n  # everything skipped
     # Only one step missing -> only that step reruns.
     os.remove(os.path.join(_sd(out, rows[1]), "work", "n4.nii.gz"))
-    assert _run(config_file, man, out, "--rows", "1") == 0
+    assert _run(config_file, man, out, "--rows", "1", "--keep-work") == 0
     new = fake_tools.calls()[n:]
     assert [c["tool"] for c in new] == ["N4BiasFieldCorrection"]
     n = len(fake_tools.calls())
-    assert _run(config_file, man, out, "--rows", "0", "--overwrite") == 0
+    assert _run(config_file, man, out, "--rows", "0", "--overwrite", "--keep-work") == 0
     assert len(fake_tools.calls()) == n + 4
-    n = len(fake_tools.calls())
-    assert _run(config_file, man, out, "--rows", "0", "--overwrite", "--clean-work") == 0
+    assert os.path.isdir(os.path.join(_sd(out, rows[0]), "work"))
+    # --clean-work forces deletion even when the config keeps work/.
+    keep_cfg = write_config(tmp_path / "k.yaml", target_dir, mni_files, outputs={"keep_work": True})
+    assert _run(keep_cfg, man, out, "--rows", "0", "--overwrite", "--clean-work") == 0
     d0 = _sd(out, rows[0])
     assert not os.path.isdir(os.path.join(d0, "work")) and _meta(d0)["work_cleaned"]
     n = len(fake_tools.calls())
     assert _run(config_file, man, out, "--rows", "0") == 0
     assert len(fake_tools.calls()) == n
+    with pytest.raises(SystemExit):
+        _run(config_file, man, out, "--keep-work", "--clean-work")
+
+
+def test_default_storage_cleans_work_and_resumes(tmp_path, fake_tools, config_file):
+    rows = [ds.lumir_row(str(tmp_path / "in")), ds.neurite_row(str(tmp_path / "in"))]
+    man = ds.write_rows(str(tmp_path / "m.csv"), rows)
+    out = str(tmp_path / "out")
+    assert _run(config_file, man, out) == 0
+    for r in rows:
+        d = _sd(out, r)
+        _check_outputs(d, list(r.label_paths))   # no mask.nii.gz, no qc.png
+        assert not os.path.exists(os.path.join(d, "work"))
+        meta = _meta(d)
+        assert meta["work_cleaned"] and meta["mask_saved"] is False and meta["status"] == "completed"
+        q = json.load(open(os.path.join(d, "qc.json")))
+        assert q["mask_source"] == "image>0" and q["dice_mask_template"] > 0.85
+    n = len(fake_tools.calls())
+    assert _run(config_file, man, out) == 0
+    assert len(fake_tools.calls()) == n  # resume after cleanup: nothing redone
+    # SynthSeg batch after work/ is gone: needs only image.nii.gz, cleans its own raw output.
+    assert main(["synthseg", "--config", config_file, "--manifest", man, "--out-root", out]) == 0
+    for r in rows:
+        d = _sd(out, r)
+        assert os.path.isfile(os.path.join(d, "labels_synthseg.nii.gz"))
+        assert not os.path.exists(os.path.join(d, "work"))
+        meta = _meta(d)
+        assert meta["steps"]["synthseg"]["status"] == "done" and meta["work_cleaned"]
+        assert json.load(open(os.path.join(d, "qc.json")))["dice_mask_synthseg"] > 0.9
+    n = len(fake_tools.calls())
+    assert _run(config_file, man, out) == 0
+    assert main(["synthseg", "--config", config_file, "--manifest", man, "--out-root", out]) == 0
+    assert len(fake_tools.calls()) == n
+    # Rerunning a single step that needs work/ explains how to recover.
+    assert _run(config_file, man, out, "--rows", "1", "--steps", "normalize", "--overwrite") == 1
+    assert "work/ was deleted" in _meta(_sd(out, rows[1]))["error"]
+
+
+def test_saved_mask_png_and_kept_work(tmp_path, fake_tools, target_dir, mni_files):
+    cfg = write_config(tmp_path / "c.yaml", target_dir, mni_files,
+                       outputs={"keep_work": True, "save_mask": True, "save_qc_png": True})
+    row = ds.lumir_row(str(tmp_path / "in"))
+    man = ds.write_rows(str(tmp_path / "m.csv"), [row])
+    out = str(tmp_path / "out")
+    assert _run(cfg, man, out) == 0
+    d = _sd(out, row)
+    _check_outputs(d, ["lumir10"], saved=True)
+    assert os.path.isfile(os.path.join(d, "work", "stripped.nii.gz"))
+    assert json.load(open(os.path.join(d, "qc.json")))["mask_source"] == "mask.nii.gz"
+    # Switching save_mask off and rerunning normalize removes the now-stale mask.
+    cfg2 = write_config(tmp_path / "c2.yaml", target_dir, mni_files, outputs={"keep_work": True})
+    assert _run(cfg2, man, out, "--steps", "normalize,qc", "--overwrite") == 0
+    assert not os.path.exists(os.path.join(d, "mask.nii.gz"))
+    assert json.load(open(os.path.join(d, "qc.json")))["mask_source"] == "image>0"
 
 
 def _write_meta(d, meta):
@@ -217,7 +281,8 @@ def _write_meta(d, meta):
         json.dump(meta, f)
 
 
-def test_interrupted_step_with_outputs_reruns(tmp_path, fake_tools, config_file):
+def test_interrupted_step_with_outputs_reruns(tmp_path, fake_tools, target_dir, mni_files):
+    config_file = write_config(tmp_path / "keep.yaml", target_dir, mni_files, outputs={"keep_work": True})
     row = ds.ultracortex_row(str(tmp_path / "in"))
     man = ds.write_rows(str(tmp_path / "m.csv"), [row])
     out = str(tmp_path / "out")
@@ -313,6 +378,8 @@ def test_steps_subset_and_missing_inputs(tmp_path, fake_tools, config_file):
     assert ds.calls_by_tool(fake_tools.calls()) == {"mri_synthstrip": 1}
     d = _sd(out, row)
     assert not os.path.isfile(os.path.join(d, "image.nii.gz"))
+    assert _meta(d)["status"] == "partial"
+    assert os.path.isfile(os.path.join(d, "work", "stripped.nii.gz"))  # partial rows keep work/
     assert _run(config_file, man, out, "--steps", "register") == 1  # n4 output missing
     assert "missing inputs" in _meta(d)["error"]
     with pytest.raises(SystemExit):

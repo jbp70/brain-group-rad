@@ -6,9 +6,14 @@ Commands:
   build-target-grid  estimate the LUMIR voxel -> MNI world mapping; write template_lumirgrid
   run                per-row pipeline (reorient/strip/n4/register/resample/normalize[/synthseg]/qc)
   synthseg           SynthSeg in batch mode over processed rows (one mri_synthseg call)
-  qc-summary         per-dataset QC table with outlier flags + manifest_processed.csv
-  export-npy         processed NIfTI -> .npy (parallel layout)
+  qc-summary         per-dataset QC table with outlier flags, left/right asymmetry check,
+                     manifest_processed.csv; optional on-demand qc.png (--png)
+  export-npy         processed NIfTI -> .npy (float16 image, uint8 LUT-remapped labels)
+  cleanup            delete work/, mask.nii.gz and/or qc.png of completed rows (--dry-run first)
   n-chunks           number of SLURM array tasks for a manifest and chunk size
+
+Storage defaults (config `outputs`): work/ is deleted when a row is done,
+mask.nii.gz and qc.png are not written (image > 0 is used as the mask later).
 
 On the Martinos cluster/glacier, run inside the tf10_nv.sif container through
 the wrapper (same arguments; it sets the FreeSurfer/FSL/ANTs env and TMPDIR):
@@ -23,8 +28,9 @@ Typical sequence (repo root as working dir, or via the wrapper from anywhere):
   python -m preprocessing run --config cfg.yaml --manifest lumir.csv --out-root /data/processed --rows 0 --dry-run
   python -m preprocessing run --config cfg.yaml --manifest lumir.csv --out-root /data/processed --start 0 --end 50
   python -m preprocessing synthseg --config cfg.yaml --manifest lumir.csv --out-root /data/processed --start 0 --end 50
-  python -m preprocessing qc-summary --out-root /data/processed --dataset lumir
+  python -m preprocessing qc-summary --out-root /data/processed --dataset lumir [--config cfg.yaml --png flagged]
   python -m preprocessing export-npy --out-root /data/processed --export-root /data/npy
+  python -m preprocessing cleanup --out-root /data/processed --dataset lumir --work --mask --qc-png --dry-run
 """
 import argparse
 import logging
@@ -49,6 +55,25 @@ def _add_selection(p: argparse.ArgumentParser) -> None:
     p.add_argument("--start", type=int, default=None, help="first row index (inclusive)")
     p.add_argument("--end", type=int, default=None, help="last row index (exclusive)")
     p.add_argument("--rows", type=_rows_arg, default=None, help="explicit row indices, e.g. 3,5,9")
+
+
+def _add_work_flags(p: argparse.ArgumentParser, clean: bool) -> None:
+    g = p.add_mutually_exclusive_group()
+    g.add_argument("--keep-work", action="store_true",
+                   help="keep each row's work/ intermediates (debugging; default: config outputs.keep_work, "
+                        "false = delete work/ once the row is fully done)")
+    if clean:
+        g.add_argument("--clean-work", action="store_true",
+                       help="delete work/ once a row is completed even if the config sets outputs.keep_work")
+
+
+def _clean_work(a) -> Optional[bool]:
+    """True/False from --clean-work/--keep-work, None = config outputs.keep_work."""
+    if getattr(a, "clean_work", False):
+        return True
+    if a.keep_work:
+        return False
+    return None
 
 
 def select_rows(rows: List[ManifestRow], start: Optional[int], end: Optional[int],
@@ -95,7 +120,9 @@ def build_parser() -> argparse.ArgumentParser:
     g = s.add_mutually_exclusive_group(required=True)
     g.add_argument("--lumir-root", default=None, help="LUMIR root (images found with --image-glob)")
     g.add_argument("--lumir-images", nargs="+", default=None, help="explicit LUMIR image paths")
-    s.add_argument("--image-glob", default="**/LUMIRMRI_*_0000.nii.gz")
+    s.add_argument("--image-glob", default="**/images*/LUMIRMRI_*_0000.nii.gz",
+                   help="LUMIR images for the mean (default %(default)s: T1w channel, images* folders only; "
+                        "label folders reuse the image names)")
     s.add_argument("--split", default="any", choices=("any", "train", "val", "test"))
     s.add_argument("--mni", default=None, help="MNI152 1 mm brain (default: config mni_templates.T1.image_1mm)")
     s.add_argument("--mni-mask", default=None, help="MNI brain mask (default: config mni_templates.T1.mask_1mm)")
@@ -106,7 +133,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--search-margin", type=int, default=10, help="extra offset range in voxels (default 10)")
     s.add_argument("--min-margin", type=float, default=0.01, help="required NCC margin over the runner-up")
     s.add_argument("--force-flip", choices=("no", "yes"), default=None,
-                   help="use this x-flip state regardless of the margin (after independent verification)")
+                   help="use this x-flip state regardless of the margin, only after independent verification "
+                        "(organizer labels with known sides, or the qc-summary left/right asymmetry check); "
+                        "LUMIR: yes")
     s.add_argument("--no-subvoxel", action="store_true", help="skip the sub-voxel translation report")
     s.add_argument("--use-subvoxel", action="store_true", help="apply the sub-voxel shift (default: integer map)")
 
@@ -120,7 +149,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--dry-run", action="store_true", help="print commands, execute nothing")
     s.add_argument("--overwrite", action="store_true")
     s.add_argument("--threads", type=int, default=None)
-    s.add_argument("--clean-work", action="store_true", help="delete work/ after a row succeeds")
+    _add_work_flags(s, clean=True)
     s.add_argument("--fail-fast", action="store_true")
 
     s = sub.add_parser("synthseg", help="SynthSeg batch over processed rows")
@@ -133,21 +162,49 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--threads", type=int, default=None)
     s.add_argument("--synthseg-cpu", action="store_true")
     s.add_argument("--dry-run", action="store_true")
+    _add_work_flags(s, clean=False)
 
-    s = sub.add_parser("qc-summary", help="dataset QC summary and manifest_processed.csv")
+    s = sub.add_parser("qc-summary", help="dataset QC summary, L/R check and manifest_processed.csv",
+                       formatter_class=argparse.RawDescriptionHelpFormatter,
+                       description=__import__("preprocessing.qc", fromlist=["x"]).__doc__)
     s.add_argument("--out-root", required=True)
     s.add_argument("--dataset", required=True)
     s.add_argument("--mad-threshold", type=float, default=4.0)
+    s.add_argument("--lr-min-cases", type=int, default=20,
+                   help="cases with SynthSeg volumes needed before the left/right warning can fire (default 20)")
+    s.add_argument("--lr-reversed-below", type=float, default=0.4,
+                   help="a structure counts as reversed when the fraction of cases with the expected "
+                        "asymmetry is below this (default 0.4)")
+    s.add_argument("--png", default="none", metavar="MODE",
+                   help="render qc.png on demand: none (default), flagged, all, or sample:N (needs --config)")
+    s.add_argument("--png-seed", type=int, default=0, help="seed for --png sample:N (default 0)")
+    s.add_argument("--config", default=None, help="config with target_dir (template for --png)")
 
-    s = sub.add_parser("export-npy", help="export processed outputs to .npy")
+    s = sub.add_parser("export-npy", help="export processed outputs to .npy",
+                       formatter_class=argparse.RawDescriptionHelpFormatter,
+                       description=__import__("preprocessing.export", fromlist=["x"]).__doc__)
     s.add_argument("--out-root", required=True)
     s.add_argument("--export-root", required=True)
     s.add_argument("--dataset", action="append", default=None)
-    s.add_argument("--image-dtype", choices=("float32", "float16"), default="float32")
-    s.add_argument("--label-dtype", choices=("uint16", "uint8"), default="uint16")
+    s.add_argument("--image-dtype", choices=("float32", "float16"), default="float16")
+    s.add_argument("--label-dtype", choices=("auto", "uint16", "uint8"), default="auto",
+                   help="auto (default): uint8 if the fixed LUT fits, else uint16; uint16 without remapping")
+    s.add_argument("--no-remap-labels", action="store_true", help="keep original label ids (uint16)")
+    s.add_argument("--include-mask", action="store_true",
+                   help="also write mask.npy (mask.nii.gz if saved, else image > 0)")
     s.add_argument("--include-template", action="store_true", help="also export the template (needs --config)")
     s.add_argument("--config", default=None)
     s.add_argument("--overwrite", action="store_true")
+
+    s = sub.add_parser("cleanup", help="delete work/, mask.nii.gz, qc.png of completed rows",
+                       formatter_class=argparse.RawDescriptionHelpFormatter,
+                       description=__import__("preprocessing.cleanup", fromlist=["x"]).__doc__)
+    s.add_argument("--out-root", required=True)
+    s.add_argument("--dataset", action="append", required=True, help="dataset folder name (repeatable)")
+    s.add_argument("--work", action="store_true", help="delete <subject>/work/")
+    s.add_argument("--mask", action="store_true", help="delete <subject>/mask.nii.gz")
+    s.add_argument("--qc-png", action="store_true", help="delete <subject>/qc.png")
+    s.add_argument("--dry-run", action="store_true", help="only print what would be deleted")
 
     s = sub.add_parser("n-chunks", help="number of array tasks: ceil(rows / chunk-size)")
     s.add_argument("--manifest", required=True)
@@ -215,6 +272,11 @@ def cmd_build_target_grid(a) -> int:
         print("candidate %-8s offset=%s ncc=%.5f symmetric_crop_pad=%s subvoxel=%s" % (
             r["name"], r["offset"], r["ncc"], r.get("symmetric_crop_pad"), r.get("subvoxel_shift")))
     print("chosen %s, NCC margin %.5f, header NCC %.5f" % (info["chosen"], info["ncc_margin"], info["header_ncc"]))
+    if info["ncc_margin"] < a.min_margin:
+        print("NOTE: the flip margin is below --min-margin, so left/right is NOT determined by the images. "
+              "Make sure --force-flip was verified with organizer labels that know the sides (LUMIR2025 "
+              "SanityCheckLabelsTr) or with the left/right asymmetry check of qc-summary on >= 20 processed "
+              "cases (it warns when the population pattern is reversed). LUMIR: --force-flip yes.")
     print("corrected affine:\n%s" % "\n".join("  %s" % row for row in info["affine"]))
     print("Set in your config:\n  target_dir: %s" % os.path.abspath(out_dir))
     print("Verify: freeview %s %s:colormap=heat:opacity=0.4" % (info["outputs"]["lumir_mean"],
@@ -244,7 +306,7 @@ def cmd_run(a) -> int:
     env = _env(cfg)
     runner = ToolRunner(env, cfg["threads"], dry_run=a.dry_run, tmp_dir=resolve_tmp_dir(cfg, a.out_root, env))
     target = Target(cfg, env)
-    return run_rows(sel, cfg, a.out_root, steps, runner, target, a.overwrite, a.clean_work, a.fail_fast)
+    return run_rows(sel, cfg, a.out_root, steps, runner, target, a.overwrite, _clean_work(a), a.fail_fast)
 
 
 def cmd_synthseg(a) -> int:
@@ -265,19 +327,52 @@ def cmd_synthseg(a) -> int:
     dirs = [os.path.join(out_root, r.dataset, subject_dir_name(r)) for _, r in sel]
     stem = os.path.splitext(os.path.basename(a.manifest))[0]
     batch = a.batch_dir or os.path.join(out_root, "_synthseg_batches", "%s_%d_%d" % (stem, sel[0][0], sel[-1][0] + 1))
-    counts = run_synthseg_batch(dirs, cfg, runner, batch, target, a.overwrite)
+    counts = run_synthseg_batch(dirs, cfg, runner, batch, target, a.overwrite,
+                                clean_work=False if a.keep_work else None)
     log.info("synthseg: %s", counts)
     return 1 if counts.get("failed") else 0
 
 
 def cmd_qc_summary(a) -> int:
-    from .qc import summarize
+    import json
+    from .qc import parse_png_mode, render_qc_png, select_png_dirs, summarize
+    try:
+        png_mode, png_n = parse_png_mode(a.png)
+    except ValueError as e:
+        raise SystemExit(str(e))
+    if png_mode != "none" and not a.config:
+        raise SystemExit("--png needs --config (the template is drawn in the second row)")
     d = os.path.join(a.out_root, a.dataset)
     if not os.path.isdir(d):
         log.error("no such dataset folder: %s", d)
         return 1
-    n, flagged = summarize(d, a.mad_threshold)
+    n, flagged = summarize(d, a.mad_threshold, a.lr_min_cases, a.lr_reversed_below)
     print("%d subjects, %d flagged -> %s" % (n, flagged, os.path.join(d, "qc_summary.csv")))
+    with open(os.path.join(d, "qc_summary.json"), "r", encoding="utf-8") as f:
+        lr = json.load(f)["lr_check"]
+    print("left/right SynthSeg asymmetry over %d cases (fraction with Left > Right; expected: thalamus, "
+          "pallidum, lateral ventricle mostly L > R, hippocampus mostly R > L):" % lr["n_cases"])
+    for s in lr["structures"]:
+        print("  %-18s n=%-4d frac_left_larger=%s%s" % (
+            s["structure"], s["n"], "n/a" if s["frac_left_larger"] is None else "%.2f" % s["frac_left_larger"],
+            "  REVERSED" if s["reversed"] else ""))
+    if not lr["evaluated"]:
+        print("  (not evaluated: fewer than %d cases with synthseg_vols.csv)" % lr["min_cases"])
+    elif lr["lr_reversed_warning"]:
+        print("WARNING: LEFT/RIGHT LOOKS REVERSED for %s (%d of %d structures). The target grid x-flip is "
+              "probably wrong: rebuild it with the other --force-flip and reprocess. Population heuristic, "
+              "see lr_asymmetry.csv." % (a.dataset, lr["n_structures_reversed"], lr["n_structures_evaluated"]))
+    else:
+        print("  left/right pattern OK (no warning)")
+    if png_mode != "none":
+        from .config import load_config
+        from .grid import Target
+        cfg = load_config(a.config)
+        template = Target(cfg, _env(cfg)).data()
+        dirs = select_png_dirs(d, png_mode, png_n, a.png_seed)
+        for sd in dirs:
+            render_qc_png(sd, template)
+        print("rendered %d qc.png (%s)" % (len(dirs), a.png))
     return 0
 
 
@@ -290,9 +385,20 @@ def cmd_export_npy(a) -> int:
         from .config import load_config, target_paths
         cfg = load_config(a.config)
         tp = target_paths(cfg, _env(cfg))
-    n = export_npy(a.out_root, a.export_root, a.dataset, a.image_dtype, a.label_dtype, tp, a.overwrite)
+    n = export_npy(a.out_root, a.export_root, a.dataset, a.image_dtype, a.label_dtype, tp, a.overwrite,
+                   remap_labels=not a.no_remap_labels, include_mask=a.include_mask)
     print("exported %d subjects" % n)
     return 0
+
+
+def cmd_cleanup(a) -> int:
+    from .cleanup import cleanup
+    try:
+        res = cleanup(a.out_root, a.dataset, a.work, a.mask, a.qc_png, a.dry_run)
+    except ValueError as e:
+        log.error("%s", e)
+        return 1
+    return 0 if not res["refused"] else 3
 
 
 def cmd_n_chunks(a) -> int:
@@ -317,7 +423,8 @@ class _StderrHandler(logging.StreamHandler):
 
 COMMANDS = {"check-tools": cmd_check_tools, "build-manifest": cmd_build_manifest,
             "build-target-grid": cmd_build_target_grid, "run": cmd_run, "synthseg": cmd_synthseg,
-            "qc-summary": cmd_qc_summary, "export-npy": cmd_export_npy, "n-chunks": cmd_n_chunks}
+            "qc-summary": cmd_qc_summary, "export-npy": cmd_export_npy, "cleanup": cmd_cleanup,
+            "n-chunks": cmd_n_chunks}
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

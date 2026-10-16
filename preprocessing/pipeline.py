@@ -8,9 +8,15 @@ Steps (ALL_STEPS, in order; validation always runs):
   register   9-DOF FLIRT (default) or ANTs Rigid+Affine/Similarity to MNI152 1 mm (skipped if in_template_space)
   resample   ONE interpolation native -> target grid (anti-alias smoothing for sub-mm inputs first);
              flirt matrices are composed in world space, ANTs uses template_lumirgrid as reference
-  normalize  in-mask 99.5th percentile -> [0,1] (numpy), write image/mask/labels with the target affine
+  normalize  in-mask 99.5th percentile -> [0,1] (numpy), write image/labels (and mask.nii.gz only with
+             outputs.save_mask) with the target affine
   synthseg   optional per-row SynthSeg (the batch `synthseg` command is the main path)
-  qc         qc.json + qc.png
+  qc         qc.json (+ qc.png only with outputs.save_qc_png)
+
+Storage: once a row is "completed" with every requested step done, work/ is
+deleted (outputs.keep_work: false; `--keep-work` keeps it, `--clean-work`
+forces deletion even if the config keeps it). Partial/failed rows keep work/
+so they can resume.
 
 LUMIR rows (in_template_space): voxel arrays are never resampled when the
 shape matches and the header is the recorded raw LUMIR header (or already the
@@ -138,13 +144,17 @@ class RowContext:
             return [self.w("image_resampled.nii.gz"), self.w("mask_resampled.nii.gz")] + \
                 list(self.resampled_labels().values())
         if step == "normalize":
-            return [self.o("image.nii.gz"), self.o("mask.nii.gz")] + \
+            return [self.o("image.nii.gz")] + ([self.o("mask.nii.gz")] if self.save_mask else []) + \
                 [self.o("labels_%s.nii.gz" % n) for n in self.row.label_paths]
         if step == "synthseg":
             return [self.o("labels_synthseg.nii.gz")]
         if step == "qc":
-            return [self.o("qc.json")] + ([self.o("qc.png")] if self.cfg["qc"]["png"] else [])
+            return [self.o("qc.json")] + ([self.o("qc.png")] if self.cfg["outputs"]["save_qc_png"] else [])
         raise ValueError(step)
+
+    @property
+    def save_mask(self) -> bool:
+        return bool(self.cfg["outputs"]["save_mask"])
 
     def recorded_done(self, step: str) -> bool:
         """meta.json says the step finished (it is marked 'running' before it starts)."""
@@ -174,7 +184,11 @@ class RowContext:
             return
         missing = [p for p in paths if not os.path.isfile(p)]
         if missing:
-            raise PipelineError("missing inputs %s (run the earlier steps first)" % missing)
+            hint = "run the earlier steps first"
+            if self.meta.get("work_cleaned") and any(os.path.dirname(p) == self.work for p in missing):
+                hint = ("work/ was deleted after the row completed; rerun all steps with --overwrite "
+                        "(add --keep-work to keep intermediates)")
+            raise PipelineError("missing inputs %s (%s)" % (missing, hint))
 
     def py(self, step: str, inputs: Sequence[str], outputs: Sequence[str]) -> None:
         if self.dry:
@@ -440,7 +454,12 @@ def step_normalize(c: RowContext) -> None:
     c.meta["normalization"] = stats
     aff = c.target.affine
     nifti.save_like(y, aff, c.o("image.nii.gz"), np.float32, xform_code=4)
-    nifti.save_like(mask.astype(np.uint8), aff, c.o("mask.nii.gz"), np.uint8, xform_code=4)
+    # The mask is used above; saving it is optional (later steps use image > 0 when absent).
+    c.meta["mask_saved"] = c.save_mask
+    if c.save_mask:
+        nifti.save_like(mask.astype(np.uint8), aff, c.o("mask.nii.gz"), np.uint8, xform_code=4)
+    elif os.path.isfile(c.o("mask.nii.gz")):
+        os.remove(c.o("mask.nii.gz"))  # stale mask of an earlier run would be preferred by QC/export
     for name, p in labels.items():
         ldata, limg = nifti.load_data(p, np.float64)
         lab = to_label_dtype(_to_target(c, ldata, limg, "labels_" + name, True), "uint16")
@@ -449,8 +468,9 @@ def step_normalize(c: RowContext) -> None:
 
 def step_synthseg(c: RowContext) -> None:
     from .synthseg import run_synthseg_batch
+    # work/ is cleaned by process_row once every step of the row is done.
     counts = run_synthseg_batch([c.D], c.cfg, c.runner, c.w("synthseg_batch"), c.target, overwrite=True,
-                                echo=c.echo)
+                                echo=c.echo, clean_work=False)
     if counts.get("failed"):
         raise PipelineError("SynthSeg postprocess failed")
     if not c.dry:
@@ -458,10 +478,10 @@ def step_synthseg(c: RowContext) -> None:
 
 
 def step_qc(c: RowContext) -> None:
-    c.py("qc", [c.o("image.nii.gz"), c.o("mask.nii.gz")], c.outputs("qc"))
+    c.py("qc", [c.o("image.nii.gz")], c.outputs("qc"))
     if c.dry:
         return
-    c.need(c.o("image.nii.gz"), c.o("mask.nii.gz"))
+    c.need(c.o("image.nii.gz"))
     from .synthseg import refresh_qc
     refresh_qc(c.D, c.target, c.cfg, c.meta)
 
@@ -472,11 +492,19 @@ STEP_FUNCS = {"reorient": step_reorient, "strip": step_strip, "n4": step_n4, "re
 
 # ------------------------------------------------------------------ row driver
 def process_row(row: ManifestRow, cfg: Dict[str, Any], out_root: str, steps: Sequence[str], runner: ToolRunner,
-                target: Target, overwrite: bool = False, clean_work: bool = False,
+                target: Target, overwrite: bool = False, clean_work: Optional[bool] = None,
                 tool_versions: Optional[Dict[str, Any]] = None, echo: Optional[Callable[[str], None]] = None,
                 row_index: Optional[int] = None) -> str:
-    """Process one row; returns 'completed', 'skipped', 'dry-run' or 'failed'."""
+    """Process one row; returns 'completed', 'partial', 'skipped', 'dry-run' or 'failed'.
+
+    clean_work (default: not outputs.keep_work): delete work/ when the row
+    ends "completed" with every requested step done (incl. synthseg when it
+    is in ``steps``). Nothing later needs work/: resume checks trust the
+    normalize outputs (meta work_cleaned) and the SynthSeg batch reads image.nii.gz.
+    """
     echo = echo or print
+    if clean_work is None:
+        clean_work = not cfg["outputs"]["keep_work"]
     c = RowContext(row, cfg, out_root, runner, target, overwrite, echo)
     if c.dry:
         echo("# row %s: %s -> %s" % (row_index, row.image_path, c.D))
@@ -520,6 +548,8 @@ def process_row(row: ManifestRow, cfg: Dict[str, Any], out_root: str, steps: Seq
                 write_meta_atomic(c.meta, c.meta_path)
                 current = s
             STEP_FUNCS[s](c)
+            if not c.dry and s in WORK_STEPS:
+                c.meta.pop("work_cleaned", None)  # work/ holds fresh intermediates again
             if not c.dry and s != "synthseg":
                 record_step(c.meta, s, "done", outputs=c.outputs(s), commands=c.commands.get(s),
                             params=_step_params(c, s), started=started,
@@ -531,9 +561,9 @@ def process_row(row: ManifestRow, cfg: Dict[str, Any], out_root: str, steps: Seq
         # "completed" only when every default step is done; a --steps subset leaves "partial".
         full = all(c.is_done(s) for s in DEFAULT_STEPS)
         c.meta["status"] = "completed" if full else "partial"
-        if clean_work and os.path.isdir(c.work):
-            shutil.rmtree(c.work)
-            c.meta["work_cleaned"] = True
+        if clean_work and full and all(c.is_done(s) for s in todo):
+            from .synthseg import clean_work_dir
+            clean_work_dir(c.D, c.meta)
         write_meta_atomic(c.meta, c.meta_path)
         return c.meta["status"]
     except Exception as e:  # row failure policy: log, mark failed, continue
@@ -575,7 +605,7 @@ def _step_params(c: RowContext, s: str) -> Dict[str, Any]:
 
 
 def run_rows(rows: List[Tuple[int, ManifestRow]], cfg: Dict[str, Any], out_root: str, steps: Sequence[str],
-             runner: ToolRunner, target: Target, overwrite: bool = False, clean_work: bool = False,
+             runner: ToolRunner, target: Target, overwrite: bool = False, clean_work: Optional[bool] = None,
              fail_fast: bool = False, echo: Optional[Callable[[str], None]] = None) -> int:
     """Process rows; returns 0 if none failed, else 1."""
     from .tools import get_tool_versions
