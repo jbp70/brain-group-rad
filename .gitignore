@@ -57,3 +57,6 @@ results/
 
 # ---- Kiro steering (local-only: internal cluster access rules, not for the public repo) ----
 .kiro/steering/
+
+# ---- Prior-project reference code (local-only, read for design; not part of this repo) ----
+reference/
