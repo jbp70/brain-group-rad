@@ -13,7 +13,8 @@ PROJ = "/autofs/space/crater_001/users/jn85/BrainRegProjects/GroupwiseReg"
 
 def test_found_scripts():
     names = {os.path.basename(s) for s in SLURM}
-    assert names == {"run_array.sh", "synthseg_batch.sh", "qc_export.sh", "build_target_grid.sh"}
+    assert names == {"run_array.sh", "synthseg_batch.sh", "qc_export.sh", "build_target_grid.sh",
+                     "export_array.sh"}
     assert os.path.join(PKG, "run_in_container.sh") in SCRIPTS
 
 
@@ -87,5 +88,33 @@ def test_slurm_placeholders(path):
 def test_synthseg_gpu_toggle():
     text = open(os.path.join(PKG, "slurm", "synthseg_batch.sh")).read()
     assert "export USE_GPU=1" in text and "export USE_GPU=0" in text and "--synthseg-cpu" in text
-    for name in ("run_array.sh", "build_target_grid.sh", "qc_export.sh"):
+    for name in ("run_array.sh", "build_target_grid.sh", "qc_export.sh", "export_array.sh"):
         assert "export USE_GPU=${USE_GPU:-0}" in open(os.path.join(PKG, "slurm", name)).read()
+
+
+def test_export_array_policy():
+    text = open(os.path.join(PKG, "slurm", "export_array.sh")).read()
+    lines = _sbatch(text)
+    # CPU partition basic, account qtim, no GPU, at most two tasks at once, fair share (~15 GB/core).
+    assert _opt(lines, "partition") == "basic" and _opt(lines, "account") == "qtim"
+    assert not [line for line in lines if "--gpus" in line or "--gres" in line]
+    assert _opt(lines, "array").endswith("%2")
+    assert _mem_gb(_opt(lines, "mem")) <= 15 * int(_opt(lines, "cpus-per-task"))
+    for key in ("output", "error"):
+        assert _opt(lines, key).startswith(PROJ + "/logs/")
+    # Usage lines keep %2 on every sbatch --array, including the merge job.
+    usage = [line for line in text.splitlines() if line.startswith("#") and "sbatch" in line and "--array" in line]
+    assert usage and all(re.search(r"--array=\S+%2\b", line) for line in usage), usage
+    # Chunked export-npy with race-free parts, a separate merge step, the new root and float32.
+    for s in ('--start "$START" --end "$END"', 'export-merge --export-root "$EXPORT_ROOT"',
+              "EXPORT_ROOT=${EXPORT_ROOT:-$PROJ/data/npy_v2}", "IMAGE_DTYPE=${IMAGE_DTYPE:-float32}",
+              "LABEL_SETS=${LABEL_SETS:-train18}", "CONTRAST=${CONTRAST:-T1w}", 'if [ "$MERGE_ONLY" = "1" ]'):
+        assert s in text, s
+    # Only task 0 exports the template (no concurrent template writes).
+    assert '[ "$TASK" = "0" ]' in text
+
+
+def test_qc_export_defaults():
+    text = open(os.path.join(PKG, "slurm", "qc_export.sh")).read()
+    assert "IMAGE_DTYPE=${IMAGE_DTYPE:-float32}" in text and "IMAGE_DTYPE:-float16" not in text
+    assert "EXPORT_ROOT=${EXPORT_ROOT:-$PROJ/data/npy_v2}" in text

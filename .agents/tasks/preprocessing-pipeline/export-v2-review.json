@@ -1,0 +1,10 @@
+{
+  "verdict": "APPROVED",
+  "findings": [
+    "Non-blocking (likely): the export_array.sh usage header submits the array (%2) and the afterok merge job back to back, giving more than two active entries in squeue -u jn85. Align the header with the sequenced commands in final_report.md.",
+    "Non-blocking (likely): any export-npy run without a row selection (e.g. qc_export.sh DO_EXPORT=1) auto-merges whatever manifest parts exist at that moment, so running it during the array writes an incomplete export_manifest.csv. Document not to run it concurrently, or guard against it.",
+    "Non-blocking (confirmed): design 3.1 keeps the full-res 103-ID SynthSeg labels for evaluation, but synthseg is opt-in and the documented val command uses only train18,lumir10. Add synthseg to the val command, or note that evaluation reads labels_synthseg.nii.gz from processed/.",
+    "Non-blocking (possible): merge_parts unions every manifest_parts/*.csv, so a stale part from a run with other filters (e.g. --contrast any) would add rows silently. Log the part names and per-part row counts at merge time."
+  ],
+  "reviewDoc": "d:\\Research\\Brain_Registration_Projects\\brain-group-rad\\.agents\\tasks\\preprocessing-pipeline\\export-v2-review.md"
+}

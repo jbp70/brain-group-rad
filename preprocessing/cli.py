@@ -8,7 +8,10 @@ Commands:
   synthseg           SynthSeg in batch mode over processed rows (one mri_synthseg call)
   qc-summary         per-dataset QC table with outlier flags, manifest_processed.csv;
                      optional on-demand qc.png (--png)
-  export-npy         processed NIfTI -> .npy (float16 image, uint8 LUT-remapped labels)
+  export-npy         processed NIfTI -> per-level .npy (full, _2, _4): float32 image,
+                     uint8 train18 labels; T1w only by default; chunkable (--start/--end)
+  export-merge       merge the export-npy manifest parts into export_manifest.csv
+  export-check       verify an export (dtypes, shapes, label range, world centers)
   cleanup            delete work/, mask.nii.gz and/or qc.png of completed rows (--dry-run first)
   n-chunks           number of SLURM array tasks for a manifest and chunk size
 
@@ -29,7 +32,8 @@ Typical sequence (repo root as working dir, or via the wrapper from anywhere):
   python -m preprocessing run --config cfg.yaml --manifest lumir.csv --out-root /data/processed --start 0 --end 50
   python -m preprocessing synthseg --config cfg.yaml --manifest lumir.csv --out-root /data/processed --start 0 --end 50
   python -m preprocessing qc-summary --out-root /data/processed --dataset lumir [--config cfg.yaml --png flagged]
-  python -m preprocessing export-npy --out-root /data/processed --export-root /data/npy
+  python -m preprocessing export-npy --out-root /data/processed --export-root /data/npy_v2 --dataset lumir
+  python -m preprocessing export-check --export-root /data/npy_v2
   python -m preprocessing cleanup --out-root /data/processed --dataset lumir --work --mask --qc-png --dry-run
 """
 import argparse
@@ -176,21 +180,48 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--png-seed", type=int, default=0, help="seed for --png sample:N (default 0)")
     s.add_argument("--config", default=None, help="config with target_dir (template for --png)")
 
-    s = sub.add_parser("export-npy", help="export processed outputs to .npy",
+    s = sub.add_parser("export-npy", help="export processed outputs to per-level .npy",
                        formatter_class=argparse.RawDescriptionHelpFormatter,
                        description=__import__("preprocessing.export", fromlist=["x"]).__doc__)
     s.add_argument("--out-root", required=True)
-    s.add_argument("--export-root", required=True)
+    s.add_argument("--export-root", required=True,
+                   help="use a NEW root for this layout (e.g. $D/npy_v2), never an older export")
     s.add_argument("--dataset", action="append", default=None)
-    s.add_argument("--image-dtype", choices=("float32", "float16"), default="float16")
+    s.add_argument("--start", type=int, default=None,
+                   help="first row of manifest_processed.csv (inclusive; datasets concatenated)")
+    s.add_argument("--end", type=int, default=None, help="last row of manifest_processed.csv (exclusive)")
+    s.add_argument("--rows", type=_rows_arg, default=None, help="explicit manifest_processed.csv rows, e.g. 3,5,9")
+    s.add_argument("--levels", type=_rows_arg, default=[1, 2, 4],
+                   help="pyramid levels from 1,2,4 (default 1,2,4: full, _2, _4)")
+    s.add_argument("--label-sets", default="train18",
+                   help="comma list: train18 (default; all levels), synthseg (103-id remap) and provided "
+                        "label names such as lumir10 (full resolution only). Validation: train18,lumir10")
+    s.add_argument("--contrast", action="append", default=None,
+                   help="contrast filter, repeatable or comma list (default T1w: drops LUMIR's non-T1 "
+                        "unknown0001 val cases); 'any' exports every contrast")
+    s.add_argument("--split", action="append", default=None,
+                   help="split filter, repeatable or comma list (e.g. train or val; default any)")
+    s.add_argument("--image-dtype", choices=("float32", "float16"), default="float32",
+                   help="default float32: augmentation runs in float32 in DALI; the cast to float16 for "
+                        "mixed precision happens at the model input")
     s.add_argument("--label-dtype", choices=("auto", "uint16", "uint8"), default="auto",
                    help="auto (default): uint8 if the fixed LUT fits, else uint16; uint16 without remapping")
-    s.add_argument("--no-remap-labels", action="store_true", help="keep original label ids (uint16)")
+    s.add_argument("--no-remap-labels", action="store_true",
+                   help="keep original label ids (uint16; not with train18)")
     s.add_argument("--include-mask", action="store_true",
-                   help="also write mask.npy (mask.nii.gz if saved, else image > 0)")
-    s.add_argument("--include-template", action="store_true", help="also export the template (needs --config)")
+                   help="also write mask.npy, full resolution (mask.nii.gz if saved, else image > 0)")
+    s.add_argument("--include-template", action="store_true",
+                   help="also export the per-level template (needs --config)")
     s.add_argument("--config", default=None)
-    s.add_argument("--overwrite", action="store_true")
+    s.add_argument("--overwrite", action="store_true", help="rewrite every file, even complete cases")
+
+    s = sub.add_parser("export-merge", help="merge export-npy manifest parts into export_manifest.csv")
+    s.add_argument("--export-root", required=True)
+
+    s = sub.add_parser("export-check", help="verify an export: dtypes, shapes, label range, world centers")
+    s.add_argument("--export-root", required=True)
+    s.add_argument("--sample", type=int, default=20, help="random cases to check (default 20; 0 = all)")
+    s.add_argument("--seed", type=int, default=0)
 
     s = sub.add_parser("cleanup", help="delete work/, mask.nii.gz, qc.png of completed rows",
                        formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -364,10 +395,38 @@ def cmd_export_npy(a) -> int:
         from .config import load_config, target_paths
         cfg = load_config(a.config)
         tp = target_paths(cfg, _env(cfg))
-    n = export_npy(a.out_root, a.export_root, a.dataset, a.image_dtype, a.label_dtype, tp, a.overwrite,
-                   remap_labels=not a.no_remap_labels, include_mask=a.include_mask)
+    contrasts = a.contrast if a.contrast is not None else ["T1w"]
+    try:
+        n = export_npy(a.out_root, a.export_root, a.dataset, a.image_dtype, a.label_dtype, tp, a.overwrite,
+                       remap_labels=not a.no_remap_labels, include_mask=a.include_mask, levels=a.levels,
+                       label_sets=[a.label_sets], contrasts=contrasts, splits=a.split,
+                       start=a.start, end=a.end, rows=a.rows)
+    except ValueError as e:
+        log.error("%s", e)
+        return 1
     print("exported %d subjects" % n)
     return 0
+
+
+def cmd_export_merge(a) -> int:
+    from .export import merge_parts
+    try:
+        n = merge_parts(a.export_root)
+    except ValueError as e:
+        log.error("%s", e)
+        return 1
+    print("export_manifest.csv: %d cases" % n)
+    return 0
+
+
+def cmd_export_check(a) -> int:
+    from .export import export_check
+    n, problems, report = export_check(a.export_root, a.sample, a.seed)
+    print("\n".join(report))
+    for p in problems[:50]:
+        print("PROBLEM " + p)
+    print("checked %d cases: %s" % (n, "OK" if not problems else "%d PROBLEMS" % len(problems)))
+    return 0 if not problems else 1
 
 
 def cmd_cleanup(a) -> int:
@@ -402,8 +461,8 @@ class _StderrHandler(logging.StreamHandler):
 
 COMMANDS = {"check-tools": cmd_check_tools, "build-manifest": cmd_build_manifest,
             "build-target-grid": cmd_build_target_grid, "run": cmd_run, "synthseg": cmd_synthseg,
-            "qc-summary": cmd_qc_summary, "export-npy": cmd_export_npy, "cleanup": cmd_cleanup,
-            "n-chunks": cmd_n_chunks}
+            "qc-summary": cmd_qc_summary, "export-npy": cmd_export_npy, "export-merge": cmd_export_merge,
+            "export-check": cmd_export_check, "cleanup": cmd_cleanup, "n-chunks": cmd_n_chunks}
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

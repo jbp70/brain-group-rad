@@ -488,3 +488,120 @@ If export stops with `label values [...] are not in the fixed LUT (LUMIR25 coars
 - The flip (`--force-flip yes`) is kept. It is consistent with the organizers' SLANT labels in `SanityCheckLabelsTr` (Left structures at low voxel x; after the flip our SynthSeg Left-Hippocampus sits at x=52, matching them).
 - Whether that matches true anatomy is not independently verified: the organizers' labeling tool may have trusted the identity header too.
 - The SynthSeg left/right asymmetry check was removed from `qc-summary` (no more `lr_asymmetry.csv`, `lr_check`/`lr_reversed_warning` in `qc_summary.json`, `--lr-min-cases`/`--lr-reversed-below`, or the warning). It is invalid: the asymmetry fractions stayed the same after the flip (thalamus 0.00, pallidum 0.02→0.08, hippocampus 0.76→0.78), so they measure SynthSeg's labeling bias, not anatomy.
+
+## Training export v2 (2026-10-17)
+
+`export-npy` now writes the per-level training layout from the network design doc (sections 3.1 and 3.4). Write it to a NEW export root, `$D/npy_v2`. The old `$D/npy` (mixed float16/float32 images, 103-label remap) is never read, overwritten or mixed in.
+
+### What changed
+
+- Per case, in `$D/npy_v2/lumir/<subject_dir>/`: `image.npy`, `image_2.npy`, `image_4.npy` (160×224×192, 80×112×96, 40×56×48) and `labels_train18.npy`, `labels_train18_2.npy`, `labels_train18_4.npy`. `--levels 1,2,4` is the default.
+- Images default to float32, because augmentation runs in float32 in DALI and the cast to float16 happens at the model input. `--image-dtype float16` is still available. `slurm/qc_export.sh` now defaults to `IMAGE_DTYPE=float32` and `EXPORT_ROOT=$PROJ/data/npy_v2`.
+- Coarse images are an exact block average (2×2×2 / 4×4×4), computed in float64 from the full-resolution float32 `image.nii.gz`. A dimension that isn't divisible fails the export.
+- `train18` is a new fixed LUT in `preprocessing/luts.py`. It maps the raw SynthSeg `--parc` ids from `labels_synthseg.nii.gz` to 18 classes plus background:
+  - 1 cerebral WM
+  - 2 cortex (3/42 plus all DK parcels)
+  - 3 lateral ventricle
+  - 4 inferior lateral ventricle
+  - 5 cerebellum WM
+  - 6 cerebellum cortex
+  - 7 thalamus
+  - 8 caudate
+  - 9 putamen
+  - 10 pallidum
+  - 11 3rd ventricle
+  - 12 4th ventricle
+  - 13 brainstem
+  - 14 hippocampus
+  - 15 amygdala
+  - 16 CSF
+  - 17 accumbens
+  - 18 ventral DC
+
+  Left and right are merged. An unknown id fails the export, and the error names the ids and the case. `label_luts.json` stores the map, the names and `classes` (id → name).
+- Coarse labels are merged first, then reduced by block majority vote. On a tie the smallest merged id wins (e.g. a 4/4 background/cortex block becomes background).
+- `--label-sets` defaults to `train18`. Opt-in sets: `synthseg` (the old 103-id remap) and provided labels such as `lumir10`. Both are written at full resolution only, for evaluation. The val export passes `--label-sets train18,lumir10`. If a requested set is missing for a case, the export fails.
+- `--contrast` defaults to T1w, so the 10 non-T1 `unknown0001` val cases are skipped. The log reports how many cases were skipped. `--contrast any` exports every contrast. `--split train|val` filters by split.
+- Template (`--include-template`): `template[_2,_4].npy` is block-averaged. `template_mask[_2,_4].npy` uses block majority vote with ties going to 0, so a coarse voxel counts as brain only when more than half of its block is brain. `template/template_info.json` holds the per-level shape, spacing, affine and world center.
+- `export_manifest.csv` lists only exported cases. For each level k it has `image_lk`, `shape_lk`, `labels_lk`, `spacing_lk`, `affine_lk` and `world_center_lk`, plus `image_dtype`, `label_dtypes` and `label_levels`.
+  - Level-k affine: A_k = A_1 · [[k,0,0,(k−1)/2], …], so coarse voxel q is centered at full index 2q+0.5 (k=2) or 4q+1.5 (k=4).
+  - The world center (index (n−1)/2) is identical at every level.
+- Chunking and resume:
+  - `--start/--end/--rows` index the rows of `$D/processed/lumir/manifest_processed.csv`.
+  - Every run writes its own `manifest_parts/<datasets>_split-…_contrast-…_rows-…csv` and a `.luts.json`, so concurrent chunks never share a file.
+  - `export-merge` combines the parts into `export_manifest.csv` and `label_luts.json`. A run without a row selection merges automatically.
+  - All writes are atomic (temp file in the same folder, then rename).
+  - A case is skipped when all its files exist with the right dtype and shape. A file with another dtype or shape fails the export. `--overwrite` rewrites everything.
+- New commands: `export-merge` and `export-check` (dtypes, shapes, label range, world-center consistency). New SLURM template: `slurm/export_array.sh`.
+  - It uses partition `basic`, account `qtim`, 1 CPU, 8 GB, 2 h per 200-row chunk, `%2`, and logs under `$PROJ/logs`.
+  - Task 0 also exports the template.
+  - `MERGE_ONLY=1` runs only the merge.
+- Measured locally on one synthetic LUMIR-size case: export takes about 1.9 s, and a resume skip about 0.01 s. That's about 7 min per 200-row chunk, which leaves headroom under the 2 h limit for slower cluster I/O.
+
+### Commands (Jay)
+
+Pull first, on mlsc-login: `cd $PROJ/brain-group-rad && git pull`. The row indices come from `manifest_processed.csv`. Don't rerun `qc-summary` or add cases while the array is running.
+
+```bash
+PROJ=/autofs/space/crater_001/users/jn85/BrainRegProjects/GroupwiseReg
+D=$PROJ/data; CFG=$D/preproc_config.yaml
+RIC="bash $PROJ/brain-group-rad/preprocessing/run_in_container.sh"
+
+# 1. One-case smoke test on a compute node (CPU is enough; never on mlsc-login)
+srun -A qtim -p basic --time=01:00:00 --mem=8G --cpus-per-task=1 --ntasks-per-node=1 --pty bash
+sed -n 2p $D/processed/lumir/manifest_processed.csv | cut -d, -f2,4,5   # row 0: subject, contrast, split (want T1w)
+$RIC export-npy --out-root $D/processed --export-root $D/npy_v2_smoke --dataset lumir --rows 0 \
+    --include-template --config $CFG
+$RIC export-merge --export-root $D/npy_v2_smoke
+$RIC export-check --export-root $D/npy_v2_smoke --sample 0
+ls -l $D/npy_v2_smoke/lumir/*/ $D/npy_v2_smoke/template/
+rm -rf $D/npy_v2_smoke
+exit
+
+# 2. Train export: chunked array, 200 rows per task, at most 2 tasks at once (on mlsc-login)
+cd $PROJ/brain-group-rad
+squeue -u jn85                                   # cluster rule: at most two of your jobs active
+P=$D/processed/lumir/manifest_processed.csv
+N=$(( ($(tail -n +2 $P | wc -l) + 199) / 200 ))
+sbatch --array=0-$((N-1))%2 --export=ALL,SPLIT=train,EXPORT_ROOT=$D/npy_v2 preprocessing/slurm/export_array.sh
+
+# 3. T1 val export with lumir10, after the train array has finished (one task covers every row;
+#    env passes the comma list, which sbatch --export would split; the template is already done)
+env LABEL_SETS=train18,lumir10 sbatch --array=0-0%2 \
+    --export=ALL,SPLIT=val,CHUNK_SIZE=100000,INCLUDE_TEMPLATE=0,EXPORT_ROOT=$D/npy_v2 \
+    preprocessing/slurm/export_array.sh
+
+# 4. Merge, after step 3 has finished
+sbatch --array=0-0%2 --export=ALL,MERGE_ONLY=1,EXPORT_ROOT=$D/npy_v2 preprocessing/slurm/export_array.sh
+grep -h -i -E 'error|cases in part|skipped' $PROJ/logs/bgr_export_*.err | tail   # skip counts per task
+
+# 5. Checks on a compute node (srun as in step 1)
+$RIC export-check --export-root $D/npy_v2 --sample 50       # --sample 0 = every case (reads ~135 GB)
+#   prints per-level shape/dtype/spacing/world center of one case, the label max per set (train18 must be
+#   within 0..18) and the max world-center difference between levels (must be 0 mm); exit 1 on any problem
+head -2 $D/npy_v2/export_manifest.csv
+tail -n +2 $D/npy_v2/export_manifest.csv | wc -l               # expect 3,384 train + 39 val = 3,423
+tail -n +2 $D/npy_v2/export_manifest.csv | cut -d, -f5,6 | sort | uniq -c   # T1w,train / T1w,val counts
+ls $D/npy_v2/template/ $D/npy_v2/manifest_parts/
+du -sh $D/npy_v2
+```
+
+Expected sizes per case (uncompressed `.npy`):
+
+| Level | image (float32) | labels_train18 (uint8) |
+|---|---|---|
+| full | 27.5 MB | 6.9 MB |
+| `_2` | 3.4 MB | 0.86 MB |
+| `_4` | 0.43 MB | 0.11 MB |
+
+That's about 39 MB per case, plus 6.9 MB for `labels_lumir10.npy` on val cases, and about 135 GB in total.
+
+If a val case has no `labels_lumir10.nii.gz`, step 3 stops and names the case. Send me the name; `LABEL_SETS=train18` exports val without it.
+
+Once v2 is verified, you can delete the old export with `rm -rf $D/npy`. Training reads only `$D/npy_v2`.
+
+### Could not verify locally
+
+- No cluster run yet. Tests use small synthetic volumes. I timed one synthetic full-size case in WSL; cluster I/O on `/autofs` may be slower.
+- The real LUMIR SynthSeg output may contain an id outside the 103 `--parc` ids. That would fail train18 loudly.
+- Whether every T1w val case has a lumir10 map.

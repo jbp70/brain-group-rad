@@ -34,7 +34,8 @@ End-to-end (from the repo root):
   python -m preprocessing run --config cfg.yaml --manifest oasis.csv --out-root /data/processed --start 0 --end 20
   python -m preprocessing synthseg --config cfg.yaml --manifest oasis.csv --out-root /data/processed
   python -m preprocessing qc-summary --out-root /data/processed --dataset neurite_oasis
-  python -m preprocessing export-npy --out-root /data/processed --export-root /data/npy
+  python -m preprocessing export-npy --out-root /data/processed --export-root /data/npy_v2
+      (per-level float32 images + train18 labels, see preprocessing/export.py)
 
 SLURM templates live in preprocessing/slurm/.
 """

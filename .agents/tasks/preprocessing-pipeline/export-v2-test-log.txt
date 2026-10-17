@@ -1,0 +1,31 @@
+Training export v2 -- local test log (WSL Ubuntu, run from PowerShell)
+Recorded 2026-10-17T11:50 (-04:00), after the last code edit (code last edited ~11:40; final_report.md section appended before the runs).
+
+Command 1: wsl -d Ubuntu bash /mnt/d/Research/Brain_Registration_Projects/brain-group-rad/preprocessing/tests/run_tests_wsl.sh bgr_preproc38
+  env bgr_preproc38: python 3.8.20 numpy 1.21.1 scipy 1.4.1 nibabel 3.1.1 pyyaml 6.0 matplotlib 3.5.0 pytest 8.3.5
+  bash -n OK (all .sh incl. new slurm/export_array.sh)
+  136 passed, 155 warnings (third-party DeprecationWarnings from scipy 1.4 / nibabel 3.1 under numpy 1.21) in 74.25s
+  --help smoke test for every command incl. export-merge, export-check: OK
+  ALL CHECKS PASSED (bgr_preproc38)   exit 0
+
+Command 2: wsl -d Ubuntu bash /mnt/d/Research/Brain_Registration_Projects/brain-group-rad/preprocessing/tests/run_tests_wsl.sh bgr_preproc
+  env bgr_preproc: python 3.9.18 numpy 1.26.4 scipy 1.11.4 nibabel 5.2.1 pyyaml 6.0.2 matplotlib 3.9.2 pytest 8.3.3
+  bash -n OK
+  136 passed, 14 warnings in 73.00s
+  ALL CHECKS PASSED (bgr_preproc)   exit 0
+
+Failures: none in either env.
+
+New/updated tests (preprocessing/tests/test_export.py, test_slurm_scripts.py, test_cli.py):
+  float32 default + per-level layout; exact block average (dyadic values); block majority vote incl. ties
+  (smallest id) vs brute force, uint16 sparse ids; train18 LUT (every id, 19 names, unknown ids fail with
+  ids + case); per-level affines and world center identical across levels (also LUMIR 160x224x192);
+  non-divisible shape fails; contrast/split filters and skip counts in the log; --start/--end/--rows chunks
+  -> per-chunk parts, export-merge, overlap dedupe, conflict detection; atomic writes (simulated kill
+  leaves no partial file) and resume / rewrite / mismatch error / --overwrite; per-level template export
+  (tie -> 0); export-check; export_array.sh policy (basic, qtim, %2, mem <= 15 GB/core, logs path,
+  npy_v2, float32) and qc_export.sh float32 default.
+
+Extra manual check (not part of the suite, temp script deleted): one synthetic 160x224x192 case in
+bgr_preproc38 -> export 1.87 s, resume 0.01 s, block_mode k=2+4 0.27 s; file sizes 27.53 / 3.44 / 0.43 MB
+(image) and 6.88 / 0.86 / 0.11 MB (labels_train18); export-check OK, world-center difference 0 mm.

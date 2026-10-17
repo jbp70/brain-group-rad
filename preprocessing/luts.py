@@ -11,6 +11,23 @@ missing from the LUT is an error (no silent assignment).
             in case a voxel is not parcellated) + Desikan-Killiany cortical
             parcels 1001-1035 / 2001-2035 (1004/2004 corpus callosum is listed
             but SynthSeg does not output it). 103 ids -> uint8.
+  train18   training label set (many-to-one merge of the raw SynthSeg --parc
+            ids): 18 foreground classes + background, left/right merged, all
+            cortex (3/42 and DK parcels 1001-1035/2001-2035) merged into one
+            class. Fixed ids (TRAIN18_CLASSES):
+               0 background (0)                  10 pallidum (13, 52)
+               1 cerebral white matter (2, 41)   11 3rd ventricle (14)
+               2 cerebral cortex (3, 42, 1001-   12 4th ventricle (15)
+                 1035, 2001-2035)                13 brainstem (16)
+               3 lateral ventricle (4, 43)       14 hippocampus (17, 53)
+               4 inferior lateral ventricle      15 amygdala (18, 54)
+                 (5, 44)                         16 CSF (24)
+               5 cerebellum white matter (7, 46) 17 accumbens (26, 58)
+               6 cerebellum cortex (8, 47)       18 ventral DC (28, 60)
+               7 thalamus (10, 49)
+               8 caudate (11, 50)
+               9 putamen (12, 51)
+            Applied to labels_synthseg.nii.gz (raw SynthSeg ids) -> uint8.
   lumir10   LUMIR25 coarse validation labels: assumed 0..10 (10 classes +
             background; values UNVERIFIED -- export fails loudly if wrong).
   seg4      Neurite-OASIS seg4: assumed 0..4 (UNVERIFIED).
@@ -70,8 +87,51 @@ def _build(entries: List[Tuple[int, str]], source: str) -> Dict[str, object]:
     return {"map": mapping, "names": names, "source": source}
 
 
+_DK_LH = list(range(1001, 1036))
+_DK_RH = list(range(2001, 2036))
+
+# (new id, name, raw SynthSeg ids); ids and names are fixed (design doc 3.4).
+TRAIN18_CLASSES: List[Tuple[int, str, List[int]]] = [
+    (0, "background", [0]),
+    (1, "cerebral white matter", [2, 41]),
+    (2, "cerebral cortex", [3, 42] + _DK_LH + _DK_RH),
+    (3, "lateral ventricle", [4, 43]),
+    (4, "inferior lateral ventricle", [5, 44]),
+    (5, "cerebellum white matter", [7, 46]),
+    (6, "cerebellum cortex", [8, 47]),
+    (7, "thalamus", [10, 49]),
+    (8, "caudate", [11, 50]),
+    (9, "putamen", [12, 51]),
+    (10, "pallidum", [13, 52]),
+    (11, "3rd ventricle", [14]),
+    (12, "4th ventricle", [15]),
+    (13, "brainstem", [16]),
+    (14, "hippocampus", [17, 53]),
+    (15, "amygdala", [18, 54]),
+    (16, "CSF", [24]),
+    (17, "accumbens", [26, 58]),
+    (18, "ventral DC", [28, 60]),
+]
+
+
+def _build_merged(classes: List[Tuple[int, str, List[int]]], source: str) -> Dict[str, object]:
+    """Many-to-one LUT: every raw id of a class maps to the class id."""
+    assert [k for k, _, _ in classes] == list(range(len(classes)))
+    mapping: "OrderedDict[int, int]" = OrderedDict()
+    names: "OrderedDict[int, str]" = OrderedDict()
+    for k, name, ids in classes:
+        for o in ids:
+            assert o not in mapping, o
+            mapping[int(o)] = k
+            names[int(o)] = name
+    return {"map": mapping, "names": names, "source": source,
+            "classes": OrderedDict((k, n) for k, n, _ in classes)}
+
+
 LUTS: Dict[str, Dict[str, object]] = {
     "synthseg": _build(_synthseg_entries(), "SynthSeg 2.0 labels table + DK parcellation (--parc)"),
+    "train18": _build_merged(TRAIN18_CLASSES, "SynthSeg 2.0 --parc ids merged to 18 training classes "
+                                              "(left/right and all cortex merged)"),
     "lumir10": _build(_identity(10), "LUMIR25 coarse labels, assumed 0..10 (unverified)"),
     "seg4": _build(_identity(4), "Neurite-OASIS seg4, assumed 0..4 (unverified)"),
     "seg35": _build(_identity(35), "Neurite-OASIS seg35, assumed 0..35 (unverified)"),
@@ -84,7 +144,12 @@ def get_lut(name: str, luts: Optional[Dict[str, Dict[str, object]]] = None) -> O
 
 def lut_dtype(lut: Dict[str, object]) -> str:
     """uint8 when the remapped ids fit, else uint16."""
-    return "uint8" if len(lut["map"]) <= 256 else "uint16"  # type: ignore[arg-type]
+    return "uint8" if n_classes(lut) <= 256 else "uint16"
+
+
+def n_classes(lut: Dict[str, object]) -> int:
+    """Number of output ids (max new id + 1; == len(map) for one-to-one LUTs)."""
+    return int(max(lut["map"].values())) + 1  # type: ignore[attr-defined]
 
 
 def apply_lut(arr: np.ndarray, lut: Dict[str, object], dtype: str, what: str = "labels") -> np.ndarray:
@@ -109,9 +174,16 @@ def apply_lut(arr: np.ndarray, lut: Dict[str, object], dtype: str, what: str = "
 
 
 def lut_json(lut: Dict[str, object]) -> Dict[str, object]:
-    """JSON-friendly form: {"source", "dtype", "n_labels", "map": {orig: new}, "names": {orig: name}}."""
+    """JSON-friendly form: {"source", "dtype", "n_labels", "map": {orig: new}, "names": {orig: name}}.
+
+    n_labels is the number of output ids. Merged LUTs (train18) also get
+    "classes": {new id: class name}.
+    """
     mapping: Dict[int, int] = lut["map"]  # type: ignore[assignment]
     names: Dict[int, str] = lut.get("names") or {}  # type: ignore[assignment]
-    return {"source": lut.get("source", ""), "dtype": lut_dtype(lut), "n_labels": len(mapping),
-            "map": OrderedDict((str(o), int(k)) for o, k in mapping.items()),
-            "names": OrderedDict((str(o), n) for o, n in names.items())}
+    out = {"source": lut.get("source", ""), "dtype": lut_dtype(lut), "n_labels": n_classes(lut),
+           "map": OrderedDict((str(o), int(k)) for o, k in mapping.items()),
+           "names": OrderedDict((str(o), n) for o, n in names.items())}
+    if lut.get("classes"):
+        out["classes"] = OrderedDict((str(k), n) for k, n in lut["classes"].items())  # type: ignore[attr-defined]
+    return out
