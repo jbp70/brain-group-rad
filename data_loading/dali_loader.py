@@ -228,7 +228,9 @@ def intensity_augment(img, cfg, shape_xyz):
         full = types.Constant(np.asarray(shape_xyz, np.float32), dtype=types.FLOAT)
         size = _multiplex(cfg.low_res_prob, fn.random.uniform(range=(cfg.low_res_min_factor, 1.0)), 1.0) * full
         img = fn.resize(img, size=size, interp_type=types.DALIInterpType.INTERP_NN)
-        img = fn.resize(img, size=full, interp_type=types.DALIInterpType.INTERP_LINEAR)
+        # Upsampling back to the full grid: antialiasing only matters when shrinking, so turn it
+        # off explicitly (DALI >= 1.18 warns that LINEAR now antialiases by default).
+        img = fn.resize(img, size=full, interp_type=types.DALIInterpType.INTERP_LINEAR, antialias=False)
     if cfg.gamma:
         img = _gamma(img, cfg.gamma_prob, *cfg.gamma_range)
     return dmath.clamp(img, 0.0, 1.0)

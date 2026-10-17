@@ -12,10 +12,13 @@ Checks (each prints PASS / FAIL / INFO; the exit code is 1 if any check FAILs):
   (a) pixel-center / direction / axis order: DALI warp of a synthetic phantom by known
       transforms vs TF transform_image, over candidate conventions; the empirically best one
       must be the one the code uses (params.DALI_PIXEL_CENTER, pull with T^-1, reversed axes).
-  (b) re-warp on real level-4 data (rigid and affine, intensity aug OFF): undoing the DALI warp
-      with transform_image(., T_mm) reproduces the source (NCC > 0.99 in the template brain
-      mask, restricted to voxels that stayed inside the field of view), and the sampled rotation
-      angles and translations stay within the configured ranges (45 deg, 15 mm per axis).
+  (b) re-warp on real level-4 data (rigid and affine, intensity aug OFF): the DALI render equals
+      the TF render of the same T_i (single interpolation, max |diff| < tol-direct); undoing the
+      DALI warp with transform_image(., T_mm) reproduces the source as well as a TF-only render
+      + undo does (NCC in the template brain mask over voxels that stayed in the field of view,
+      gap < tol-ncc-gap; two linear interpolations at 4 mm give NCC ~0.95, so there is no
+      absolute threshold); sampled rotations and translations stay within the configured ranges
+      (45 deg, 15 mm per axis).
   (c) flip consistency: flip(batch) with F T F, then undo, gives the same NCC.
   (d) target sanity: barycentric targets central and pair-consistent; rigid targets exclude the
       nuisance S_i (S_i = Rt_i^-1 T_i is a small upper-triangular scale/shear).
@@ -225,12 +228,15 @@ def check_a(tmp, args):
         best_key = min(cand, key=lambda k: cand[k]["mean_abs"])
         best = cand[best_key]
         expected_key = "pc=%g|%s|%s" % EXPECTED_A
-        case_ok = (best_key == expected_key and cand[expected_key]["max_abs"] < args.tol_a
+        # Pass on the MEAN error: the max is dominated by the last voxel at the field-of-view
+        # border, where DALI hard-fills while transform_image fades out over one voxel
+        # (documented in models/layers.py). The max is still reported.
+        case_ok = (best_key == expected_key and cand[expected_key]["mean_abs"] < args.tol_a
                    and inv_err < 1e-4)
         # The translation case cannot separate pixel centers (both are exact there).
         if name == "translation":
             same = [k for k in cand if cand[k]["mean_abs"] <= best["mean_abs"] + 1e-7]
-            case_ok = (expected_key in same and cand[expected_key]["max_abs"] < args.tol_a
+            case_ok = (expected_key in same and cand[expected_key]["mean_abs"] < args.tol_a
                        and inv_err < 1e-4)
         ok &= case_ok
         cases[name] = {"params": prm, "best": best_key, "expected": expected_key,
@@ -295,7 +301,12 @@ def check_b_c(task, outs, src, brain, args):
     mag_ok = max(rot) <= rot_bound and t_max <= t_bound
     for p, r in zip(per, rot):
         p["rotation_deg"] = r
-    ok = min_ncc > 0.99 and max_direct < args.tol_direct and mag_ok
+    # The decisive test is the single-interpolation agreement (DALI render == TF render of the
+    # same T). The round trip goes through two linear interpolations, which at 4 mm blurs real
+    # images to NCC ~0.95 whichever warp is used, so it must match the TF-only round trip
+    # rather than an absolute threshold.
+    worst_gap = max(p["ncc_tf_double_interp"] - p["ncc"] for p in per)
+    ok = max_direct < args.tol_direct and mag_ok and worst_gap < args.tol_ncc_gap
     record("b_rewarp_%s" % task, ok,
            "min NCC %.5f (TF-only double interp min %.5f), max rot %.1f deg (<= %.2f), max |t| %.2f mm "
            "(<= %.3f), single-interp DALI vs TF max |diff| %.2e"
@@ -509,7 +520,9 @@ def main():
     ap.add_argument("--batches", type=int, default=50)
     ap.add_argument("--warmup", type=int, default=5)
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--tol-a", type=float, default=2e-3, help="max |DALI - TF| for check (a)")
+    ap.add_argument("--tol-a", type=float, default=1e-4, help="mean |DALI - TF| for check (a)")
+    ap.add_argument("--tol-ncc-gap", type=float, default=1e-3,
+                    help="max NCC shortfall of the DALI round trip vs the TF-only round trip (b)")
     ap.add_argument("--tol-direct", type=float, default=2e-3, help="max |DALI - TF| single interp (b)")
     ap.add_argument("--keep-tmp", action="store_true")
     args = ap.parse_args()

@@ -61,7 +61,8 @@ Baselines: BrainMorph, KeyMorph, SynthMorph (affine/joint), MultiMorph, ANTs, Fr
 
 - **Three pipelines:** `RigidPipeline`, `AffinePipeline`, `DeformPipeline` (rigid and affine can share one class with different ranges). Each is a separate `DALIDataset` with a fixed output signature. No `external_source`.
 - **One group per batch:** DALI batch size = N (fixed per level), tensor `[N, X, Y, Z, 1]`, group mean over axis 0.
-- **Sampling:** numpy reader with `random_shuffle=True` over the level's files; cross-subject groups. Same-subject groups are deferred.
+- **Sampling:** numpy reader over the level's files, cross-subject groups. Default `shuffle_after_epoch=True` (the file list is pre-permuted by seed, then reshuffled every epoch; no host buffer). The `random_shuffle` + `initial_fill` buffer mode is optional, since a full-dataset buffer is only affordable at level 4. Same-subject groups are deferred. *(v3.1, milestone 2)*
+- **DALI conventions, verified on glacier (milestone 2):** pixel center 0.5, `warp_affine(inverse_map=True)` given T_i⁻¹, DALI matrices in reversed axis order (M_tf = P M_dali P). `warp_affine` does not accept float16 in DALI 1.18, so images stay float32 through augmentation.
 - **Per-image transforms:** DALI random ops are per sample, so every image gets an independent T_i about the center. Warped with `fn.warp_affine(inverse_map=True)` given T_i⁻¹, on GPU, linear interpolation. Labels use nearest neighbour.
 
 **Augmentation ranges** *(v2)*. All are uniform and independent per image. Scale is sampled in log space; shear is the upper-triangular entries of K.
