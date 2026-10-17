@@ -39,7 +39,7 @@ Baselines: BrainMorph, KeyMorph, SynthMorph (affine/joint), MultiMorph, ANTs, Fr
 | Pairwise map | Image j coordinates → image i coordinates: Ψ_i ∘ Ψ_j⁻¹. Linear-only: A_j⁻¹ A_i maps i → j, with true value T_j T_i⁻¹ |
 | DALI ↔ TF matrices | DALI uses reversed axis order. M_tf = P · M_dali · P (P = axis reversal), verified in the reference review |
 | Translation ranges | Specified once in mm and identical at every level *(v2)*. The rigid project's per-level doubling compensated for voxel units and is no longer needed. The pipeline converts mm to voxels with that level's spacing |
-| Sampling grids | Always float32, even under mixed precision. Images may be float16 |
+| Sampling grids | float32 (float64 when the matrices are float64, as in gradient tests), never float16, even under mixed precision. Images may be float16 |
 | Displacement fields | Voxel units of the level they live at; ×2 when upsampling to the next level |
 
 ---

@@ -48,9 +48,14 @@ def transform_image(images, matrices, spacing, displacement=None, interpolation=
         central space). float16 is cast to float32; float64 keeps the whole grid in float64.
       spacing: this level's voxel spacing in mm (scalar or 3 values).
       displacement: optional [N, X, Y, Z, 3] field in voxels of this level, added to the sampling
-        position after the affine (deformable support).
+        position AFTER the affine: coords = M y + u(y) (in input voxel units). This is NOT the
+        design's full map Psi = A^-1 o phi = A^-1 (y + u(y)) unless the linear part of M is the
+        identity. For a deformable step with a non-identity affine, either resample into central
+        space first and pass an identity matrix here (what the design does), or pass the field
+        already mapped by the inverse linear part (L^-1 u).
       interpolation: "linear" (trilinear) or "nearest" (labels; no gradient).
-      fill_value: constant for samples outside the volume.
+      fill_value: constant for samples outside the volume. Must be a Python number (not a
+        tensor): it selects code paths at trace time.
 
     Out-of-bounds handling uses an explicit validity mask per trilinear corner: indices are
     clipped, then their weights are zeroed, and the missing weight is filled with
