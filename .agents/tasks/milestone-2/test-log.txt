@@ -1,0 +1,88 @@
+﻿Milestone 2, iteration 2 local test log
+Generated: 2026-10-17 14:01:45 (after the last code edit)
+Command (PowerShell): wsl -d Ubuntu bash /mnt/d/Research/Brain_Registration_Projects/brain-group-rad/tests/run_tests_wsl.sh
+Result: 61 tests, 60 pass, 1 skipped (DALI+GPU test; no nvidia.dali locally), 0 fail; py3.8 syntax/ast checks OK on 16 files; bash -n OK.
+
+=== [1/2] py3.8 syntax check + numpy references (bgr_preproc38) ===
+Python 3.8.20
+numpy 1.21.1 | scipy 1.4.1
+py_compile OK
+ast feature_version=(3, 8) OK (16 files)
+np_reference self-check OK
+data_loading imports without TF/DALI; DALI_AVAILABLE = False
+bash -n run_verify_glacier.sh OK
+=== [2/2] unittest suite (tf_gpu) ===
+python 3.9.13 | tf 2.10.0 | numpy 1.24.3 | scipy 1.13.0
+test_pipeline_needs_dali (tests.test_data_loading.TestDaliGuard) ... ok
+test_pipeline_runs_on_synthetic_files (tests.test_data_loading.TestDaliGuard) ... skipped 'needs nvidia.dali and a GPU'
+test_dali_center (tests.test_data_loading.TestDaliMatrixFormulas) ... ok
+test_mirror_composition_and_conversion (tests.test_data_loading.TestDaliMatrixFormulas) ... ok
+test_rotation_about_center_has_no_mm_translation (tests.test_data_loading.TestDaliMatrixFormulas) ... ok
+test_scale_shear_rows (tests.test_data_loading.TestDaliMatrixFormulas) ... ok
+test_auto_initial_fill (tests.test_data_loading.TestLevelsAndRanges) ... ok
+test_default_ranges (tests.test_data_loading.TestLevelsAndRanges) ... ok
+test_intensity_config (tests.test_data_loading.TestLevelsAndRanges) ... ok
+test_level_constants (tests.test_data_loading.TestLevelsAndRanges) ... ok
+test_translation_mm_to_voxels_per_level (tests.test_data_loading.TestLevelsAndRanges) ... ok
+test_data_module_without_building_pipelines (tests.test_data_loading.TestManifest) ... ok
+test_file_lists_per_split_and_level (tests.test_data_loading.TestManifest) ... ok
+test_memory_growth_helper (tests.test_data_loading.TestManifest) ... ok
+test_missing_label_and_column (tests.test_data_loading.TestManifest) ... ok
+test_output_signature (tests.test_data_loading.TestManifest) ... ok
+test_reader_kwargs_shuffle_modes (tests.test_data_loading.TestManifest) ... ok
+test_s_matrix_from_synthetic_mask (tests.test_postprocess.TestBrainS) ... ok
+test_flip_sampling (tests.test_postprocess.TestFlips) ... ok
+test_image_and_matrix_flip_consistent (tests.test_postprocess.TestFlips) ... ok
+test_affine_target_is_full_t_and_flip_equivariant (tests.test_postprocess.TestLinearPostprocess) ... ok
+test_dali_to_mm_matches_models_transforms (tests.test_postprocess.TestLinearPostprocess) ... ok
+test_images_flipped_with_random_state_and_tf_function (tests.test_postprocess.TestLinearPostprocess) ... ok
+test_rigid_targets_use_rt_and_are_central (tests.test_postprocess.TestLinearPostprocess) ... ok
+test_counts (tests.test_postprocess.TestPairs) ... ok
+test_valid_unique_deterministic (tests.test_postprocess.TestPairs) ... ok
+test_a_matches_scipy_map_coordinates (tests.test_spatial_transformer.TestTransformImage) ... ok
+test_b_integer_translation_shifts_exactly (tests.test_spatial_transformer.TestTransformImage) ... ok
+test_c_round_trip (tests.test_spatial_transformer.TestTransformImage) ... ok
+test_d_nearest_preserves_labels (tests.test_spatial_transformer.TestTransformImage) ... ok
+test_e_cpu_out_of_bounds (tests.test_spatial_transformer.TestTransformImage) ... ok
+test_f_gradient_matches_finite_difference (tests.test_spatial_transformer.TestTransformImage) ... ok
+test_flip_commutes_with_conjugated_warp (tests.test_spatial_transformer.TestTransformImage) ... ok
+test_g_dynamic_group_size_in_tf_function (tests.test_spatial_transformer.TestTransformImage) ... ok
+test_h_mixed_float16_policy (tests.test_spatial_transformer.TestTransformImage) ... WARNING:tensorflow:Mixed precision compatibility check (mixed_float16): WARNING
+Your GPUs may run slowly with dtype policy mixed_float16 because they do not have compute capability of at least 7.0. Your GPUs:
+  NVIDIA GeForce GTX 1080, compute capability 6.1 (x2)
+See https://developer.nvidia.com/cuda-gpus for a list of GPUs and their compute capabilities.
+If you will use compatible GPU(s) not attached to this host, e.g. by running a multi-worker model, you can ignore this warning. This message will only be logged once
+ok
+test_i_multilevel_consistency (tests.test_spatial_transformer.TestTransformImage) ... ok
+test_barycentric_targets (tests.test_transforms.TestBarycenter) ... ok
+test_batched_leading_axes (tests.test_transforms.TestBarycenter) ... ok
+test_centered_output_and_pairwise (tests.test_transforms.TestBarycenter) ... ok
+test_gradient_centering_plus_point_loss (tests.test_transforms.TestBarycenter) ... ok
+test_invariance_to_common_left_multiplication (tests.test_transforms.TestBarycenter) ... ok
+test_matches_demo_numpy (tests.test_transforms.TestBarycenter) ... ok
+test_affine_is_r_times_k (tests.test_transforms.TestBuilders) ... ok
+test_identity_params (tests.test_transforms.TestBuilders) ... ok
+test_qr_round_trip_recovers_scales (tests.test_transforms.TestBuilders) ... ok
+test_rigid_layout (tests.test_transforms.TestBuilders) ... ok
+test_dali_voxel_mm_round_trip_and_meaning (tests.test_transforms.TestDaliConversion) ... ok
+test_involution_and_composition (tests.test_transforms.TestDaliConversion) ... ok
+test_conjugated_rigid_stays_rotation (tests.test_transforms.TestFlipAlgebra) ... ok
+test_coarse_levels_share_centers (tests.test_transforms.TestMatrixHelpers) ... ok
+test_inverse_compose_layout (tests.test_transforms.TestMatrixHelpers) ... ok
+test_logm_expm (tests.test_transforms.TestMatrixHelpers) ... ok
+test_mm_voxel_conversion (tests.test_transforms.TestMatrixHelpers) ... ok
+test_second_moment_and_point_loss_bruteforce (tests.test_transforms.TestPointLoss) ... ok
+test_encode_decode_round_trip (tests.test_transforms.TestRotation10D) ... ok
+test_gradient_matches_finite_difference (tests.test_transforms.TestRotation10D) ... ok
+test_gradients_finite (tests.test_transforms.TestRotation10D) ... ok
+test_identity_encoding (tests.test_transforms.TestRotation10D) ... ok
+test_matches_numpy_rederivation (tests.test_transforms.TestRotation10D) ... ok
+test_matches_reference_implementation (tests.test_transforms.TestRotation10D) ... ok
+test_random_params_are_rotations (tests.test_transforms.TestRotation10D) ... ok
+
+----------------------------------------------------------------------
+Ran 61 tests in 54.614s
+
+OK (skipped=1)
+unittest exit code: 0, wall time: 59 s
+

@@ -1,0 +1,20 @@
+{
+  "verdict": "APPROVED",
+  "findings": [
+    {
+      "id": 1,
+      "label": "Design 3.2 shuffle wording is stale",
+      "severity": "non-blocking",
+      "confidence": "confirmed",
+      "detail": "Design 3.2 says the numpy reader uses random_shuffle=True, but the default is now shuffle_after_epoch=True (shuffle_mode='epoch'). Update the design sentence when the milestone is committed."
+    },
+    {
+      "id": 2,
+      "label": "shuffle_after_epoch not yet executed",
+      "severity": "non-blocking",
+      "confidence": "likely",
+      "detail": "The new default reader mode is only checked locally as a kwargs dict. Confirm the glacier f_determinism *_epoch results and the container test_pipeline_runs_on_synthetic_files before relying on it in milestone 4; shuffle_mode='buffer' is the fallback."
+    }
+  ],
+  "reviewDoc": "d:\\Research\\Brain_Registration_Projects\\brain-group-rad/.agents/tasks/milestone-2/review.md"
+}
