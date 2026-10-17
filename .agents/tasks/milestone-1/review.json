@@ -1,0 +1,38 @@
+{
+  "verdict": "APPROVED",
+  "findings": [
+    {
+      "severity": "minor",
+      "blocking": false,
+      "confidence": "confirmed",
+      "label": "Displacement composition order",
+      "location": "models/layers.py:86",
+      "detail": "transform_image samples at M y + u(y), which equals the design's Psi_i = A_i^-1 o phi_i only when the linear part of A is identity. Harmless while deformable steps use A = I (design 6.2), but before milestone 6 either document that callers must pass identity (or an L^-1-mapped field) or apply u before the affine."
+    },
+    {
+      "severity": "minor",
+      "blocking": false,
+      "confidence": "confirmed",
+      "label": "Container run outstanding",
+      "location": "tests/ (test-log.txt)",
+      "detail": "TF suite ran on Python 3.9 / numpy 1.24 / scipy 1.13; only syntax and numpy references ran under 3.8 / 1.21 / 1.4. Re-run the suite inside tf10_nv.sif before building on this milestone."
+    },
+    {
+      "severity": "nit",
+      "blocking": false,
+      "confidence": "confirmed",
+      "label": "Tensor fill_value unsupported",
+      "location": "models/layers.py:139",
+      "detail": "`if fill_value != 0:` is a Python comparison and fails for a tensor fill_value inside tf.function. Always add the fill term or document fill must be a Python scalar."
+    },
+    {
+      "severity": "nit",
+      "blocking": false,
+      "confidence": "confirmed",
+      "label": "float64 grid vs design wording",
+      "location": "models/layers.py:78",
+      "detail": "Grid runs in float64 when matrices are float64; design section 2 says 'always float32'. Update the design row to 'float32 (float64 if matrices are float64), never float16' or force float32."
+    }
+  ],
+  "reviewDoc": "d:\\Research\\Brain_Registration_Projects\\brain-group-rad\\.agents\\tasks\\milestone-1\\review.md"
+}
