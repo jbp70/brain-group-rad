@@ -157,7 +157,12 @@ Every level has identical trainable parameters, so every parameter is first trai
 
 1. 1×1 reductions after L6 with filters (192, 96, 48, 24). These are group blocks in both configs.
 2. Flatten the 5×7×6×24 = 5,040 features per image. This is deliberate: it keeps the spatial layout that translation regression needs.
-3. Concat with the group mean of the flattened vectors, then dense layers (2048, 512), each with a group-mean concat, then **standard dropout p = 0.15** *(v2)*. There's no recurrent dropout, because prior levels are frozen.
+3. Dense layers (2048, 512), then **standard dropout p = 0.15** *(v2)*. There's no recurrent dropout, because prior levels are frozen.
+   - **Group concat in dense layers** *(v3.2)*: a dense group block is norm → act → concat(hᵢ, mean over the N group members of h) → Dense. That is W_a hᵢ + W_b m + b, i.e. a per-group bias.
+   - **Default: no group concat at the first dense layer** (flatten 5,040 → 2048). There it would double the largest weight matrix (10.3 M → 20.6 M parameters). The 1×1 reductions before it are group blocks, so the flattened vector already carries group context.
+   - The 2048 → 512 layer **is** a group block (+1.05 M).
+   - Total linear-decoder overhead ≈ 1.1 M instead of 11.4 M.
+   - Flag `dense_group_concat_first` (default false) enables it at the first dense layer too, for ablations. Config B is unchanged in meaning: all of these layers are after the bottleneck.
 4. **Heads** *(v2: shared rotation branch plus an extra scale/shear branch)*:
    - **Rotation + translation branch (shared by rigid and affine):** 10D rotation representation (validated at ±45° in the rigid project) plus t in mm. 13 outputs. Zero kernel with identity-encoding bias.
    - **Scale/shear branch (affine only):** 3 log-scales and 3 shears, giving K (upper-triangular, diagonal exp(s)). 6 outputs, zero-initialized, so K = I at start.
