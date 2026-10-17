@@ -1,11 +1,10 @@
-"""Shared TF test setup: quiet logs and GPU memory growth (so tests don't grab a shared GPU)."""
+"""Shared TF test setup: quiet logs, TF32 off and GPU memory growth (so tests don't grab a
+shared GPU). TF32 must be off on Ampere GPUs (A100): see models/precision.py."""
 import os
 
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
-import tensorflow as tf  # noqa: E402
+import tensorflow as tf  # noqa: E402,F401
 
-for _gpu in tf.config.list_physical_devices("GPU"):
-    try:
-        tf.config.experimental.set_memory_growth(_gpu, True)
-    except RuntimeError:
-        pass  # already initialized
+from models.precision import configure_tf_precision  # noqa: E402
+
+configure_tf_precision(tf32=False, memory_growth=True)

@@ -33,14 +33,12 @@ TASK_SEED_OFFSET = {"rigid": 0, "affine": 1, "deform": 2}
 
 
 def enable_memory_growth():
-    """Turn on TF memory growth for every visible GPU. Call before building datasets."""
-    gpus = tf.config.list_physical_devices("GPU")
-    for gpu in gpus:
-        try:
-            tf.config.experimental.set_memory_growth(gpu, True)
-        except RuntimeError:
-            pass  # GPU already initialized; growth must be set before first use
-    return gpus
+    """Turn on TF memory growth for every visible GPU and turn TF32 off (see
+    models/precision.py: TF32 on Ampere GPUs corrupts the float32 transform/grid math).
+    Call before building datasets or models."""
+    from models.precision import configure_tf_precision
+    configure_tf_precision(tf32=False, memory_growth=True)
+    return tf.config.list_physical_devices("GPU")
 
 
 def read_manifest(path):

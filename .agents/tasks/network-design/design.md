@@ -40,6 +40,7 @@ Baselines: BrainMorph, KeyMorph, SynthMorph (affine/joint), MultiMorph, ANTs, Fr
 | DALI ↔ TF matrices | DALI uses reversed axis order. M_tf = P · M_dali · P (P = axis reversal), verified in the reference review |
 | Translation ranges | Specified once in mm and identical at every level *(v2)*. The rigid project's per-level doubling compensated for voxel units and is no longer needed. The pipeline converts mm to voxels with that level's spacing |
 | Sampling grids | float32 (float64 when the matrices are float64, as in gradient tests), never float16, even under mixed precision. Images may be float16 |
+| TF32 | **Off** in every process (`models.precision.configure_tf_precision()` at startup). On Ampere GPUs (A100, A6000, A40), TF 2.10 runs float32 matmul/einsum in TensorFloat-32 by default, which corrupted the grid and 4×4 matrix math by ~1e-3 on glacier. Convolutions stay fast through `mixed_float16` *(v3.1, milestone 2)* |
 | Displacement fields | Voxel units of the level they live at; ×2 when upsampling to the next level |
 
 ---
