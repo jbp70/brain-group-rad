@@ -60,3 +60,5 @@ results/
 
 # ---- Prior-project reference code (local-only, read for design; not part of this repo) ----
 reference/
+# Review of that code quotes it in detail, so it stays local too
+.agents/tasks/reference-code-review/
