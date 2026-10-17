@@ -112,6 +112,31 @@ def test_export_array_policy():
         assert s in text, s
     # Only task 0 exports the template (no concurrent template writes).
     assert '[ "$TASK" = "0" ]' in text
+    # Optional (evaluation-only) label sets: default empty, passed only when set; documented via env.
+    for s in ("OPTIONAL_LABEL_SETS=${OPTIONAL_LABEL_SETS:-}", 'if [ -n "$OPTIONAL_LABEL_SETS" ]; then',
+              'extra+=(--optional-label-sets "$OPTIONAL_LABEL_SETS")',
+              "env LABEL_SETS=train18 OPTIONAL_LABEL_SETS=lumir10 sbatch --array=0-0%2"):
+        assert s in text, s
+
+
+def _export_argv(tmp_path, env_extra):
+    """Run export_array.sh with a stub run_in_container.sh that prints its argv; return that argv."""
+    repo = tmp_path / "repo"
+    (repo / "preprocessing").mkdir(parents=True, exist_ok=True)
+    (repo / "preprocessing" / "run_in_container.sh").write_text('printf "%s\\n" "$@"\n')
+    env = {k: v for k, v in os.environ.items() if k not in ("OPTIONAL_LABEL_SETS", "LABEL_SETS")}
+    env.update(REPO_DIR=str(repo), SLURM_ARRAY_TASK_ID="1", **env_extra)
+    res = subprocess.run(["bash", os.path.join(PKG, "slurm", "export_array.sh")], env=env,
+                         stdout=subprocess.PIPE, universal_newlines=True)
+    assert res.returncode == 0
+    return res.stdout.splitlines()
+
+
+def test_export_array_optional_label_sets(tmp_path):
+    argv = _export_argv(tmp_path, {})
+    assert "--optional-label-sets" not in argv and argv[argv.index("--label-sets") + 1] == "train18"
+    argv = _export_argv(tmp_path, {"OPTIONAL_LABEL_SETS": "lumir10,seg4", "LABEL_SETS": "train18"})
+    assert argv[argv.index("--optional-label-sets") + 1] == "lumir10,seg4"
 
 
 def test_qc_export_defaults():

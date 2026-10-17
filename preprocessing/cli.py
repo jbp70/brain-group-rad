@@ -195,7 +195,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help="pyramid levels from 1,2,4 (default 1,2,4: full, _2, _4)")
     s.add_argument("--label-sets", default="train18",
                    help="comma list: train18 (default; all levels), synthseg (103-id remap) and provided "
-                        "label names such as lumir10 (full resolution only). Validation: train18,lumir10")
+                        "label names such as lumir10 (full resolution only); a missing set fails the export")
+    s.add_argument("--optional-label-sets", default="", metavar="NAME[,NAME]",
+                   help="comma list of evaluation-only provided label sets, added to --label-sets; a case "
+                        "without one skips it and lists it in the manifest column missing_optional_labels "
+                        "(never train18). Validation: --optional-label-sets lumir10")
     s.add_argument("--contrast", action="append", default=None,
                    help="contrast filter, repeatable or comma list (default T1w: drops LUMIR's non-T1 "
                         "unknown0001 val cases); 'any' exports every contrast")
@@ -400,7 +404,7 @@ def cmd_export_npy(a) -> int:
         n = export_npy(a.out_root, a.export_root, a.dataset, a.image_dtype, a.label_dtype, tp, a.overwrite,
                        remap_labels=not a.no_remap_labels, include_mask=a.include_mask, levels=a.levels,
                        label_sets=[a.label_sets], contrasts=contrasts, splits=a.split,
-                       start=a.start, end=a.end, rows=a.rows)
+                       start=a.start, end=a.end, rows=a.rows, optional_label_sets=[a.optional_label_sets])
     except ValueError as e:
         log.error("%s", e)
         return 1

@@ -39,10 +39,15 @@ Defaults:
               abs rounding error ~2.4e-4 near 1.0).
   label sets  --label-sets train18 (default). Opt-in: synthseg (the 103-id
               SynthSeg --parc remap, uint8) and provided labels such as lumir10.
-              A validation export passes --label-sets train18,lumir10. train18 and
+              A validation export passes --optional-label-sets lumir10. train18 and
               synthseg are read from the RAW SynthSeg ids in labels_synthseg.nii.gz;
               any id missing from a fixed LUT fails the export (ids and case listed).
-              A requested label set missing for a case fails the export.
+              A requested label set missing for a case fails the export, except
+              sets in --optional-label-sets (evaluation only, added to --label-sets;
+              never train18): a case without one skips that file, is logged, and
+              lists the set in the manifest column missing_optional_labels
+              (';'-separated; empty otherwise). LUMIR val: 10 of the 39 T1w cases
+              (3484-3493, landmarks only) have no lumir10 map.
               Provided label names without a fixed LUT are exported unchanged as
               uint16 (warning); --no-remap-labels keeps original ids (not with train18).
   contrast    --contrast T1w (default; repeatable or comma list, matched against the
@@ -63,7 +68,8 @@ Row selection and chunking (SLURM arrays, slurm/export_array.sh):
 
 Writes are atomic (temp file in the same folder, then rename), so a killed job
 never leaves a truncated .npy. Resume: a case is skipped when every requested
-file exists with the expected dtype and shape; a file with a different dtype or
+file exists with the expected dtype and shape (an optional label set without a
+source for that case is not requested for it); a file with a different dtype or
 shape fails the export (it belongs to another export configuration);
 --overwrite rewrites everything.
 
@@ -72,7 +78,7 @@ labels_train18 6.9 / 0.86 / 0.11 MB (uint8): ~39 MB; ~135 GB for 3,433 cases.
 (+6.9 MB per full-resolution extra label map, e.g. lumir10 or synthseg.)
 
     python -m preprocessing export-npy --out-root /data/processed --export-root /data/npy_v2 --dataset lumir
-    python -m preprocessing export-npy ... --split val --label-sets train18,lumir10
+    python -m preprocessing export-npy ... --split val --label-sets train18 --optional-label-sets lumir10
     python -m preprocessing export-npy ... --split train --start 0 --end 200   (one chunk)
     python -m preprocessing export-merge --export-root /data/npy_v2
     python -m preprocessing export-check --export-root /data/npy_v2 --sample 20
@@ -111,10 +117,14 @@ SYNTHSEG_SETS = ("train18", "synthseg")
 PYRAMID_LABEL_SETS = ("train18",)
 _NAME = re.compile(r"^[A-Za-z0-9_-]+$")
 
+MISSING_OPTIONAL = "missing_optional_labels"
 BASE_COLUMNS = ["dataset", "subject_dir", "subject", "session", "contrast", "split", "npy_dir", "levels",
-                "shape", "image_dtype", "labels", "label_dtypes", "label_levels", "label_luts", "mask"]
+                "shape", "image_dtype", "labels", "label_dtypes", "label_levels", "label_luts", "mask",
+                MISSING_OPTIONAL]
 LEVEL_FIELDS = ["image", "shape", "labels", "spacing", "affine", "world_center"]
 MANIFEST_COLUMNS = BASE_COLUMNS + ["%s_l%d" % (f, k) for k in ALL_LEVELS for f in LEVEL_FIELDS]
+# Parts written before missing_optional_labels existed (merged with that column empty).
+OLD_MANIFEST_COLUMNS = [c for c in MANIFEST_COLUMNS if c != MISSING_OPTIONAL]
 
 
 # ----------------------------------------------------------------- geometry / pooling
@@ -362,11 +372,15 @@ def export_npy(out_root: str, export_root: str, datasets: Optional[Sequence[str]
                levels: Sequence[int] = DEFAULT_LEVELS, label_sets: Sequence[str] = DEFAULT_LABEL_SETS,
                contrasts: Optional[Sequence[str]] = DEFAULT_CONTRASTS, splits: Optional[Sequence[str]] = None,
                start: Optional[int] = None, end: Optional[int] = None,
-               rows: Optional[Sequence[int]] = None) -> int:
+               rows: Optional[Sequence[int]] = None,
+               optional_label_sets: Optional[Sequence[str]] = None) -> int:
     """Export the selected completed cases; returns the number of cases in this run's manifest part.
 
     label_dtype: "auto" (uint8 if the LUT fits, else uint16; uint16 without
     remapping) or an explicit "uint8"/"uint16" (error if values do not fit).
+    optional_label_sets: evaluation-only provided sets (e.g. lumir10), added to
+    label_sets; a case without one skips that file and lists it in the
+    manifest column missing_optional_labels. train18 cannot be optional.
     contrasts: None/[]/["any"] = no contrast filter. luts: override of
     preprocessing.luts.LUTS (tests). Without start/end/rows the manifest parts
     are merged into export_manifest.csv at the end (merge_parts).
@@ -379,7 +393,11 @@ def export_npy(out_root: str, export_root: str, datasets: Optional[Sequence[str]
     levels = sorted({int(k) for k in levels})
     if not levels or any(k not in ALL_LEVELS for k in levels):
         raise ValueError("levels must be a non-empty subset of %s, got %s" % (ALL_LEVELS, levels))
-    sets = _split_list(label_sets)
+    optional = _split_list(optional_label_sets)
+    if "train18" in optional:
+        raise ValueError("train18 is the training label set and cannot be optional; drop it from "
+                         "--optional-label-sets")
+    sets = _split_list(list(label_sets or []) + optional)
     for ls in sets:
         if not _NAME.match(ls):
             raise ValueError("invalid label set name %r" % ls)
@@ -397,6 +415,7 @@ def export_npy(out_root: str, export_root: str, datasets: Optional[Sequence[str]
     used_luts: Dict[str, Dict[str, object]] = {}
     warned = set()
     n = {"contrast": 0, "split": 0, "status": 0, "written": 0, "kept": 0}
+    n_missing: Dict[str, int] = {}
 
     for ds, d in cases:
         meta_path = os.path.join(d, "meta.json")
@@ -442,8 +461,13 @@ def export_npy(out_root: str, export_root: str, datasets: Optional[Sequence[str]
             items.append((os.path.join(dst, "image%s.npy" % level_suffix(k)), image_dtype, lshape[k],
                           image_level(k)))
         label_info: List[Tuple[str, str, bool, List[int]]] = []  # (set, dtype, remapped, levels)
+        missing: List[str] = []
         for ls in sets:
             src = _label_source(d, ls)
+            if not os.path.isfile(src) and ls in optional:
+                missing.append(ls)
+                n_missing[ls] = n_missing.get(ls, 0) + 1
+                continue
             if not os.path.isfile(src):
                 raise ValueError("export: %s has no %s (needed for label set %r); drop it from --label-sets "
                                  "or restrict --split/--contrast" % (d, os.path.basename(src), ls))
@@ -478,6 +502,10 @@ def export_npy(out_root: str, export_root: str, datasets: Optional[Sequence[str]
                     fl(), k, "%s labels_%s" % (d, ls)))
                 items.append((os.path.join(dst, "labels_%s%s.npy" % (ls, level_suffix(k))), dt, lshape.get(
                     k, tuple(shape)), make))
+        if missing:
+            log.info("export: %s has no %s (optional label set%s); skipped, listed in %s", d,
+                     ", ".join(os.path.basename(_label_source(d, ls)) for ls in missing),
+                     "s" if len(missing) > 1 else "", MISSING_OPTIONAL)
         mask_source = ""
         if include_mask:
             mask_source = "mask.nii.gz" if os.path.isfile(os.path.join(d, "mask.nii.gz")) else "image>0"
@@ -500,7 +528,8 @@ def export_npy(out_root: str, export_root: str, datasets: Optional[Sequence[str]
             "image_dtype": image_dtype, "labels": ";".join(s for s, _, _, _ in label_info),
             "label_dtypes": ";".join("%s:%s%s" % (s, dt, "" if rm else ":raw") for s, dt, rm, _ in label_info),
             "label_levels": ";".join("%s:%s" % (s, ",".join(map(str, lv))) for s, _, _, lv in label_info),
-            "label_luts": lut_path if any(rm for _, _, rm, _ in label_info) else "", "mask": mask_source}
+            "label_luts": lut_path if any(rm for _, _, rm, _ in label_info) else "", "mask": mask_source,
+            MISSING_OPTIONAL: ";".join(missing)}
         for k in levels:
             ak = level_affine(aff, k)
             r["image_l%d" % k] = "image%s.npy" % level_suffix(k)
@@ -524,6 +553,9 @@ def export_npy(out_root: str, export_root: str, datasets: Optional[Sequence[str]
     log.info("export-npy: %d cases in part %s (%d written, %d already complete and kept); skipped %d by "
              "--contrast %s, %d by --split %s, %d not completed", len(out_rows), name, n["written"], n["kept"],
              n["contrast"], ",".join(want_c) or "any", n["split"], ",".join(want_s) or "any", n["status"])
+    for ls in optional:
+        log.info("export-npy: optional label set %s missing for %d of %d cases (listed in %s)", ls,
+                 n_missing.get(ls, 0), len(out_rows), MISSING_OPTIONAL)
     if n["kept"]:
         log.info("export-npy: kept %d complete cases (dtype/shape checked, contents not re-checked; use "
                  "--overwrite after reprocessing)", n["kept"])
@@ -597,9 +629,10 @@ def merge_parts(export_root: str) -> int:
     for p in parts:
         with open(p, "r", newline="", encoding="utf-8") as f:
             reader = csv.DictReader(f)
-            if list(reader.fieldnames or []) != MANIFEST_COLUMNS:
+            if list(reader.fieldnames or []) not in (MANIFEST_COLUMNS, OLD_MANIFEST_COLUMNS):
                 raise ValueError("export-merge: %s has different columns (older export version?)" % p)
             for r in reader:
+                r = {c: r.get(c) or "" for c in MANIFEST_COLUMNS}  # old parts: missing_optional_labels empty
                 key = (r["dataset"], r["subject_dir"])
                 if key in rows and rows[key] != r:
                     raise ValueError("export-merge: %s/%s differs between %s and %s (different export options); "

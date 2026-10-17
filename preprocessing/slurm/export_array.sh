@@ -9,6 +9,9 @@
 #   P=$PROJ/data/processed/lumir/manifest_processed.csv
 #   N=$(( ($(tail -n +2 $P | wc -l) + 199) / 200 ))     # chunks of 200 rows
 #   sbatch --array=0-$((N-1))%2 --export=ALL,SPLIT=train preprocessing/slurm/export_array.sh
+#   # T1 val with the evaluation-only lumir10 labels (missing for 10 LUMIR val cases; one task):
+#   env LABEL_SETS=train18 OPTIONAL_LABEL_SETS=lumir10 sbatch --array=0-0%2 \
+#       --export=ALL,SPLIT=val,CHUNK_SIZE=100000,INCLUDE_TEMPLATE=0 preprocessing/slurm/export_array.sh
 #   # Only once that array has FINISHED (squeue -u jn85 empty; cluster rule: at most two of your
 #   # jobs active, so don't queue the merge as a pending dependency next to a running array):
 #   sbatch --array=0-0%2 --export=ALL,MERGE_ONLY=1 preprocessing/slurm/export_array.sh
@@ -50,6 +53,10 @@ CHUNK_SIZE=${CHUNK_SIZE:-200}
 SPLIT=${SPLIT:-any}
 CONTRAST=${CONTRAST:-T1w}
 LABEL_SETS=${LABEL_SETS:-train18}
+# Evaluation-only label sets (e.g. lumir10); a case without one skips it (manifest column
+# missing_optional_labels). Empty = none. Like LABEL_SETS, pass a comma list with
+# `env OPTIONAL_LABEL_SETS=a,b sbatch ...`, not in --export (sbatch splits it on commas).
+OPTIONAL_LABEL_SETS=${OPTIONAL_LABEL_SETS:-}
 LEVELS=${LEVELS:-1,2,4}
 IMAGE_DTYPE=${IMAGE_DTYPE:-float32}
 # 1 = task 0 also exports the per-level template (needs CONFIG)
@@ -78,6 +85,9 @@ END=$((START + CHUNK_SIZE))
 extra=()
 if [ "$INCLUDE_TEMPLATE" = "1" ] && [ "$TASK" = "0" ]; then
     extra=(--include-template --config "$CONFIG")
+fi
+if [ -n "$OPTIONAL_LABEL_SETS" ]; then
+    extra+=(--optional-label-sets "$OPTIONAL_LABEL_SETS")
 fi
 echo "task ${TASK}: rows [${START}, ${END}) of ${OUT_ROOT}/${DATASET}/manifest_processed.csv split=${SPLIT} on $(hostname)"
 "${RIC[@]}" export-npy --out-root "$OUT_ROOT" --export-root "$EXPORT_ROOT" --dataset "$DATASET" \

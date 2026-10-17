@@ -157,6 +157,125 @@ def test_val_labels_full_resolution_only_and_missing_set_fails(tmp_path):
         export_npy(out, str(tmp_path / "npy3"), levels=[2, 4], label_sets=["train18,lumir10"], splits=["val"])
 
 
+def _val_cases(out):
+    """Two val cases with lumir10 (v0, v1), one landmark-only case without it (v2), one train case."""
+    lumir = {}
+    for i in range(2):
+        lumir[i] = np.random.default_rng(10 + i).integers(0, 11, SHAPE)
+        _subject(out, "v%d" % i, split="val", extra_label=("lumir10", lumir[i]), seed=i)
+    _subject(out, "v2", split="val", seed=2)
+    _subject(out, "t0", split="train", seed=3)
+    summarize(os.path.join(out, "ds"))
+    return lumir
+
+
+def test_optional_label_set_missing_for_some_cases(tmp_path, caplog, capsys):
+    out = str(tmp_path / "out")
+    lumir = _val_cases(out)
+    exp = str(tmp_path / "npy")
+    with caplog.at_level(logging.INFO, logger="preprocessing"):
+        assert main(["export-npy", "--out-root", out, "--export-root", exp, "--split", "val",
+                     "--label-sets", "train18", "--optional-label-sets", "lumir10"]) == 0
+    # Present: exported (full resolution only). Missing: no file, success.
+    for i in range(2):
+        np.testing.assert_array_equal(np.load(os.path.join(exp, "ds", "v%d" % i, "labels_lumir10.npy")), lumir[i])
+    e2 = os.path.join(exp, "ds", "v2")
+    assert sorted(os.listdir(e2)) == ["image.npy", "image_2.npy", "image_4.npy", "labels_train18.npy",
+                                      "labels_train18_2.npy", "labels_train18_4.npy"]
+    rows = {r["subject_dir"]: r for r in _manifest(exp)}
+    assert sorted(rows) == ["v0", "v1", "v2"] and list(_manifest(exp)[0]) == MANIFEST_COLUMNS
+    for i in range(2):
+        r = rows["v%d" % i]
+        assert r["labels"] == "train18;lumir10" and r["missing_optional_labels"] == ""
+        assert r["labels_l1"] == "labels_train18.npy;labels_lumir10.npy"
+    r = rows["v2"]
+    assert r["labels"] == "train18" and r["missing_optional_labels"] == "lumir10"
+    assert r["labels_l1"] == "labels_train18.npy" and r["label_dtypes"] == "train18:uint8"
+    assert caplog.text.count("optional label set") == 2  # one line for v2, one summary
+    assert "v2 has no labels_lumir10.nii.gz" in caplog.text
+    # The grep checks in the report's step 5 (CSV fields with commas are quoted, so no cut -f).
+    text = open(os.path.join(exp, "export_manifest.csv")).read()
+    assert text.count(",lumir10,image.npy,") == 1 and text.count("labels_lumir10.npy") == 2
+    assert "optional label set lumir10 missing for 1 of 3 cases" in caplog.text
+    # Same result when the optional set is also listed in --label-sets.
+    exp2 = str(tmp_path / "npy2")
+    assert export_npy(out, exp2, splits=["val"], label_sets=["train18,lumir10"], optional_label_sets=["lumir10"]) == 3
+    assert {r["subject_dir"]: r["missing_optional_labels"] for r in _manifest(exp2)} == {
+        "v0": "", "v1": "", "v2": "lumir10"}
+    # export-check reads only the files listed in the manifest: no problem for v2.
+    n, problems, _ = export_check(exp, sample=0)
+    assert n == 3 and problems == []
+    capsys.readouterr()
+    assert main(["export-check", "--export-root", exp, "--sample", "0"]) == 0
+    assert "checked 3 cases: OK" in capsys.readouterr().out
+
+
+def test_optional_label_set_rules(tmp_path):
+    out = str(tmp_path / "out")
+    _val_cases(out)
+    # A mandatory set missing still fails loudly.
+    with pytest.raises(ValueError, match="v2 has no labels_lumir10.nii.gz"):
+        export_npy(out, str(tmp_path / "a"), splits=["val"], label_sets=["train18,lumir10"])
+    # The train case has no lumir10 either; optional lets it through, synthseg stays mandatory.
+    assert export_npy(out, str(tmp_path / "b"), label_sets=["train18,synthseg"],
+                      optional_label_sets=["lumir10"]) == 4
+    # train18 can never be optional.
+    with pytest.raises(ValueError, match="train18 is the training label set and cannot be optional"):
+        export_npy(out, str(tmp_path / "c"), optional_label_sets=["lumir10,train18"])
+    assert main(["export-npy", "--out-root", out, "--export-root", str(tmp_path / "d"),
+                 "--optional-label-sets", "train18"]) == 1
+
+
+def test_optional_resume_after_failed_mandatory_run(tmp_path, caplog):
+    out = str(tmp_path / "out")
+    _val_cases(out)
+    exp = str(tmp_path / "npy")
+    # The cluster failure: lumir10 mandatory; v0 and v1 are written before v2 stops the run, no part.
+    with pytest.raises(ValueError, match="v2 has no labels_lumir10"):
+        export_npy(out, exp, datasets=["ds"], splits=["val"], start=0, end=100000, label_sets=["train18,lumir10"])
+    assert not glob.glob(os.path.join(exp, "manifest_parts", "*.csv"))
+    assert not os.path.exists(os.path.join(exp, "ds", "v2"))
+    mt = {p: os.stat(p).st_mtime_ns for p in glob.glob(os.path.join(exp, "ds", "v[01]", "*.npy"))}
+    assert len(mt) == 14
+    for p in mt:
+        os.utime(p, ns=(1, 1))
+    # Rerun with lumir10 optional: v0/v1 kept (complete), v2 written once and then also complete.
+    with caplog.at_level(logging.INFO, logger="preprocessing"):
+        assert export_npy(out, exp, datasets=["ds"], splits=["val"], start=0, end=100000, label_sets=["train18"],
+                          optional_label_sets=["lumir10"]) == 3
+    assert all(os.stat(p).st_mtime_ns == 1 for p in mt)
+    assert "1 written, 2 already complete and kept" in caplog.text
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="preprocessing"):
+        export_npy(out, exp, datasets=["ds"], splits=["val"], start=0, end=100000, label_sets=["train18"],
+                   optional_label_sets=["lumir10"])
+    assert "0 written, 3 already complete and kept" in caplog.text
+
+
+def test_merge_accepts_old_parts_without_missing_column(tmp_path):
+    out = str(tmp_path / "out")
+    _val_cases(out)
+    exp = str(tmp_path / "npy")
+    export_npy(out, exp, datasets=["ds"], splits=["train"], start=0, end=100000)
+    export_npy(out, exp, datasets=["ds"], splits=["val"], start=0, end=100000, optional_label_sets=["lumir10"])
+    # Rewrite the train part in the old layout (no missing_optional_labels column).
+    old = glob.glob(os.path.join(exp, "manifest_parts", "*split-train*.csv"))[0]
+    rows = list(csv.DictReader(open(old)))
+    cols = [c for c in MANIFEST_COLUMNS if c != "missing_optional_labels"]
+    with open(old, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=cols, lineterminator="\n", extrasaction="ignore")
+        w.writeheader()
+        w.writerows(rows)
+    assert merge_parts(exp) == 4
+    m = {r["subject_dir"]: r for r in _manifest(exp)}
+    assert list(_manifest(exp)[0]) == MANIFEST_COLUMNS
+    assert m["t0"]["missing_optional_labels"] == "" and m["v2"]["missing_optional_labels"] == "lumir10"
+    # The same case in an old and a new part with identical content still collapses.
+    export_npy(out, exp, datasets=["ds"], rows=[0])  # t0, new layout
+    assert merge_parts(exp) == 4
+    assert export_check(exp, sample=0)[1] == []
+
+
 # ----------------------------------------------------------------- pooling
 
 def test_block_average_exact():

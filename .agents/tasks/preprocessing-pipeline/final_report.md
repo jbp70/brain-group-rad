@@ -520,7 +520,7 @@ If export stops with `label values [...] are not in the fixed LUT (LUMIR25 coars
 
   Left and right are merged. An unknown id fails the export, and the error names the ids and the case. `label_luts.json` stores the map, the names and `classes` (id → name).
 - Coarse labels are merged first, then reduced by block majority vote. On a tie the smallest merged id wins (e.g. a 4/4 background/cortex block becomes background).
-- `--label-sets` defaults to `train18`. Opt-in sets: `synthseg` (the old 103-id remap) and provided labels such as `lumir10`. Both are written at full resolution only, for evaluation. The val export passes `--label-sets train18,lumir10`. If a requested set is missing for a case, the export fails.
+- `--label-sets` defaults to `train18`. Opt-in sets: `synthseg` (the old 103-id remap) and provided labels such as `lumir10`. Both are written at full resolution only, for evaluation. The val export passes `--label-sets train18 --optional-label-sets lumir10`. If a mandatory set is missing for a case, the export fails; a missing optional set is skipped and listed in the manifest (see step 3 below).
 - `--contrast` defaults to T1w, so the 10 non-T1 `unknown0001` val cases are skipped. The log reports how many cases were skipped. `--contrast any` exports every contrast. `--split train|val` filters by split.
 - Template (`--include-template`): `template[_2,_4].npy` is block-averaged. `template_mask[_2,_4].npy` uses block majority vote with ties going to 0, so a coarse voxel counts as brain only when more than half of its block is brain. `template/template_info.json` holds the per-level shape, spacing, affine and world center.
 - `export_manifest.csv` lists only exported cases. For each level k it has `image_lk`, `shape_lk`, `labels_lk`, `spacing_lk`, `affine_lk` and `world_center_lk`, plus `image_dtype`, `label_dtypes` and `label_levels`.
@@ -565,11 +565,10 @@ P=$D/processed/lumir/manifest_processed.csv
 N=$(( ($(tail -n +2 $P | wc -l) + 199) / 200 ))
 sbatch --array=0-$((N-1))%2 --export=ALL,SPLIT=train,EXPORT_ROOT=$D/npy_v2 preprocessing/slurm/export_array.sh
 
-# 3. T1 val export with lumir10, after the train array has finished (one task covers every row;
-#    env passes the comma list, which sbatch --export would split; the template is already done)
-env LABEL_SETS=train18,lumir10 sbatch --array=0-0%2 \
-    --export=ALL,SPLIT=val,CHUNK_SIZE=100000,INCLUDE_TEMPLATE=0,EXPORT_ROOT=$D/npy_v2 \
-    preprocessing/slurm/export_array.sh
+# 3. T1 val export with the optional lumir10 labels, after the train array has finished (one task
+#    covers every row; label sets go through env because sbatch --export splits comma lists; the
+#    template is already done)
+env LABEL_SETS=train18 OPTIONAL_LABEL_SETS=lumir10 sbatch --array=0-0%2 --export=ALL,SPLIT=val,CHUNK_SIZE=100000,INCLUDE_TEMPLATE=0,EXPORT_ROOT=$D/npy_v2 preprocessing/slurm/export_array.sh
 
 # 4. Merge, after step 3 has finished
 sbatch --array=0-0%2 --export=ALL,MERGE_ONLY=1,EXPORT_ROOT=$D/npy_v2 preprocessing/slurm/export_array.sh
@@ -582,6 +581,8 @@ $RIC export-check --export-root $D/npy_v2 --sample 50       # --sample 0 = every
 head -2 $D/npy_v2/export_manifest.csv
 tail -n +2 $D/npy_v2/export_manifest.csv | wc -l               # expect 3,384 train + 39 val = 3,423
 tail -n +2 $D/npy_v2/export_manifest.csv | cut -d, -f5,6 | sort | uniq -c   # T1w,train / T1w,val counts
+grep -c 'labels_lumir10.npy' $D/npy_v2/export_manifest.csv     # expect 29 (val cases with lumir10)
+grep -c ',lumir10,image.npy,' $D/npy_v2/export_manifest.csv   # expect 10 (missing_optional_labels=lumir10)
 ls $D/npy_v2/template/ $D/npy_v2/manifest_parts/
 du -sh $D/npy_v2
 ```
@@ -596,7 +597,15 @@ Expected sizes per case (uncompressed `.npy`):
 
 That's about 39 MB per case, plus 6.9 MB for `labels_lumir10.npy` on val cases, and about 135 GB in total.
 
-If a val case has no `labels_lumir10.nii.gz`, step 3 stops and names the case. Send me the name; `LABEL_SETS=train18` exports val without it.
+lumir10 is optional in step 3 (`--optional-label-sets`, via `OPTIONAL_LABEL_SETS`). LUMIR25 provides 10-class labels for 40 of its 50 val images and only landmarks for the other 10. 10 of the 39 T1w val cases (LUMIRMRI_3484 to 3493) therefore have no `labels_lumir10.nii.gz`. The first val run made lumir10 mandatory and stopped at 3484 with exit 1, without writing a val manifest part, so the merge had 3,384 train rows and 0 val rows. With lumir10 optional:
+
+- A case without the map gets no `labels_lumir10.npy` and one INFO log line. The run ends with a summary line (`optional label set lumir10 missing for 10 of 39 cases`).
+- `export_manifest.csv` has a new column `missing_optional_labels`, holding the missing set names separated by `;` and empty otherwise. For those cases lumir10 is also absent from `labels`, `label_dtypes`, `label_levels` and `labels_l1`, so `export-check` doesn't look for the file.
+- Mandatory sets (train18 and anything in `LABEL_SETS`) still fail loudly when missing. train18 can't be optional.
+- `export-merge` accepts the train parts that were written before this column existed and leaves the column empty for them. No train rerun is needed.
+- Resume: the val case folders already written by the failed run are complete and are kept. That run stopped while planning 3484, before writing any of its files. Every earlier case in the chunk had all of its files (image ×3, train18 ×3, lumir10) written, each through an atomic rename. The rerun requests exactly the same files for those cases, so they pass the dtype/shape check and are skipped. A test reproduces this sequence.
+
+Expected after rerunning step 3 and then step 4 (merge): 3,423 rows (3,384 T1w train + 39 T1w val), 29 val rows with `labels_lumir10.npy`, and 10 val rows with `lumir10` in `missing_optional_labels`.
 
 Once v2 is verified, you can delete the old export with `rm -rf $D/npy`. Training reads only `$D/npy_v2`.
 
@@ -604,4 +613,3 @@ Once v2 is verified, you can delete the old export with `rm -rf $D/npy`. Trainin
 
 - No cluster run yet. Tests use small synthetic volumes. I timed one synthetic full-size case in WSL; cluster I/O on `/autofs` may be slower.
 - The real LUMIR SynthSeg output may contain an id outside the 103 `--parc` ids. That would fail train18 loudly.
-- Whether every T1w val case has a lumir10 map.
