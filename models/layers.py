@@ -85,7 +85,13 @@ def transform_image(images, matrices, spacing, displacement=None, interpolation=
 
     # Sampling coordinates in input voxel indices: [N, X, Y, Z, 3]
     grid = index_grid(spatial, cdt)
-    coords = tf.einsum("nij,xyzj->nxyzi", m_vox[:, :3, :3], grid) + m_vox[:, None, None, None, :3, 3]
+    # Elementwise multiply-add, NOT einsum/matmul: on Ampere GPUs (A100) TF 2.10 runs float32
+    # matmul/einsum in TensorFloat-32 by default (10-bit mantissa), which puts ~1e-3 voxel-scale
+    # errors into the sampling coordinates. Elementwise ops are never TF32, so the grid stays
+    # exact float32 while convolutions elsewhere can keep TF32. Verified on glacier (A100).
+    lin = m_vox[:, None, None, None, :3, :3]                         # [N, 1, 1, 1, 3, 3]
+    coords = (tf.reduce_sum(lin * grid[None, :, :, :, None, :], axis=-1)
+              + m_vox[:, None, None, None, :3, 3])                    # [N, X, Y, Z, 3]
     if displacement is not None:
         coords = coords + tf.cast(displacement, cdt)
 
