@@ -1,0 +1,12 @@
+{
+  "verdict": "APPROVED",
+  "findings": [
+    "Non-blocking: copy_weights_from checks only variable shapes and names, so shape-neutral config differences (translation_scale, negative_slope, dropout, centering_iters) copy silently. Compare config.to_dict() and raise on a mismatch.",
+    "Non-blocking: head_norm_act (BN -> act before dropout and heads) is an addition the spec doesn't list. Have Jay confirm it and record it in design 4.4.",
+    "Non-blocking: TF tests ran under Python 3.9 / numpy 1.24; only a syntax check ran under 3.8. Run the unittest suite inside tf10_nv.sif on glacier (one pinned GPU) before milestone 4 depends on it.",
+    "Non-blocking (milestone 8): stats_frozen is read at trace time. Rebuild the train-step tf.functions after freezing BN, and add a test for it.",
+    "Non-blocking (milestone 4): rigid steps give None gradients for scale_shear_head, so the custom loop must filter None gradients.",
+    "Non-blocking: the full-width block='residual' path is only gradient-tested at narrow widths. Time one full-width step on an RTX 8000/A100 before enabling the flag."
+  ],
+  "reviewDoc": "d:\\Research\\Brain_Registration_Projects\\brain-group-rad\\.agents\\tasks\\milestone-3\\review.md"
+}

@@ -1,9 +1,15 @@
-"""Spatial transformer and grid utilities (group blocks arrive in milestone 3).
+"""Spatial transformer, grid utilities and group blocks.
 
 Conventions follow `models.transforms` (design section 2): arrays ``[N, X, Y, Z, C]``,
 channel-last, batch axis = group axis; voxel index p sits at centered mm coordinate
 ``(p - c) * s`` with ``c = (n - 1) / 2``; matrices act on centered mm coordinates.
 Sampling grids are float32 (float64 if the matrices are float64), never float16.
+
+Group blocks (design 4.1, milestone 3): ``norm -> act -> [concat(x, group mean of x)] -> conv``
+(or ``-> Dense`` for vectors). The group is the batch axis: the mean is over axis 0 (one group
+per batch), broadcast back to N, so N may be dynamic. Every variable is created by a Keras
+sublayer or in build() and used whole in call() (no variable slicing in build(): that was the
+groupwise reference's `fast_group_conv_3d` bug, which left every conv kernel without gradient).
 """
 import numpy as np
 import tensorflow as tf
@@ -149,3 +155,231 @@ def transform_image(images, matrices, spacing, displacement=None, interpolation=
     if in_dtype.is_floating:
         out = tf.cast(out, in_dtype)
     return out
+
+
+# ============================================================================ group blocks
+NORMS = ("batch", "instance", "none")
+
+
+class KaimingNormal(tf.keras.initializers.VarianceScaling):
+    """He-normal for (leaky) ReLU: Var = 2 / ((1 + slope^2) fan_in), untruncated (rigid project)."""
+
+    def __init__(self, negative_slope=0.0, seed=None):
+        super().__init__(scale=2.0 / (1.0 + float(negative_slope) ** 2), mode="fan_in",
+                         distribution="untruncated_normal", seed=seed)
+        self.negative_slope = float(negative_slope)
+
+    def get_config(self):
+        return {"negative_slope": self.negative_slope, "seed": self.seed}
+
+
+class AffineParams(tf.keras.layers.Layer):
+    """Per-channel trainable scale gamma (ones) and shift beta (zeros) on the last axis."""
+
+    def build(self, input_shape):
+        channels = int(input_shape[-1])
+        self.gamma = self.add_weight(name="gamma", shape=(channels,), initializer="ones")
+        self.beta = self.add_weight(name="beta", shape=(channels,), initializer="zeros")
+        super().build(input_shape)
+
+    def call(self, x):
+        return x * self.gamma + self.beta
+
+
+class BatchNormWithSeparateAffine(tf.keras.layers.Layer):
+    """Keras BatchNormalization without its own affine (center=scale=False) + `AffineParams`.
+
+    Rigid-project semantics: the statistics and gamma/beta are separate, so the statistics can be
+    frozen (recalibrate, then freeze; design 5.1) while gamma/beta keep training. With
+    ``stats_frozen=True`` the BN normalizes with its moving statistics and does not update them,
+    even when called with ``training=True``; gamma/beta still get gradients. ``stats_frozen`` is a
+    Python attribute read at trace time: re-trace tf.functions after changing it.
+    Statistics are over every axis except the last, i.e. over the N images of the one group
+    (and their voxels). Under mixed_float16 Keras computes BN in float32 internally.
+    """
+
+    def __init__(self, momentum=0.99, epsilon=1e-5, stats_frozen=False, **kwargs):
+        super().__init__(**kwargs)
+        self.bn = tf.keras.layers.BatchNormalization(axis=-1, momentum=momentum, epsilon=epsilon,
+                                                     center=False, scale=False, name="bn")
+        self.affine = AffineParams(name="affine")
+        self.stats_frozen = bool(stats_frozen)
+
+    def call(self, x, training=None):
+        bn_training = False if self.stats_frozen else training
+        return self.affine(self.bn(x, training=bn_training))
+
+
+class InstanceNormWithAffine(tf.keras.layers.Layer):
+    """Per-image, per-channel normalization over the spatial axes (float32 math) + `AffineParams`.
+
+    Needs rank >= 3 (spatial axes); no statistics to freeze. tensorflow_addons is not required.
+    """
+
+    def __init__(self, epsilon=1e-5, **kwargs):
+        super().__init__(**kwargs)
+        self.epsilon = float(epsilon)
+        self.affine = AffineParams(name="affine")
+
+    def call(self, x, training=None):
+        rank = x.shape.rank
+        if rank is None or rank < 3:
+            raise ValueError("instance norm needs spatial axes, got {}".format(x.shape))
+        xf = tf.cast(x, tf.float32)
+        mean, var = tf.nn.moments(xf, axes=list(range(1, rank - 1)), keepdims=True)
+        y = (xf - mean) * tf.math.rsqrt(var + self.epsilon)
+        return self.affine(tf.cast(y, x.dtype))
+
+
+def make_norm(norm, bn_momentum=0.99, bn_epsilon=1e-5, name="norm"):
+    """'batch' -> BatchNormWithSeparateAffine, 'instance' -> InstanceNormWithAffine, 'none' -> None."""
+    if norm == "batch":
+        return BatchNormWithSeparateAffine(momentum=bn_momentum, epsilon=bn_epsilon, name=name)
+    if norm == "instance":
+        return InstanceNormWithAffine(epsilon=bn_epsilon, name=name)
+    if norm == "none":
+        return None
+    raise ValueError("norm must be one of {}, got {!r}".format(NORMS, norm))
+
+
+def set_bn_stats_frozen(layer, frozen=True):
+    """Set `stats_frozen` on every BatchNormWithSeparateAffine inside `layer`. Returns the count."""
+    count = 0
+    for m in [layer] + list(layer.submodules):
+        if isinstance(m, BatchNormWithSeparateAffine):
+            m.stats_frozen = bool(frozen)
+            count += 1
+    return count
+
+
+def group_mean_concat(x):
+    """concat(x_i, mean_j x_j) on the last axis; mean over the group (batch) axis 0, N dynamic."""
+    mean = tf.reduce_mean(x, axis=0, keepdims=True)
+    return tf.concat([x, tf.broadcast_to(mean, tf.shape(x))], axis=-1)
+
+
+class _PreActivation(tf.keras.layers.Layer):
+    """Shared norm -> act (-> group concat) front end of the group blocks."""
+
+    def _init_pre(self, norm, negative_slope, bn_momentum, bn_epsilon, group, pre_activation):
+        self.group = bool(group)
+        self.pre_activation = bool(pre_activation)
+        self.negative_slope = float(negative_slope)
+        self.norm = make_norm(norm, bn_momentum, bn_epsilon) if self.pre_activation else None
+        self.act = (tf.keras.layers.ReLU(negative_slope=self.negative_slope, name="act")
+                    if self.pre_activation else None)
+
+    def _pre(self, x, training):
+        if self.norm is not None:
+            x = self.norm(x, training=training)
+        if self.act is not None:
+            x = self.act(x)
+        if self.group:
+            x = group_mean_concat(x)
+        return x
+
+    def _overhead(self, kernel):
+        """Parameters of the kernel half that multiplies the group mean (0 without group)."""
+        if not self.group:
+            return 0
+        shape = [int(v) for v in kernel.shape]
+        return int(np.prod(shape[:-2])) * (shape[-2] // 2) * shape[-1]
+
+
+class GroupConvBlock(_PreActivation):
+    """norm -> act -> [concat(x, group mean)] -> Conv3D (design 4.1).
+
+    Args:
+      filters, kernel_size, strides: of the Conv3D ('same' padding, bias, Kaiming-normal kernel).
+      group: concat the group mean (doubles the conv's input channels). False = plain block.
+      norm: 'batch' (BatchNormWithSeparateAffine), 'instance' or 'none'.
+      pre_activation: False skips norm and act (the encoder stem: a plain conv on the image).
+      negative_slope: LeakyReLU slope (0 = ReLU, the rigid project's default).
+    """
+
+    def __init__(self, filters, kernel_size=3, strides=1, group=True, norm="batch",
+                 pre_activation=True, negative_slope=0.0, bn_momentum=0.99, bn_epsilon=1e-5,
+                 seed=None, **kwargs):
+        super().__init__(**kwargs)
+        self._init_pre(norm, negative_slope, bn_momentum, bn_epsilon, group, pre_activation)
+        self.conv = tf.keras.layers.Conv3D(
+            filters, kernel_size, strides=strides, padding="same", use_bias=True,
+            kernel_initializer=KaimingNormal(negative_slope, seed), name="conv")
+
+    def call(self, x, training=None):
+        return self.conv(self._pre(x, training))
+
+    def group_overhead_params(self):
+        return self._overhead(self.conv.kernel)
+
+
+class GroupResBlock(tf.keras.layers.Layer):
+    """Residual variant: two GroupConvBlocks plus a skip (design 4.1; flag, default off).
+
+    out = block2(block1(x)) + skip(x). block1 carries the stride. The skip is the identity when
+    channels and stride are unchanged, else a 1x1 Conv3D with the block's stride on the raw input.
+    """
+
+    def __init__(self, filters, kernel_size=3, strides=1, group=True, norm="batch",
+                 negative_slope=0.0, bn_momentum=0.99, bn_epsilon=1e-5, seed=None, **kwargs):
+        super().__init__(**kwargs)
+        self.filters = int(filters)
+        self.strides = int(strides)
+        self.seed = seed
+        self.negative_slope = float(negative_slope)
+        common = dict(kernel_size=kernel_size, group=group, norm=norm,
+                      negative_slope=negative_slope, bn_momentum=bn_momentum,
+                      bn_epsilon=bn_epsilon, seed=seed)
+        self.block1 = GroupConvBlock(filters, strides=strides, name="block1", **common)
+        self.block2 = GroupConvBlock(filters, strides=1, name="block2", **common)
+        self.projection = None
+
+    def build(self, input_shape):
+        if int(input_shape[-1]) != self.filters or self.strides != 1:
+            self.projection = tf.keras.layers.Conv3D(
+                self.filters, 1, strides=self.strides, padding="same", use_bias=True,
+                kernel_initializer=KaimingNormal(self.negative_slope, self.seed), name="projection")
+        super().build(input_shape)
+
+    def call(self, x, training=None):
+        skip = x if self.projection is None else self.projection(x)
+        return self.block2(self.block1(x, training=training), training=training) + skip
+
+    def group_overhead_params(self):
+        return self.block1.group_overhead_params() + self.block2.group_overhead_params()
+
+
+class GroupDenseBlock(_PreActivation):
+    """norm -> act -> [concat(h_i, mean_j h_j)] -> Dense on [N, D] vectors (design 4.4, v3.2).
+
+    The concat makes the Dense W_a h_i + W_b mean(h) + b, i.e. a per-group bias. norm is 'batch'
+    (BatchNormWithSeparateAffine over the N vectors of the group) or 'none'.
+    """
+
+    def __init__(self, units, group=True, norm="batch", negative_slope=0.0, bn_momentum=0.99,
+                 bn_epsilon=1e-5, seed=None, **kwargs):
+        if norm not in ("batch", "none"):
+            raise ValueError("dense blocks support norm 'batch' or 'none', got {!r}".format(norm))
+        super().__init__(**kwargs)
+        self._init_pre(norm, negative_slope, bn_momentum, bn_epsilon, group, True)
+        self.dense = tf.keras.layers.Dense(
+            units, use_bias=True, kernel_initializer=KaimingNormal(negative_slope, seed),
+            name="dense")
+
+    def call(self, x, training=None):
+        return self.dense(self._pre(x, training))
+
+    def group_overhead_params(self):
+        return self._overhead(self.dense.kernel)
+
+
+class NormAct(_PreActivation):
+    """norm -> act only (no group concat, no weights besides the norm's)."""
+
+    def __init__(self, norm="batch", negative_slope=0.0, bn_momentum=0.99, bn_epsilon=1e-5,
+                 **kwargs):
+        super().__init__(**kwargs)
+        self._init_pre(norm, negative_slope, bn_momentum, bn_epsilon, False, True)
+
+    def call(self, x, training=None):
+        return self._pre(x, training)

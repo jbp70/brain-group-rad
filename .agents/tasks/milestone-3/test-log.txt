@@ -1,0 +1,149 @@
+# Milestone 3 test log. Command: wsl -d Ubuntu bash tests/run_tests_wsl.sh
+# Started: 2026-10-17T17:05:17-04:00  host: Jay
+NVIDIA GeForce GTX 1080, 8192 MiB
+NVIDIA GeForce GTX 1080, 8192 MiB
+=== [1/2] py3.8 syntax check + numpy references (bgr_preproc38) ===
+Python 3.8.20
+numpy 1.21.1 | scipy 1.4.1
+py_compile OK
+ast feature_version=(3, 8) OK (22 files)
+np_reference self-check OK
+data_loading imports without TF/DALI; DALI_AVAILABLE = False
+bash -n run_verify_glacier.sh OK
+=== [2/2] unittest suite (tf_gpu) ===
+python 3.9.13 | tf 2.10.0 | numpy 1.24.3 | scipy 1.13.0
+test_pipeline_needs_dali (tests.test_data_loading.TestDaliGuard) ... ok
+test_pipeline_runs_on_synthetic_files (tests.test_data_loading.TestDaliGuard) ... skipped 'needs nvidia.dali and a GPU'
+test_dali_center (tests.test_data_loading.TestDaliMatrixFormulas) ... ok
+test_mirror_composition_and_conversion (tests.test_data_loading.TestDaliMatrixFormulas) ... ok
+test_rotation_about_center_has_no_mm_translation (tests.test_data_loading.TestDaliMatrixFormulas) ... ok
+test_scale_shear_rows (tests.test_data_loading.TestDaliMatrixFormulas) ... ok
+test_auto_initial_fill (tests.test_data_loading.TestLevelsAndRanges) ... ok
+test_default_ranges (tests.test_data_loading.TestLevelsAndRanges) ... ok
+test_intensity_config (tests.test_data_loading.TestLevelsAndRanges) ... ok
+test_level_constants (tests.test_data_loading.TestLevelsAndRanges) ... ok
+test_translation_mm_to_voxels_per_level (tests.test_data_loading.TestLevelsAndRanges) ... ok
+test_data_module_without_building_pipelines (tests.test_data_loading.TestManifest) ... ok
+test_file_lists_per_split_and_level (tests.test_data_loading.TestManifest) ... ok
+test_memory_growth_helper (tests.test_data_loading.TestManifest) ... ok
+test_missing_label_and_column (tests.test_data_loading.TestManifest) ... ok
+test_output_signature (tests.test_data_loading.TestManifest) ... ok
+test_reader_kwargs_shuffle_modes (tests.test_data_loading.TestManifest) ... ok
+test_group_block_matches_manual (tests.test_group_layers.TestGroupConvBlock) ... ok
+test_kaiming_init_variance (tests.test_group_layers.TestGroupConvBlock) ... ok
+test_plain_block_and_stem (tests.test_group_layers.TestGroupConvBlock) ... ok
+test_strided (tests.test_group_layers.TestGroupConvBlock) ... ok
+test_matches_numpy (tests.test_group_layers.TestGroupDenseBlock) ... ok
+test_no_group (tests.test_group_layers.TestGroupDenseBlock) ... ok
+test_dynamic_n_keeps_static_channels (tests.test_group_layers.TestGroupMeanConcat) ... ok
+test_matches_numpy (tests.test_group_layers.TestGroupMeanConcat) ... ok
+test_projection_and_identity_skip (tests.test_group_layers.TestGroupResBlock) ... ok
+test_bad_norm (tests.test_group_layers.TestNorms) ... ok
+test_bn_stats_freeze (tests.test_group_layers.TestNorms) ... ok
+test_bn_uses_group_statistics (tests.test_group_layers.TestNorms) ... ok
+test_instance_norm (tests.test_group_layers.TestNorms) ... ok
+test_bn_freeze (tests.test_group_net.TestBNFreezeAndDropout) ... ok
+test_dropout_training_only (tests.test_group_net.TestBNFreezeAndDropout) ... ok
+test_same_level_exact (tests.test_group_net.TestCopyRoundTrip) ... ok
+test_no_retrace (tests.test_group_net.TestDynamicN) ... ok
+test_every_variable_gets_gradient (tests.test_group_net.TestGradients) ... ok
+test_group_information_flow (tests.test_group_net.TestGroupBehaviour) ... ok
+test_permutation_equivariance (tests.test_group_net.TestGroupBehaviour) ... ok
+test_mixed_float16 (tests.test_group_net.TestMixedPrecision) ... WARNING:tensorflow:Mixed precision compatibility check (mixed_float16): WARNING
+Your GPUs may run slowly with dtype policy mixed_float16 because they do not have compute capability of at least 7.0. Your GPUs:
+  NVIDIA GeForce GTX 1080, compute capability 6.1 (x2)
+See https://developer.nvidia.com/cuda-gpus for a list of GPUs and their compute capabilities.
+If you will use compatible GPU(s) not attached to this host, e.g. by running a multi-worker model, you can ignore this warning. This message will only be logged once
+ok
+test_defaults_and_round_trip (tests.test_group_net.TestModelConfig) ... ok
+test_translation_scale (tests.test_group_net.TestModelConfig) ... ok
+test_counts (tests.test_group_net.TestParameterCounts) ... ok
+test_copy_rejects_mismatch (tests.test_group_net.TestShapesAndLevels) ... ok
+test_copy_weights_4_to_2 (tests.test_group_net.TestShapesAndLevels) ... ok
+test_identical_parameters_across_levels (tests.test_group_net.TestShapesAndLevels) ... ok
+test_identity_at_init_all_levels (tests.test_group_net.TestShapesAndLevels) ... ok
+test_shapes (tests.test_group_net.TestShapesAndLevels) ... ok
+test_overfit_one_group (tests.test_group_net.TestSmokeTraining) ... ok
+test_s_matrix_from_synthetic_mask (tests.test_postprocess.TestBrainS) ... ok
+test_flip_sampling (tests.test_postprocess.TestFlips) ... ok
+test_image_and_matrix_flip_consistent (tests.test_postprocess.TestFlips) ... ok
+test_affine_target_is_full_t_and_flip_equivariant (tests.test_postprocess.TestLinearPostprocess) ... ok
+test_dali_to_mm_matches_models_transforms (tests.test_postprocess.TestLinearPostprocess) ... ok
+test_images_flipped_with_random_state_and_tf_function (tests.test_postprocess.TestLinearPostprocess) ... ok
+test_rigid_targets_use_rt_and_are_central (tests.test_postprocess.TestLinearPostprocess) ... ok
+test_counts (tests.test_postprocess.TestPairs) ... ok
+test_valid_unique_deterministic (tests.test_postprocess.TestPairs) ... ok
+test_configure_returns_state (tests.test_precision.TestPrecision) ... ok
+test_float32_matmul_is_full_precision (tests.test_precision.TestPrecision) ... ok
+test_tf32_disabled_by_test_setup (tests.test_precision.TestPrecision) ... ok
+test_a_matches_scipy_map_coordinates (tests.test_spatial_transformer.TestTransformImage) ... ok
+test_b_integer_translation_shifts_exactly (tests.test_spatial_transformer.TestTransformImage) ... ok
+test_c_round_trip (tests.test_spatial_transformer.TestTransformImage) ... ok
+test_d_nearest_preserves_labels (tests.test_spatial_transformer.TestTransformImage) ... ok
+test_e_cpu_out_of_bounds (tests.test_spatial_transformer.TestTransformImage) ... ok
+test_f_gradient_matches_finite_difference (tests.test_spatial_transformer.TestTransformImage) ... ok
+test_flip_commutes_with_conjugated_warp (tests.test_spatial_transformer.TestTransformImage) ... ok
+test_g_dynamic_group_size_in_tf_function (tests.test_spatial_transformer.TestTransformImage) ... ok
+test_h_mixed_float16_policy (tests.test_spatial_transformer.TestTransformImage) ... ok
+test_i_multilevel_consistency (tests.test_spatial_transformer.TestTransformImage) ... ok
+test_barycentric_targets (tests.test_transforms.TestBarycenter) ... ok
+test_batched_leading_axes (tests.test_transforms.TestBarycenter) ... ok
+test_centered_output_and_pairwise (tests.test_transforms.TestBarycenter) ... ok
+test_gradient_centering_plus_point_loss (tests.test_transforms.TestBarycenter) ... ok
+test_invariance_to_common_left_multiplication (tests.test_transforms.TestBarycenter) ... ok
+test_matches_demo_numpy (tests.test_transforms.TestBarycenter) ... ok
+test_affine_is_r_times_k (tests.test_transforms.TestBuilders) ... ok
+test_identity_params (tests.test_transforms.TestBuilders) ... ok
+test_qr_round_trip_recovers_scales (tests.test_transforms.TestBuilders) ... ok
+test_rigid_layout (tests.test_transforms.TestBuilders) ... ok
+test_dali_voxel_mm_round_trip_and_meaning (tests.test_transforms.TestDaliConversion) ... ok
+test_involution_and_composition (tests.test_transforms.TestDaliConversion) ... ok
+test_conjugated_rigid_stays_rotation (tests.test_transforms.TestFlipAlgebra) ... ok
+test_coarse_levels_share_centers (tests.test_transforms.TestMatrixHelpers) ... ok
+test_inverse_compose_layout (tests.test_transforms.TestMatrixHelpers) ... ok
+test_logm_expm (tests.test_transforms.TestMatrixHelpers) ... ok
+test_mm_voxel_conversion (tests.test_transforms.TestMatrixHelpers) ... ok
+test_second_moment_and_point_loss_bruteforce (tests.test_transforms.TestPointLoss) ... ok
+test_encode_decode_round_trip (tests.test_transforms.TestRotation10D) ... ok
+test_gradient_matches_finite_difference (tests.test_transforms.TestRotation10D) ... ok
+test_gradients_finite (tests.test_transforms.TestRotation10D) ... ok
+test_identity_encoding (tests.test_transforms.TestRotation10D) ... ok
+test_matches_numpy_rederivation (tests.test_transforms.TestRotation10D) ... ok
+test_matches_reference_implementation (tests.test_transforms.TestRotation10D) ... ok
+test_random_params_are_rotations (tests.test_transforms.TestRotation10D) ... ok
+
+----------------------------------------------------------------------
+Ran 94 tests in 159.562s
+
+OK (skipped=1)
+
+Parameter counts (trainable; level-independent):
+part                                                  A              B        A+first        B+first
+encoder/stem                                      1,760            896          1,760            896
+encoder/l2                                      110,720         55,424        110,720         55,424
+encoder/l3                                      442,624        221,440        442,624        221,440
+encoder/l4                                    1,327,552        664,000      1,327,552        664,000
+encoder/l5                                    2,654,848      1,327,744      2,654,848      1,327,744
+encoder/l6                                    5,309,312      2,655,104      5,309,312      2,655,104
+encoder                                       9,846,816      4,924,608      9,846,816      4,924,608
+linear_decoder/reduction_0                      148,416        148,416        148,416        148,416
+linear_decoder/reduction_1                       37,344         37,344         37,344         37,344
+linear_decoder/reduction_2                        9,456          9,456          9,456          9,456
+linear_decoder/reduction_3                        2,424          2,424          2,424          2,424
+linear_decoder/dense_0                       10,334,048     10,334,048     20,655,968     20,655,968
+linear_decoder/dense_0/dense                 10,323,968     10,323,968     20,645,888     20,645,888
+linear_decoder/dense_1                        2,101,760      2,101,760      2,101,760      2,101,760
+linear_decoder/dense_1/dense                  2,097,664      2,097,664      2,097,664      2,097,664
+linear_decoder/head_norm_act                      1,024          1,024          1,024          1,024
+linear_decoder/rigid_head                         6,669          6,669          6,669          6,669
+linear_decoder/scale_shear_head                   3,078          3,078          3,078          3,078
+linear_decoder                               12,644,219     12,644,219     22,966,139     22,966,139
+group_overhead/encoder                        4,922,208              0      4,922,208              0
+group_overhead/linear_decoder                 1,146,496      1,146,496     11,468,416     11,468,416
+trainable                                    22,491,035     17,568,827     32,812,955     27,890,747
+non_trainable                                    17,984         17,984         17,984         17,984
+
+smoke training (level 4, N=4, rigid) RMS mm per step: 7.85 6.44 6.75 6.76 6.24 5.66 5.42 5.25 5.51 5.27 5.67 5.87 5.45 5.14 5.33 5.29 5.75 6.13 4.98 5.34
+unittest exit code: 0, wall time: 164 s
+# runner exit status: 0
+# Finished: 2026-10-17T17:08:12-04:00
