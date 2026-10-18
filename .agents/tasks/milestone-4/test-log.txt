@@ -1,0 +1,278 @@
+# Milestone 4 test log. Command: wsl -d Ubuntu bash .agents/tasks/milestone-4/record_tests.sh
+# (runs tests/run_tests_wsl.sh). Started: 2026-10-18T08:38:49-04:00  host: Jay
+NVIDIA GeForce GTX 1080, 8192 MiB
+NVIDIA GeForce GTX 1080, 8192 MiB
+# Newest source edit before this run:
+2026-10-18 02:43:59.4211226000 tests/test_trainer.py
+2026-10-18 08:09:40.0289051000 tests/test_group_net.py
+2026-10-18 08:38:47.5367126000 tests/run_tests_wsl.sh
+=== [1/2] py3.8 syntax check + numpy references (bgr_preproc38) ===
+Python 3.8.20
+numpy 1.21.1 | scipy 1.4.1
+py_compile OK
+ast feature_version=(3, 8) OK (39 files)
+np_reference self-check OK
+data_loading imports without TF/DALI; DALI_AVAILABLE = False
+runtime.args / runtime.schedulers import without TF
+main.py --help OK (no TF)
+bash -n tests/gpu/run_verify_glacier.sh OK
+bash -n tests/gpu/run_overfit_glacier.sh OK
+bash -n slurm/train_debug.sh OK
+=== [2/2] unittest suite (tf_gpu) ===
+python 3.9.13 | tf 2.10.0 | numpy 1.24.3 | scipy 1.13.0
+test_pipeline_needs_dali (tests.test_data_loading.TestDaliGuard) ... ok
+test_pipeline_runs_on_synthetic_files (tests.test_data_loading.TestDaliGuard) ... skipped 'needs nvidia.dali and a GPU'
+test_dali_center (tests.test_data_loading.TestDaliMatrixFormulas) ... ok
+test_mirror_composition_and_conversion (tests.test_data_loading.TestDaliMatrixFormulas) ... ok
+test_rotation_about_center_has_no_mm_translation (tests.test_data_loading.TestDaliMatrixFormulas) ... ok
+test_scale_shear_rows (tests.test_data_loading.TestDaliMatrixFormulas) ... ok
+test_auto_initial_fill (tests.test_data_loading.TestLevelsAndRanges) ... ok
+test_default_ranges (tests.test_data_loading.TestLevelsAndRanges) ... ok
+test_intensity_config (tests.test_data_loading.TestLevelsAndRanges) ... ok
+test_level_constants (tests.test_data_loading.TestLevelsAndRanges) ... ok
+test_translation_mm_to_voxels_per_level (tests.test_data_loading.TestLevelsAndRanges) ... ok
+test_data_module_without_building_pipelines (tests.test_data_loading.TestManifest) ... ok
+test_file_lists_per_split_and_level (tests.test_data_loading.TestManifest) ... ok
+test_memory_growth_helper (tests.test_data_loading.TestManifest) ... ok
+test_missing_label_and_column (tests.test_data_loading.TestManifest) ... ok
+test_output_signature (tests.test_data_loading.TestManifest) ... ok
+test_reader_kwargs_shuffle_modes (tests.test_data_loading.TestManifest) ... ok
+test_group_block_matches_manual (tests.test_group_layers.TestGroupConvBlock) ... ok
+test_kaiming_init_variance (tests.test_group_layers.TestGroupConvBlock) ... ok
+test_plain_block_and_stem (tests.test_group_layers.TestGroupConvBlock) ... ok
+test_strided (tests.test_group_layers.TestGroupConvBlock) ... ok
+test_layer_norm_mixed_precision (tests.test_group_layers.TestGroupDenseBlock) ... WARNING:tensorflow:Mixed precision compatibility check (mixed_float16): WARNING
+Your GPUs may run slowly with dtype policy mixed_float16 because they do not have compute capability of at least 7.0. Your GPUs:
+  NVIDIA GeForce GTX 1080, compute capability 6.1 (x2)
+See https://developer.nvidia.com/cuda-gpus for a list of GPUs and their compute capabilities.
+If you will use compatible GPU(s) not attached to this host, e.g. by running a multi-worker model, you can ignore this warning. This message will only be logged once
+ok
+test_layer_norm_per_sample (tests.test_group_layers.TestGroupDenseBlock) ... ok
+test_matches_numpy (tests.test_group_layers.TestGroupDenseBlock) ... ok
+test_no_group (tests.test_group_layers.TestGroupDenseBlock) ... ok
+test_dynamic_n_keeps_static_channels (tests.test_group_layers.TestGroupMeanConcat) ... ok
+test_matches_numpy (tests.test_group_layers.TestGroupMeanConcat) ... ok
+test_projection_and_identity_skip (tests.test_group_layers.TestGroupResBlock) ... ok
+test_bad_norm (tests.test_group_layers.TestNorms) ... ok
+test_bn_stats_freeze (tests.test_group_layers.TestNorms) ... ok
+test_bn_uses_group_statistics (tests.test_group_layers.TestNorms) ... ok
+test_instance_norm (tests.test_group_layers.TestNorms) ... ok
+test_bn_freeze (tests.test_group_net.TestBNFreezeAndDropout) ... ok
+test_dropout_training_only (tests.test_group_net.TestBNFreezeAndDropout) ... ok
+test_same_level_exact (tests.test_group_net.TestCopyRoundTrip) ... ok
+test_no_retrace (tests.test_group_net.TestDynamicN) ... ok
+test_every_variable_gets_gradient (tests.test_group_net.TestGradients) ... ok
+test_group_information_flow (tests.test_group_net.TestGroupBehaviour) ... ok
+test_permutation_equivariance (tests.test_group_net.TestGroupBehaviour) ... ok
+test_mixed_float16 (tests.test_group_net.TestMixedPrecision) ... ok
+test_defaults_and_round_trip (tests.test_group_net.TestModelConfig) ... ok
+test_translation_scale (tests.test_group_net.TestModelConfig) ... ok
+test_counts (tests.test_group_net.TestParameterCounts) ... ok
+test_copy_rejects_mismatch (tests.test_group_net.TestShapesAndLevels) ... ok
+test_copy_rejects_shape_neutral_config_difference (tests.test_group_net.TestShapesAndLevels) ... ok
+test_copy_weights_4_to_2 (tests.test_group_net.TestShapesAndLevels) ... ok
+test_identical_parameters_across_levels (tests.test_group_net.TestShapesAndLevels) ... ok
+test_identity_at_init_all_levels (tests.test_group_net.TestShapesAndLevels) ... ok
+test_shapes (tests.test_group_net.TestShapesAndLevels) ... ok
+test_overfit_one_group (tests.test_group_net.TestSmokeTraining) ... ok
+test_dry_run_without_dali_fails_clearly (tests.test_main.TestMain) ... ok
+test_real_data_overfit_path (tests.test_main.TestMain) ... ok
+test_synthetic_overfit_dry_run (tests.test_main.TestMain) ... ok
+test_overfit_synthetic_group_below_1mm (tests.test_main.TestOverfit) ... 
+[overfit curve] lr 3e-4, steps 583, reached True, best 10-step mean 0.7568 mm, median step 581 ms
+  step    1  center RMS  22.291 mm  pair RMS  41.478 mm
+  step   50  center RMS  12.173 mm  pair RMS  18.777 mm
+  step  100  center RMS  10.377 mm  pair RMS  19.032 mm
+  step  150  center RMS   8.606 mm  pair RMS  10.088 mm
+  step  200  center RMS   5.924 mm  pair RMS   5.746 mm
+  step  250  center RMS   4.143 mm  pair RMS   7.562 mm
+  step  300  center RMS   2.892 mm  pair RMS   5.654 mm
+  step  350  center RMS   1.889 mm  pair RMS   2.372 mm
+  step  400  center RMS   1.417 mm  pair RMS   1.662 mm
+  step  450  center RMS   1.897 mm  pair RMS   1.651 mm
+  step  500  center RMS   1.121 mm  pair RMS   1.650 mm
+  step  550  center RMS   1.311 mm  pair RMS   1.843 mm
+  step  583  center RMS   0.409 mm  pair RMS   0.481 mm
+[overfit val] step, eval-mode center RMS, train-mode center RMS (mm):
+   250   17.105    4.011
+   500    0.955    0.753
+   583    0.599    0.599
+ok
+test_s_matrix_from_synthetic_mask (tests.test_postprocess.TestBrainS) ... ok
+test_flip_sampling (tests.test_postprocess.TestFlips) ... ok
+test_image_and_matrix_flip_consistent (tests.test_postprocess.TestFlips) ... ok
+test_affine_target_is_full_t_and_flip_equivariant (tests.test_postprocess.TestLinearPostprocess) ... ok
+test_dali_to_mm_matches_models_transforms (tests.test_postprocess.TestLinearPostprocess) ... ok
+test_images_flipped_with_random_state_and_tf_function (tests.test_postprocess.TestLinearPostprocess) ... ok
+test_rigid_targets_use_rt_and_are_central (tests.test_postprocess.TestLinearPostprocess) ... ok
+test_counts (tests.test_postprocess.TestPairs) ... ok
+test_valid_unique_deterministic (tests.test_postprocess.TestPairs) ... ok
+test_configure_returns_state (tests.test_precision.TestPrecision) ... ok
+test_float32_matmul_is_full_precision (tests.test_precision.TestPrecision) ... ok
+test_tf32_disabled_by_test_setup (tests.test_precision.TestPrecision) ... ok
+test_level_defaults_and_overfit_dropout (tests.test_runtime_infra.TestArgs) ... ok
+test_model_config_round_trip (tests.test_runtime_infra.TestArgs) ... ok
+test_ratio_and_required_data (tests.test_runtime_infra.TestArgs) ... ok
+test_str2bool (tests.test_runtime_infra.TestArgs) ... ok
+test_best_and_keep_last (tests.test_runtime_infra.TestCheckpoint) ... ok
+test_config_json_and_compatibility (tests.test_runtime_infra.TestCheckpoint) ... ok
+test_round_trip_bit_exact (tests.test_runtime_infra.TestCheckpoint) ... ok
+test_dllogger_backend (tests.test_runtime_infra.TestDLLoggerBackend) ... skipped 'dllogger is not importable here (the container may have it)'
+test_dali_batch_round_trip (tests.test_runtime_infra.TestFixedData) ... ok
+test_load_level_images (tests.test_runtime_infra.TestFixedData) ... ok
+test_transform_ranges (tests.test_runtime_infra.TestFixedData) ... ok
+test_validation_set_deterministic (tests.test_runtime_infra.TestFixedData) ... ok
+test_validation_set_independent_of_task_order (tests.test_runtime_infra.TestFixedData) ... ok
+test_jsonl_and_tensorboard (tests.test_runtime_infra.TestLogging) ... ok
+test_center_loss_matches_bruteforce (tests.test_runtime_losses_metrics.TestLosses) ... ok
+test_center_loss_units_mm2 (tests.test_runtime_losses_metrics.TestLosses) ... ok
+test_gradients_finite (tests.test_runtime_losses_metrics.TestLosses) ... ok
+test_pair_loss_matches_bruteforce (tests.test_runtime_losses_metrics.TestLosses) ... ok
+test_total_and_rms (tests.test_runtime_losses_metrics.TestLosses) ... ok
+test_cycle_error_zero (tests.test_runtime_losses_metrics.TestMetrics) ... ok
+test_group_metrics_keys_and_accumulator (tests.test_runtime_losses_metrics.TestMetrics) ... ok
+test_matrix_errors (tests.test_runtime_losses_metrics.TestMetrics) ... ok
+test_pairwise_all_ordered_pairs (tests.test_runtime_losses_metrics.TestMetrics) ... ok
+test_rotation_angle (tests.test_runtime_losses_metrics.TestMetrics) ... ok
+test_decoupled_decay_functional (tests.test_runtime_optim.TestOptimizers) ... ok
+test_default_clipnorm (tests.test_runtime_optim.TestOptimizers) ... ok
+test_every_optimizer_steps_and_lr_helpers (tests.test_runtime_optim.TestOptimizers) ... WARNING:tensorflow:You forgot to call LossScaleOptimizer.get_scaled_loss() and LossScaleOptimizer.get_unscaled_gradients() before calling LossScaleOptimizer.apply_gradients(). This will likely result in worse model quality, so please call them in the correct places! For example:
+    with tf.GradientTape() as tape:
+      loss = loss_fn()
+      scaled_loss = opt.get_scaled_loss(loss)
+    scaled_grads = tape.gradient(scaled_loss, vars)
+    grads = opt.get_unscaled_gradients(scaled_grads)
+    opt.apply_gradients([(grads, var)])
+For more information, see https://www.tensorflow.org/api_docs/python/tf/keras/mixed_precision/LossScaleOptimizer
+WARNING:tensorflow:You forgot to call LossScaleOptimizer.get_scaled_loss() and LossScaleOptimizer.get_unscaled_gradients() before calling LossScaleOptimizer.apply_gradients(). This will likely result in worse model quality, so please call them in the correct places! For example:
+    with tf.GradientTape() as tape:
+      loss = loss_fn()
+      scaled_loss = opt.get_scaled_loss(loss)
+    scaled_grads = tape.gradient(scaled_loss, vars)
+    grads = opt.get_unscaled_gradients(scaled_grads)
+    opt.apply_gradients([(grads, var)])
+For more information, see https://www.tensorflow.org/api_docs/python/tf/keras/mixed_precision/LossScaleOptimizer
+WARNING:tensorflow:You forgot to call LossScaleOptimizer.get_scaled_loss() and LossScaleOptimizer.get_unscaled_gradients() before calling LossScaleOptimizer.apply_gradients(). This will likely result in worse model quality, so please call them in the correct places! For example:
+    with tf.GradientTape() as tape:
+      loss = loss_fn()
+      scaled_loss = opt.get_scaled_loss(loss)
+    scaled_grads = tape.gradient(scaled_loss, vars)
+    grads = opt.get_unscaled_gradients(scaled_grads)
+    opt.apply_gradients([(grads, var)])
+For more information, see https://www.tensorflow.org/api_docs/python/tf/keras/mixed_precision/LossScaleOptimizer
+WARNING:tensorflow:You forgot to call LossScaleOptimizer.get_scaled_loss() and LossScaleOptimizer.get_unscaled_gradients() before calling LossScaleOptimizer.apply_gradients(). This will likely result in worse model quality, so please call them in the correct places! For example:
+    with tf.GradientTape() as tape:
+      loss = loss_fn()
+      scaled_loss = opt.get_scaled_loss(loss)
+    scaled_grads = tape.gradient(scaled_loss, vars)
+    grads = opt.get_unscaled_gradients(scaled_grads)
+    opt.apply_gradients([(grads, var)])
+For more information, see https://www.tensorflow.org/api_docs/python/tf/keras/mixed_precision/LossScaleOptimizer
+ok
+test_sgdw_matches_reference_update (tests.test_runtime_optim.TestOptimizers) ... ok
+test_weight_decay_exclusion (tests.test_runtime_optim.TestOptimizers) ... ok
+test_bad_name (tests.test_runtime_optim.TestSchedules) ... ok
+test_constant (tests.test_runtime_optim.TestSchedules) ... ok
+test_cosine_midpoint (tests.test_runtime_optim.TestSchedules) ... ok
+test_cycle_restarts (tests.test_runtime_optim.TestSchedules) ... ok
+test_warmup_and_endpoints (tests.test_runtime_optim.TestSchedules) ... ok
+test_a_matches_scipy_map_coordinates (tests.test_spatial_transformer.TestTransformImage) ... ok
+test_b_integer_translation_shifts_exactly (tests.test_spatial_transformer.TestTransformImage) ... ok
+test_c_round_trip (tests.test_spatial_transformer.TestTransformImage) ... ok
+test_d_nearest_preserves_labels (tests.test_spatial_transformer.TestTransformImage) ... ok
+test_e_cpu_out_of_bounds (tests.test_spatial_transformer.TestTransformImage) ... ok
+test_f_gradient_matches_finite_difference (tests.test_spatial_transformer.TestTransformImage) ... ok
+test_flip_commutes_with_conjugated_warp (tests.test_spatial_transformer.TestTransformImage) ... ok
+test_g_dynamic_group_size_in_tf_function (tests.test_spatial_transformer.TestTransformImage) ... ok
+test_h_mixed_float16_policy (tests.test_spatial_transformer.TestTransformImage) ... ok
+test_i_multilevel_consistency (tests.test_spatial_transformer.TestTransformImage) ... ok
+test_mixed_precision_overflow_skips (tests.test_trainer.TestResumeAndValidation) ... 
+[amp overflow] 33 skipped steps, first applied step at loss scale 2^7
+ok
+test_mixed_precision_smoke (tests.test_trainer.TestResumeAndValidation) ... WARNING:tensorflow:You forgot to call LossScaleOptimizer.get_scaled_loss() and LossScaleOptimizer.get_unscaled_gradients() before calling LossScaleOptimizer.apply_gradients(). This will likely result in worse model quality, so please call them in the correct places! For example:
+    with tf.GradientTape() as tape:
+      loss = loss_fn()
+      scaled_loss = opt.get_scaled_loss(loss)
+    scaled_grads = tape.gradient(scaled_loss, vars)
+    grads = opt.get_unscaled_gradients(scaled_grads)
+    opt.apply_gradients([(grads, var)])
+For more information, see https://www.tensorflow.org/api_docs/python/tf/keras/mixed_precision/LossScaleOptimizer
+ok
+test_resume_continues_step_count (tests.test_trainer.TestResumeAndValidation) ... ok
+test_trainmode_validation_keeps_bn_statistics (tests.test_trainer.TestResumeAndValidation) ... WARNING:tensorflow:5 out of the last 9 calls to <function Trainer._val_fn.<locals>.fwd at 0x7f2c71123f70> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:5 out of the last 9 calls to <function Trainer._val_fn.<locals>.fwd_train_mode at 0x7f2c7b8fa550> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+ok
+test_validation_identity_model (tests.test_trainer.TestResumeAndValidation) ... WARNING:tensorflow:6 out of the last 11 calls to <function Trainer._val_fn.<locals>.fwd at 0x7f2c71123f70> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:6 out of the last 11 calls to <function Trainer._val_fn.<locals>.fwd_train_mode at 0x7f2c7b8dc310> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+ok
+test_ratio_and_determinism (tests.test_trainer.TestTaskSchedule) ... ok
+test_nan_guard_skips_update (tests.test_trainer.TestTrainStep) ... ok
+test_none_gradients_filtered (tests.test_trainer.TestTrainStep) ... ok
+test_rebuild_steps_after_bn_freeze (tests.test_trainer.TestTrainStep) ... ok
+test_trace_once_per_task (tests.test_trainer.TestTrainStep) ... WARNING:tensorflow:5 out of the last 14 calls to <function Trainer._make_train_step.<locals>.<lambda> at 0x7f2c7abe3b80> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+ok
+test_barycentric_targets (tests.test_transforms.TestBarycenter) ... ok
+test_batched_leading_axes (tests.test_transforms.TestBarycenter) ... ok
+test_centered_output_and_pairwise (tests.test_transforms.TestBarycenter) ... ok
+test_gradient_centering_plus_point_loss (tests.test_transforms.TestBarycenter) ... ok
+test_invariance_to_common_left_multiplication (tests.test_transforms.TestBarycenter) ... ok
+test_matches_demo_numpy (tests.test_transforms.TestBarycenter) ... ok
+test_affine_is_r_times_k (tests.test_transforms.TestBuilders) ... ok
+test_identity_params (tests.test_transforms.TestBuilders) ... ok
+test_qr_round_trip_recovers_scales (tests.test_transforms.TestBuilders) ... ok
+test_rigid_layout (tests.test_transforms.TestBuilders) ... ok
+test_dali_voxel_mm_round_trip_and_meaning (tests.test_transforms.TestDaliConversion) ... ok
+test_involution_and_composition (tests.test_transforms.TestDaliConversion) ... ok
+test_conjugated_rigid_stays_rotation (tests.test_transforms.TestFlipAlgebra) ... ok
+test_coarse_levels_share_centers (tests.test_transforms.TestMatrixHelpers) ... ok
+test_inverse_compose_layout (tests.test_transforms.TestMatrixHelpers) ... ok
+test_logm_expm (tests.test_transforms.TestMatrixHelpers) ... ok
+test_mm_voxel_conversion (tests.test_transforms.TestMatrixHelpers) ... ok
+test_second_moment_and_point_loss_bruteforce (tests.test_transforms.TestPointLoss) ... ok
+test_encode_decode_round_trip (tests.test_transforms.TestRotation10D) ... ok
+test_gradient_matches_finite_difference (tests.test_transforms.TestRotation10D) ... ok
+test_gradients_finite (tests.test_transforms.TestRotation10D) ... ok
+test_identity_encoding (tests.test_transforms.TestRotation10D) ... ok
+test_matches_numpy_rederivation (tests.test_transforms.TestRotation10D) ... ok
+test_matches_reference_implementation (tests.test_transforms.TestRotation10D) ... ok
+test_random_params_are_rotations (tests.test_transforms.TestRotation10D) ... ok
+
+----------------------------------------------------------------------
+Ran 145 tests in 972.415s
+
+OK (skipped=2)
+
+Parameter counts (trainable; level-independent):
+part                                                  A              B        A+first        B+first
+encoder/stem                                      1,760            896          1,760            896
+encoder/l2                                      110,720         55,424        110,720         55,424
+encoder/l3                                      442,624        221,440        442,624        221,440
+encoder/l4                                    1,327,552        664,000      1,327,552        664,000
+encoder/l5                                    2,654,848      1,327,744      2,654,848      1,327,744
+encoder/l6                                    5,309,312      2,655,104      5,309,312      2,655,104
+encoder                                       9,846,816      4,924,608      9,846,816      4,924,608
+linear_decoder/reduction_0                      148,416        148,416        148,416        148,416
+linear_decoder/reduction_1                       37,344         37,344         37,344         37,344
+linear_decoder/reduction_2                        9,456          9,456          9,456          9,456
+linear_decoder/reduction_3                        2,424          2,424          2,424          2,424
+linear_decoder/dense_0                       10,334,048     10,334,048     20,655,968     20,655,968
+linear_decoder/dense_0/dense                 10,323,968     10,323,968     20,645,888     20,645,888
+linear_decoder/dense_1                        2,101,760      2,101,760      2,101,760      2,101,760
+linear_decoder/dense_1/dense                  2,097,664      2,097,664      2,097,664      2,097,664
+linear_decoder/head_norm_act                      1,024          1,024          1,024          1,024
+linear_decoder/rigid_head                         6,669          6,669          6,669          6,669
+linear_decoder/scale_shear_head                   3,078          3,078          3,078          3,078
+linear_decoder                               12,644,219     12,644,219     22,966,139     22,966,139
+group_overhead/encoder                        4,922,208              0      4,922,208              0
+group_overhead/linear_decoder                 1,146,496      1,146,496     11,468,416     11,468,416
+trainable                                    22,491,035     17,568,827     32,812,955     27,890,747
+non_trainable                                     2,784          2,784          2,784          2,784
+
+smoke training (level 4, N=4, rigid) RMS mm per step: 7.85 7.78 7.76 7.87 7.76 7.78 7.64 7.67 7.48 7.49 7.50 7.97 7.52 7.29 7.28 7.04 6.70 6.44 6.34 5.84 5.29 5.45 5.46 6.17 5.35 5.97 5.32 5.17 5.35 5.33 5.34 5.56 5.30 5.06 5.22 5.13 5.09 5.61 5.19 5.29 5.06 5.12 5.01 5.17 5.41 5.04 5.03 5.13 5.05 5.12 5.17 5.07 4.99 5.01 4.93 4.91 5.07 5.04 5.11 4.85
+overfit: reached=False best 10-step mean center RMS 14.9049 mm after 20 steps; final val center RMS eval 18.3483 mm, train mode 13.6275 mm
+overfit: reached=False best 10-step mean center RMS nan mm after 5 steps; final val center RMS eval 18.3461 mm, train mode 13.0010 mm
+dry run: steps 0 -> 2, trace counts {'rigid': 1}, finite True
+overfit: reached=True best 10-step mean center RMS 0.7568 mm after 583 steps; final val center RMS eval 0.5986 mm, train mode 0.5989 mm
+unittest exit code: 0, wall time: 977 s
+# runner exit status: 0
+# Finished: 2026-10-18T08:55:20-04:00

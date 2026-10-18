@@ -1,0 +1,242 @@
+"""Command-line arguments of main.py (TF-free: ``python main.py --help`` imports no TF).
+
+Pattern from the rigid project's ``runtime/args.py`` (argparse + ``str2bool``). Defaults:
+* optimizer: SGDW, momentum 0.99, Nesterov, coupled weight decay 3e-5 with gamma/beta/bias
+  excluded, ``global_clipnorm`` 12 (rigid project values; design 5.2). Peak LR 3e-3 instead of
+  the reference 0.01: on the full-width synthetic overfit (level 4, N = 4) lr 0.01 drove the
+  centered RMS from 22 mm up to ~90 mm (steps 100-250) before the cosine decay recovered it
+  (< 1 mm at step 454); 3e-3 reached < 1 mm at step 325 (milestone-4 report);
+* schedule: 1000 warmup steps, then cosine to lr * 1e-3 at ``--steps``;
+* losses: lambda_pair 1, p_pair 0.1, flip probability 0.5 per axis, 10 target iterations
+  (design 6.1, 3.3);
+* augmentation ranges: `data_loading.params.DEFAULT_LINEAR_RANGES` (design 3.2);
+* group size per level: 32 (level 4), 8 (level 2), 2 (level 1) (design 5.1);
+* model: `models.config.ModelConfig` defaults (dense-path norm 'layer'); dropout 0.15, or 0.0
+  in overfit mode.
+"""
+import argparse
+import collections
+import datetime
+import math
+
+from data_loading import params as P
+from models.config import ModelConfig
+
+DEFAULT_GROUP_SIZE = {4: 32, 2: 8, 1: 2}
+TRAIN_TASKS = ("rigid", "affine")
+ALL_TASKS = ("rigid", "affine", "deform")
+_MC = ModelConfig()
+
+
+def str2bool(v):
+    if isinstance(v, bool):
+        return v
+    s = str(v).strip().lower()
+    if s in ("yes", "true", "t", "y", "1", "on"):
+        return True
+    if s in ("no", "false", "f", "n", "0", "off"):
+        return False
+    raise argparse.ArgumentTypeError("boolean value expected, got {!r}".format(v))
+
+
+def int_list(v):
+    if isinstance(v, (list, tuple)):
+        return tuple(int(x) for x in v)
+    return tuple(int(x) for x in str(v).split(",") if x.strip())
+
+
+def parse_task_ratio(text):
+    """'rigid:1,affine:1' -> OrderedDict(task -> weight > 0). 'deform' -> NotImplementedError."""
+    out = collections.OrderedDict()
+    for part in str(text).split(","):
+        part = part.strip()
+        if not part:
+            continue
+        name, _, w = part.partition(":")
+        name = name.strip()
+        if name not in ALL_TASKS:
+            raise ValueError("unknown task {!r} in task ratio {!r} (tasks: {})".format(name, text, ALL_TASKS))
+        if name == "deform":
+            raise NotImplementedError("the deformable task arrives in milestone 6; use rigid/affine only")
+        weight = float(w) if w.strip() else 1.0
+        if not math.isfinite(weight) or weight < 0:
+            raise ValueError("task weight must be finite and >= 0, got {!r}".format(part))
+        if weight > 0:
+            out[name] = out.get(name, 0.0) + weight
+    if not out:
+        raise ValueError("task ratio {!r} has no task with a positive weight".format(text))
+    return out
+
+
+def build_parser():
+    p = argparse.ArgumentParser(description="Groupwise registration training (milestone 4: rigid/affine, one level)")
+    a = p.add_argument
+    g = p.add_argument_group("data and run")
+    g.add_argument("--data", default=None, help="npy export root (holds export_manifest.csv and template/), "
+                   "e.g. .../GroupwiseReg/data/npy_v2. Required unless --overfit-one-group --overfit-synthetic")
+    g.add_argument("--results", default="./results", help="results root; the run goes to <results>/<run-name>")
+    g.add_argument("--run-name", default=None, help="default: l<level>_<ratio>_<YYYYmmdd-HHMMSS>")
+    g.add_argument("--resume", type=str2bool, default=True, help="restore the last checkpoint of the run if one exists")
+    g.add_argument("--level", type=int, default=4, choices=list(P.LEVELS))
+    g.add_argument("--group-size", type=int, default=None, help="N per group (default 32 / 8 / 2 for level 4 / 2 / 1)")
+    g.add_argument("--steps", type=int, default=50000, help="total training steps")
+    g.add_argument("--val-every", type=int, default=250, help="validate every K steps (0 = never)")
+    g.add_argument("--val-groups", type=int, default=None, help="validation groups (default: ceil(n_val / Nv))")
+    g.add_argument("--val-group-size", type=int, default=None, help="validation group size (default min(N, n_val))")
+    g.add_argument("--val-seed", type=int, default=1234)
+    g.add_argument("--log-every", type=int, default=50)
+    g.add_argument("--ckpt-every", type=int, default=None, help="save 'last' every K steps (default --val-every)")
+    g.add_argument("--best-metric", default="val_rigid/pair_rms_mm", help="validation key for the 'best' checkpoint (lower is better)")
+    g = p.add_argument_group("optimizer and schedule")
+    g.add_argument("--optimizer", default="sgdw", choices=["sgdw", "sgd", "adam", "adamw"])
+    g.add_argument("--lr", type=float, default=3e-3,
+                   help="peak LR (default 3e-3: the reference 0.01 overshot to ~90 mm RMS on the overfit check)")
+    g.add_argument("--momentum", type=float, default=0.99)
+    g.add_argument("--dampening", type=float, default=0.0)
+    g.add_argument("--nesterov", type=str2bool, default=True)
+    g.add_argument("--decoupled", type=str2bool, default=False, help="decoupled weight decay (SGDW)")
+    g.add_argument("--weight-decay", type=float, default=3e-5)
+    g.add_argument("--exclude-from-weight-decay", type=str2bool, default=True, help="no decay on gamma/beta/bias")
+    g.add_argument("--clipnorm", type=float, default=12.0, help="global_clipnorm (<= 0 disables)")
+    g.add_argument("--schedule", default="cosine", choices=["cosine", "poly", "cycle", "constant"])
+    g.add_argument("--warmup-steps", type=int, default=1000)
+    g.add_argument("--min-lr-factor", type=float, default=1e-3)
+    g.add_argument("--power", type=float, default=0.9)
+    g.add_argument("--cycle-steps", type=int, default=None, help="first cycle length (default (steps - warmup) / 4)")
+    g.add_argument("--amp", type=str2bool, default=False, help="mixed_float16 policy + loss scaling")
+    g.add_argument("--xla", type=str2bool, default=False, help="tf.config.optimizer.set_jit(True)")
+    g.add_argument("--gpu-memory-limit-mb", type=int, default=0,
+                   help="cap TF's GPU memory (logical device limit) instead of memory growth; 0 = off. "
+                   "Needed on 8 GB WSL GPUs, where growing into the last GB pages GPU memory to host RAM")
+    g = p.add_argument_group("tasks and losses")
+    g.add_argument("--task-ratio", default="rigid:1", help="e.g. 'rigid:1,affine:1' (deform: milestone 6)")
+    g.add_argument("--lambda-pair", type=float, default=1.0)
+    g.add_argument("--p-pair", type=float, default=0.1)
+    g.add_argument("--flip-prob", type=float, default=0.5, help="per-axis group flip probability")
+    g.add_argument("--target-iters", type=int, default=10)
+    g = p.add_argument_group("augmentation (half-widths of uniform ranges)")
+    for task in TRAIN_TASKS:
+        d = P.DEFAULT_LINEAR_RANGES[task]
+        g.add_argument("--%s-rotation-deg" % task, type=float, default=d["rotation_deg"])
+        g.add_argument("--%s-translation-mm" % task, type=float, default=d["translation_mm"])
+        g.add_argument("--%s-log-scale" % task, type=float, default=d["log_scale"])
+        g.add_argument("--%s-shear" % task, type=float, default=d["shear"])
+    g.add_argument("--intensity-aug", type=str2bool, default=True)
+    g = p.add_argument_group("DALI")
+    g.add_argument("--num-threads", type=int, default=4)
+    g.add_argument("--prefetch", type=int, default=1)
+    g.add_argument("--shuffle-mode", default="epoch", choices=["epoch", "buffer"])
+    g = p.add_argument_group("model (models.config.ModelConfig)")
+    g.add_argument("--group-config", default=_MC.group_config, choices=["A", "B"])
+    g.add_argument("--block", default=_MC.block, choices=["single", "residual"])
+    g.add_argument("--norm", default=_MC.norm, choices=["batch", "instance", "none"])
+    g.add_argument("--dense-norm", default=_MC.dense_norm, choices=["layer", "batch", "none"],
+                   help="norm of the dense blocks and the pre-head norm-act (default layer). 'batch' "
+                   "is ablation-only: over one group it is group-relative in training mode and "
+                   "breaks eval mode (milestone-4 report)")
+    g.add_argument("--filters", type=int_list, default=_MC.filters)
+    g.add_argument("--reductions", type=int_list, default=_MC.reductions)
+    g.add_argument("--dense", type=int_list, default=_MC.dense)
+    g.add_argument("--dropout", type=float, default=None, help="default 0.15, or 0.0 with --overfit-one-group")
+    g.add_argument("--dense-group-concat-first", type=str2bool, default=_MC.dense_group_concat_first)
+    g.add_argument("--negative-slope", type=float, default=_MC.negative_slope)
+    g.add_argument("--translation-scale", type=float, default=_MC.translation_scale)
+    g.add_argument("--centering-iters", type=int, default=_MC.centering_iters)
+    g.add_argument("--bn-momentum", type=float, default=_MC.bn_momentum)
+    g = p.add_argument_group("misc and modes")
+    g.add_argument("--seed", type=int, default=0)
+    g.add_argument("--nonfinite-patience", type=int, default=20, help="raise after this many consecutive skipped steps")
+    g.add_argument("--quiet", type=str2bool, default=False)
+    g.add_argument("--log-backend", default="auto", choices=["auto", "dllogger", "jsonl"])
+    g.add_argument("--dry-run", action="store_true", help="build everything, run 2 steps + 1 validation group, exit")
+    g.add_argument("--overfit-one-group", action="store_true",
+                   help="one fixed group of N training images with fixed rigid transforms, TF-side warp (no DALI)")
+    g.add_argument("--overfit-synthetic", action="store_true", help="overfit on a synthetic phantom (no data needed)")
+    g.add_argument("--overfit-threshold-mm", type=float, default=1.0)
+    g.add_argument("--overfit-max-steps", type=int, default=1500)
+    del a
+    return p
+
+
+def parse_args(argv=None):
+    """Parse and validate; resolves group size, dropout, run name and checkpoint cadence."""
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    try:
+        args.task_ratio_parsed = parse_task_ratio(args.task_ratio)
+    except NotImplementedError as e:
+        parser.error(str(e))
+    except ValueError as e:
+        parser.error(str(e))
+    if args.data is None and not (args.overfit_one_group and args.overfit_synthetic):
+        parser.error("--data is required unless --overfit-one-group --overfit-synthetic is given")
+    if args.overfit_synthetic and not args.overfit_one_group:
+        parser.error("--overfit-synthetic needs --overfit-one-group")
+    if args.group_size is None:
+        args.group_size = DEFAULT_GROUP_SIZE[args.level]
+    if args.group_size < 2:
+        parser.error("--group-size must be >= 2 (pairwise loss), got %d" % args.group_size)
+    if args.dropout is None:
+        args.dropout = 0.0 if args.overfit_one_group else _MC.dropout
+    if args.ckpt_every is None:
+        args.ckpt_every = args.val_every
+    if args.run_name is None:
+        ratio = "-".join("%s%g" % (k, v) for k, v in args.task_ratio_parsed.items())
+        args.run_name = "l%d_%s_%s" % (args.level, ratio, datetime.datetime.now().strftime("%Y%m%d-%H%M%S"))
+    if args.overfit_one_group:
+        args.steps = args.overfit_max_steps
+    if args.best_metric.startswith("val_rigid/") and "rigid" not in args.task_ratio_parsed:
+        args.best_metric = args.best_metric.replace("val_rigid/", "val_%s/" % next(iter(args.task_ratio_parsed)))
+    return args
+
+
+def model_config_from_args(args):
+    return ModelConfig(filters=args.filters, reductions=args.reductions, dense=args.dense,
+                       dropout=args.dropout, group_config=args.group_config,
+                       dense_group_concat_first=args.dense_group_concat_first, norm=args.norm,
+                       dense_norm=args.dense_norm, block=args.block,
+                       negative_slope=args.negative_slope, bn_momentum=args.bn_momentum,
+                       centering_iters=args.centering_iters,
+                       translation_scale=args.translation_scale, seed=args.seed)
+
+
+def ranges_from_args(args):
+    """{task: dict(rotation_deg, translation_mm, log_scale, shear)} from the --<task>-* flags."""
+    out = {}
+    for task in TRAIN_TASKS:
+        out[task] = {k: float(getattr(args, "%s_%s" % (task, k)))
+                     for k in ("rotation_deg", "translation_mm", "log_scale", "shear")}
+    return out
+
+
+def schedule_config_from_args(args):
+    from runtime.schedulers import ScheduleConfig
+    return ScheduleConfig(name=args.schedule, base_lr=args.lr, total_steps=max(1, args.steps),
+                          warmup_steps=args.warmup_steps, min_lr_factor=args.min_lr_factor,
+                          power=args.power, cycle_steps=args.cycle_steps)
+
+
+def train_config_from_args(args):
+    """`runtime.run.TrainConfig` (imports TF lazily)."""
+    from runtime.run import TrainConfig
+    return TrainConfig(level=args.level, group_size=args.group_size, steps=args.steps,
+                       val_every=args.val_every, log_every=args.log_every,
+                       ckpt_every=args.ckpt_every, task_ratio=dict(args.task_ratio_parsed),
+                       lambda_pair=args.lambda_pair, p_pair=args.p_pair,
+                       flip_prob=0.0 if args.overfit_one_group else args.flip_prob,
+                       target_iters=args.target_iters, amp=args.amp, seed=args.seed,
+                       schedule=schedule_config_from_args(args),
+                       nonfinite_patience=args.nonfinite_patience, best_metric=args.best_metric,
+                       overfit=args.overfit_one_group,
+                       overfit_threshold_mm=args.overfit_threshold_mm)
+
+
+def args_to_dict(args):
+    out = {}
+    for k, v in sorted(vars(args).items()):
+        if isinstance(v, tuple):
+            v = list(v)
+        elif isinstance(v, collections.OrderedDict):
+            v = dict(v)
+        out[k] = v
+    return out

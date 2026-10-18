@@ -10,7 +10,7 @@ from typing import Optional, Tuple
 GROUP_CONFIGS = ("A", "B")
 BLOCKS = ("single", "residual")
 CONV_NORMS = ("batch", "instance", "none")
-DENSE_NORMS = ("batch", "none")
+DENSE_NORMS = ("layer", "batch", "none")
 
 
 @dataclasses.dataclass
@@ -29,8 +29,15 @@ class ModelConfig:
     dense_group_concat_first: bool = False
     # Norm of the conv blocks (encoder and 1x1 reductions): 'batch' | 'instance' | 'none'.
     norm: str = "batch"
-    # Norm of the dense blocks and the pre-head norm-act: 'batch' | 'none'.
-    dense_norm: str = "batch"
+    # Norm of the dense blocks and the pre-head norm-act: 'layer' | 'batch' | 'none' (design 4.4,
+    # v3.4). 'layer' (default): per-vector LayerNorm over the features, independent of the other
+    # group members and identical in training and inference. 'none': activation only (the rigid
+    # project had no norm between its dense layers). 'batch' is for ablations only: with one
+    # group per batch it normalizes over the N group members, so in training mode it is
+    # group-relative (subtracts the group mean, divides by the group spread), which the eval-mode
+    # moving statistics (pooling between- and within-group variation) cannot reproduce. On the
+    # milestone-4 overfit group that gave 0.36 mm RMS in training mode but ~20 mm in eval mode.
+    dense_norm: str = "layer"
     # Encoder L2-L6 block type: 'single' conv or 'residual' (two blocks + skip).
     block: str = "single"
     # LeakyReLU slope (0 = ReLU, the rigid project's default).

@@ -1,0 +1,10 @@
+{
+  "verdict": "APPROVED",
+  "findings": [
+    "Non-blocking: Eval-mode BN gap on the dense path. Validation and 'best' checkpoint selection use moving statistics, which stay around 20 mm on the overfit group while training-mode RMS reaches 0.36 mm. Jay should choose a fix (train-mode/group-statistics validation, lower bn_momentum, or --dense-norm none) before trusting 'best' or freezing level 4 with training=False for milestone 5. Also log train-mode val metrics in the debug job.",
+    "Non-blocking: The AMP smoke test does not exercise LSO overflow skips. In Keras 2.10, LossScaleOptimizerV3 advances inner.iterations on skipped steps too, so the assertion iterations == n_finite + first_applied only holds when every step was finite. Fix the comment and the report claim, or add a forced-overflow test that asserts the scale halves and BN rolls back.",
+    "Non-blocking: The dllogger backend has never run. --log-backend auto picks it whenever it imports (possibly inside tf10_nv.sif), and no test covers it. Pass --log-backend jsonl in slurm/train_debug.sh, or add a guarded test.",
+    "Non-blocking: The validation seed depends on the task's position in --task-ratio (val_seed + i in main._build_dali_data), so rigid val sets differ between, say, rigid:1 and affine:1,rigid:2. Key the seed on the task name so val metrics stay comparable across runs."
+  ],
+  "reviewDoc": "d:\\Research\\Brain_Registration_Projects\\brain-group-rad\\.agents\\tasks\\milestone-4\\review.md"
+}

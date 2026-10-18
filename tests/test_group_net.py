@@ -392,6 +392,9 @@ class TestModelConfig(unittest.TestCase):
         self.assertEqual((c.group_config, c.dense_group_concat_first, c.norm, c.block),
                          ("A", False, "batch", "single"))
         self.assertEqual((c.negative_slope, c.centering_iters, c.translation_scale), (0.0, 4, 1.0))
+        self.assertEqual(c.dense_norm, "layer")                      # v3.4; conv norm stays batch
+        for ok in ("layer", "batch", "none"):
+            self.assertEqual(ModelConfig(dense_norm=ok).dense_norm, ok)
         self.assertEqual(ModelConfig.from_dict(c.to_dict()), c)
         self.assertEqual(c.replace(group_config="B").group_config, "B")
         for bad in (dict(group_config="C"), dict(block="dense"), dict(norm="group"),
@@ -440,7 +443,9 @@ class TestSmokeTraining(NetTestCase):
                                  if g is not None])
             return loss
 
-        losses = [float(step()) for _ in range(20)]
+        # 60 steps: with the v3.4 dense LayerNorm the first ~20 steps move the loss only ~12%
+        # (the old group-relative dense BN amplified the small inter-image differences early on).
+        losses = [float(step()) for _ in range(60)]
         print("\nsmoke training (level 4, N=4, rigid) RMS mm per step: " +
               " ".join("%.2f" % np.sqrt(v) for v in losses))
         self.assertTrue(np.all(np.isfinite(losses)))

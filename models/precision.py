@@ -26,6 +26,6 @@ def configure_tf_precision(tf32=False, memory_growth=True):
         for gpu in tf.config.list_physical_devices("GPU"):
             try:
                 tf.config.experimental.set_memory_growth(gpu, True)
-            except RuntimeError:
-                pass  # already initialized
+            except (RuntimeError, ValueError):
+                pass  # already initialized, or a logical-device memory limit is configured
     return tf.config.experimental.tensor_float_32_execution_enabled()

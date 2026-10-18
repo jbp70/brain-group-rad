@@ -155,6 +155,41 @@ class TestGroupDenseBlock(unittest.TestCase):
         self.assertEqual(tuple(blk.dense.kernel.shape), (7, 3))
         self.assertEqual(blk.group_overhead_params(), 0)
 
+    def test_layer_norm_per_sample(self):
+        # Default dense norm (v3.4): per-vector LayerNorm, independent of the other group members
+        # and identical in training and inference.
+        rng = np.random.default_rng(6)
+        x = rng.normal(2.0, 4.0, size=(5, 9)).astype(np.float32)
+        ln = L.make_norm("layer")
+        self.assertIsInstance(ln, L.LayerNormWithAffine)
+        out = ln(tf.constant(x), training=True).numpy()
+        ref = (x - x.mean(-1, keepdims=True)) / np.sqrt(x.var(-1, keepdims=True) + 1e-5)
+        np.testing.assert_allclose(out, ref, atol=1e-4)
+        np.testing.assert_array_equal(out, ln(tf.constant(x), training=False).numpy())
+        np.testing.assert_allclose(ln(tf.constant(x[:2]), training=True).numpy(), out[:2], atol=1e-6)
+        self.assertEqual(sorted(w.name.split("/")[-1].split(":")[0] for w in ln.trainable_weights),
+                         ["beta", "gamma"])
+        self.assertEqual(ln.non_trainable_weights, [])
+        blk = L.GroupDenseBlock(3, group=False)                   # default norm is 'layer'
+        self.assertIsInstance(blk.norm, L.LayerNormWithAffine)
+        y_all = blk(tf.constant(x), training=True).numpy()
+        np.testing.assert_allclose(blk(tf.constant(x[:1]), training=True).numpy(), y_all[:1], atol=1e-5)
+        self.assertIsInstance(L.NormAct("layer").norm, L.LayerNormWithAffine)
+        self.assertIsNone(L.NormAct("none").norm)
+        self.assertIsNotNone(L.NormAct("none").act)
+
+    def test_layer_norm_mixed_precision(self):
+        try:
+            tf.keras.mixed_precision.set_global_policy("mixed_float16")
+            ln = L.LayerNormWithAffine()
+            x = tf.constant(np.random.default_rng(7).normal(100.0, 50.0, size=(3, 512)), tf.float16)
+            y = ln(x)
+            self.assertEqual(y.dtype, tf.float16)
+            self.assertTrue(np.all(np.isfinite(y.numpy())))
+            self.assertEqual(ln.affine.gamma.dtype, tf.float32)
+        finally:
+            tf.keras.mixed_precision.set_global_policy("float32")
+
 
 if __name__ == "__main__":
     unittest.main()

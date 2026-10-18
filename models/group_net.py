@@ -17,7 +17,8 @@ Encoder (identical trainable parameters at every level, so weights copy across l
 
 Linear decoder (group blocks in both configs; all of it is after the bottleneck):
 1x1 reductions (192, 96, 48, 24) -> flatten (5040) -> dense 2048 (group concat only with
-``dense_group_concat_first``) -> dense 512 (group) -> norm -> act -> dropout -> heads (float32):
+``dense_group_concat_first``) -> dense 512 (group) -> norm -> act -> dropout -> heads (float32)
+(dense-path norm = ``dense_norm``, LayerNorm by default):
 rotation+translation Dense(13) (zero kernel, identity bias) and scale/shear Dense(6) (zeros).
 Rigid: A_raw = [R | t]; affine: A_raw = [R K | t]. A = GroupCentering(A_raw).
 """
@@ -102,7 +103,8 @@ class LinearDecoder(tf.keras.layers.Layer):
     Pre-activation blocks throughout: the flattened vector is the raw output of the last 1x1
     reduction conv, and each dense block normalizes and activates its input. A final norm -> act
     after the last dense layer feeds dropout and the heads (the rigid project's Dense -> act ->
-    dropout -> head, in pre-activation form).
+    dropout -> head, in pre-activation form). The dense blocks and that pre-head norm-act use
+    ``config.dense_norm`` (default 'layer', per-vector LayerNorm; design 4.4, v3.4).
 
     Heads are float32 (Dense dtype='float32') so the matrix math stays float32 under
     mixed_float16. Translations are in mm: t = translation_scale * raw output (default 1).

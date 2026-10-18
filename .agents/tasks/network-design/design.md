@@ -1,6 +1,6 @@
 # Unified groupwise rigid / affine / deformable registration: design document
 
-Status: v3 (2026-10-16). Incorporates Jay's answers to the v1 and v2 open questions. Decisions that changed since v1 are marked *(v2)* or *(v3)*. Remaining items are in section 12.
+Status: v3.4 (2026-10-18). Incorporates Jay's answers to the v1 and v2 open questions. Decisions that changed since v1 are marked *(v2)*, *(v3)* or *(v3.x)*. v3.4: the dense path uses LayerNorm by default (section 4.4). Remaining items are in section 12.
 
 Related documents:
 - Reference-code review: `.agents/tasks/reference-code-review/report.md` (local only)
@@ -163,7 +163,8 @@ Every level has identical trainable parameters, so every parameter is first trai
    - The 2048 → 512 layer **is** a group block (+1.05 M).
    - Total linear-decoder overhead ≈ 1.1 M instead of 11.4 M.
    - Flag `dense_group_concat_first` (default false) enables it at the first dense layer too, for ablations. Config B is unchanged in meaning: all of these layers are after the bottleneck.
-   - **Pre-head norm → act** *(v3.3, milestone 3; confirmed by Jay)*: BN → activation after the 512 layer, before dropout and the heads. With pre-activation blocks the 512 output is otherwise linear, so the heads would be a linear map of a linear map.
+   - **Pre-head norm → act** *(v3.3, milestone 3; confirmed by Jay)*: norm → activation after the 512 layer, before dropout and the heads. With pre-activation blocks the 512 output is otherwise linear, so the heads would be a linear map of a linear map. Its norm follows `dense_norm` *(v3.4)*.
+   - **Dense-path norm = LayerNorm by default** *(v3.4, milestone 4; decided by Jay)*: the dense blocks (inputs of width 5,040, 2,048 and 512) and the pre-head norm-act use a per-vector LayerNorm (statistics over the features of each image, float32, trainable γ/β). `dense_norm='none'` (activation only, like the rigid project's dense layers) is the alternative. `'batch'` is kept for ablations only. With one group per batch, BatchNorm on these vectors normalizes over the N group members, so in training mode it is group-relative (it subtracts the group's mean and divides by its spread). The eval-mode moving statistics mix between-group and within-group variation and can't reproduce that. On the milestone-4 overfit group, training mode reached 0.36 mm while eval mode stayed at ~20 mm. The conv path (encoder and 1×1 reductions) keeps BatchNorm.
 4. **Heads** *(v2: shared rotation branch plus an extra scale/shear branch)*:
    - **Rotation + translation branch (shared by rigid and affine):** 10D rotation representation (validated at ±45° in the rigid project) plus t in mm. 13 outputs. Zero kernel with identity-encoding bias.
    - **Scale/shear branch (affine only):** 3 log-scales and 3 shears, giving K (upper-triangular, diagonal exp(s)). 6 outputs, zero-initialized, so K = I at start.

@@ -158,7 +158,8 @@ def transform_image(images, matrices, spacing, displacement=None, interpolation=
 
 
 # ============================================================================ group blocks
-NORMS = ("batch", "instance", "none")
+NORMS = ("batch", "instance", "layer", "none")
+DENSE_BLOCK_NORMS = ("layer", "batch", "none")
 
 
 class KaimingNormal(tf.keras.initializers.VarianceScaling):
@@ -231,12 +232,35 @@ class InstanceNormWithAffine(tf.keras.layers.Layer):
         return self.affine(tf.cast(y, x.dtype))
 
 
+class LayerNormWithAffine(tf.keras.layers.Layer):
+    """Per-sample normalization over the last (feature) axis (float32 math) + `AffineParams`.
+
+    Each vector is normalized by its own mean and variance over its D features, so the output
+    of image i does not depend on the other group members, and training and inference compute
+    the same function (no statistics). Used on the dense path (design 4.4, v3.4).
+    """
+
+    def __init__(self, epsilon=1e-5, **kwargs):
+        super().__init__(**kwargs)
+        self.epsilon = float(epsilon)
+        self.affine = AffineParams(name="affine")
+
+    def call(self, x, training=None):
+        xf = tf.cast(x, tf.float32)
+        mean, var = tf.nn.moments(xf, axes=[-1], keepdims=True)
+        y = (xf - mean) * tf.math.rsqrt(var + self.epsilon)
+        return self.affine(tf.cast(y, x.dtype))
+
+
 def make_norm(norm, bn_momentum=0.99, bn_epsilon=1e-5, name="norm"):
-    """'batch' -> BatchNormWithSeparateAffine, 'instance' -> InstanceNormWithAffine, 'none' -> None."""
+    """'batch' -> BatchNormWithSeparateAffine, 'instance' -> InstanceNormWithAffine,
+    'layer' -> LayerNormWithAffine, 'none' -> None."""
     if norm == "batch":
         return BatchNormWithSeparateAffine(momentum=bn_momentum, epsilon=bn_epsilon, name=name)
     if norm == "instance":
         return InstanceNormWithAffine(epsilon=bn_epsilon, name=name)
+    if norm == "layer":
+        return LayerNormWithAffine(epsilon=bn_epsilon, name=name)
     if norm == "none":
         return None
     raise ValueError("norm must be one of {}, got {!r}".format(NORMS, norm))
@@ -352,14 +376,16 @@ class GroupResBlock(tf.keras.layers.Layer):
 class GroupDenseBlock(_PreActivation):
     """norm -> act -> [concat(h_i, mean_j h_j)] -> Dense on [N, D] vectors (design 4.4, v3.2).
 
-    The concat makes the Dense W_a h_i + W_b mean(h) + b, i.e. a per-group bias. norm is 'batch'
-    (BatchNormWithSeparateAffine over the N vectors of the group) or 'none'.
+    The concat makes the Dense W_a h_i + W_b mean(h) + b, i.e. a per-group bias. norm is 'layer'
+    (per-vector LayerNormWithAffine, the default), 'batch' (BatchNormWithSeparateAffine over the
+    N vectors of the group; ablation only, see `models.config.ModelConfig.dense_norm`) or 'none'
+    (activation only).
     """
 
-    def __init__(self, units, group=True, norm="batch", negative_slope=0.0, bn_momentum=0.99,
+    def __init__(self, units, group=True, norm="layer", negative_slope=0.0, bn_momentum=0.99,
                  bn_epsilon=1e-5, seed=None, **kwargs):
-        if norm not in ("batch", "none"):
-            raise ValueError("dense blocks support norm 'batch' or 'none', got {!r}".format(norm))
+        if norm not in DENSE_BLOCK_NORMS:
+            raise ValueError("dense blocks support norm {}, got {!r}".format(DENSE_BLOCK_NORMS, norm))
         super().__init__(**kwargs)
         self._init_pre(norm, negative_slope, bn_momentum, bn_epsilon, group, True)
         self.dense = tf.keras.layers.Dense(
@@ -374,9 +400,9 @@ class GroupDenseBlock(_PreActivation):
 
 
 class NormAct(_PreActivation):
-    """norm -> act only (no group concat, no weights besides the norm's)."""
+    """norm -> act only (no group concat, no weights besides the norm's). norm: any of `NORMS`."""
 
-    def __init__(self, norm="batch", negative_slope=0.0, bn_momentum=0.99, bn_epsilon=1e-5,
+    def __init__(self, norm="layer", negative_slope=0.0, bn_momentum=0.99, bn_epsilon=1e-5,
                  **kwargs):
         super().__init__(**kwargs)
         self._init_pre(norm, negative_slope, bn_momentum, bn_epsilon, False, True)
