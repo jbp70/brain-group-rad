@@ -1,11 +1,13 @@
 """Command-line arguments of main.py (TF-free: ``python main.py --help`` imports no TF).
 
 Pattern from the rigid project's ``runtime/args.py`` (argparse + ``str2bool``). Defaults:
-* optimizer: SGDW, momentum 0.99, Nesterov, coupled weight decay 3e-5 with gamma/beta/bias
-  excluded, ``global_clipnorm`` 12 (rigid project values; design 5.2). Peak LR 3e-3 instead of
-  the reference 0.01: on the full-width synthetic overfit (level 4, N = 4) lr 0.01 drove the
-  centered RMS from 22 mm up to ~90 mm (steps 100-250) before the cosine decay recovered it
-  (< 1 mm at step 454); 3e-3 reached < 1 mm at step 325 (milestone-4 report);
+* optimizer: Adam, peak LR 3e-4, ``global_clipnorm`` 12 (Adam is nearly invariant to gradient
+  scale, so the clip barely matters). On real level-4 data every SGDW run (rigid project
+  values: momentum 0.99, Nesterov, wd 3e-5, lr 3e-3; clipped, or unclipped with
+  --loss-scale-mm2 100; ReLU or LeakyReLU) collapsed to the identity fixed point (pre-head
+  features identical across the group, zero gradient through GroupCentering). Adam 3e-4 with
+  LeakyReLU 0.01 learned (milestone-4 report). SGDW stays selectable with --optimizer sgdw
+  --lr 3e-3;
 * schedule: 1000 warmup steps, then cosine to lr * 1e-3 at ``--steps``;
 * losses: lambda_pair 1, p_pair 0.1, flip probability 0.5 per axis, 10 target iterations
   (design 6.1, 3.3); objective divided by --loss-scale-mm2 (default 1, unscaled);
@@ -94,9 +96,12 @@ def build_parser():
     g.add_argument("--val-png-mean-col", type=str2bool, default=True, help="last column: mean over the K images")
     g.add_argument("--best-metric", default="val_rigid/pair_rms_mm", help="validation key for the 'best' checkpoint (lower is better)")
     g = p.add_argument_group("optimizer and schedule")
-    g.add_argument("--optimizer", default="sgdw", choices=["sgdw", "sgd", "adam", "adamw"])
-    g.add_argument("--lr", type=float, default=3e-3,
-                   help="peak LR (default 3e-3: the reference 0.01 overshot to ~90 mm RMS on the overfit check)")
+    g.add_argument("--optimizer", default="adam", choices=["sgdw", "sgd", "adam", "adamw"],
+                   help="default adam: every real level-4 SGDW run (lr 3e-3, momentum 0.99; clipped or "
+                   "unclipped with --loss-scale-mm2 100; ReLU or LeakyReLU) collapsed to the identity "
+                   "fixed point, while Adam 3e-4 + LeakyReLU 0.01 learned (milestone-4 report)")
+    g.add_argument("--lr", type=float, default=3e-4,
+                   help="peak LR (default 3e-4 for Adam; SGDW used 3e-3)")
     g.add_argument("--momentum", type=float, default=0.99)
     g.add_argument("--dampening", type=float, default=0.0)
     g.add_argument("--nesterov", type=str2bool, default=True)

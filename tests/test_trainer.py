@@ -388,7 +388,8 @@ class TestCollapseDiagnostics(TrainerCase):
 class TestHeadActivation(TrainerCase):
     def test_build_and_run(self):
         for act in ("relu", "none"):
-            tr = self.make(head_activation=act)
+            # negative_slope=0 so 'relu' is a true ReLU (the model default is LeakyReLU 0.01).
+            tr = self.make(head_activation=act, negative_slope=0.0)
             dec = tr.model.linear_decoder
             self.assertEqual(dec.head_norm_act.act is None, act == "none")
             self.assertIsNotNone(dec.head_norm_act.norm)                   # LayerNorm kept

@@ -59,7 +59,8 @@ class TestArgs(unittest.TestCase):
         self.assertEqual(type(cfg).from_dict(cfg.to_dict()), cfg)
         tc = A.train_config_from_args(a)
         self.assertEqual((tc.level, tc.group_size, tc.lambda_pair, tc.p_pair), (4, 32, 1.0, 0.1))
-        self.assertEqual(tc.schedule.base_lr, 3e-3)
+        self.assertEqual(tc.schedule.base_lr, 3e-4)
+        self.assertEqual(a.optimizer, "adam")
         self.assertEqual(A.ranges_from_args(a)["rigid"], dict(P.DEFAULT_LINEAR_RANGES["rigid"]))
         json.dumps(A.args_to_dict(a))
 

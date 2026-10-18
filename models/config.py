@@ -45,8 +45,9 @@ class ModelConfig:
     head_activation: str = "relu"
     # Encoder L2-L6 block type: 'single' conv or 'residual' (two blocks + skip).
     block: str = "single"
-    # LeakyReLU slope (0 = ReLU, the rigid project's default).
-    negative_slope: float = 0.0
+    # LeakyReLU slope. 0.01 (not ReLU) so units cannot die permanently; part of the setup that
+    # escaped the identity collapse on real level-4 data (milestone 4, with Adam 3e-4).
+    negative_slope: float = 0.01
     kernel_size: int = 3
     bn_momentum: float = 0.99
     bn_epsilon: float = 1e-5

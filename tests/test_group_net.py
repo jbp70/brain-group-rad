@@ -391,7 +391,7 @@ class TestModelConfig(unittest.TestCase):
         self.assertEqual((c.reductions, c.dense, c.dropout), ((192, 96, 48, 24), (2048, 512), 0.15))
         self.assertEqual((c.group_config, c.dense_group_concat_first, c.norm, c.block),
                          ("A", False, "batch", "single"))
-        self.assertEqual((c.negative_slope, c.centering_iters, c.translation_scale), (0.0, 4, 1.0))
+        self.assertEqual((c.negative_slope, c.centering_iters, c.translation_scale), (0.01, 4, 1.0))
         self.assertEqual(c.dense_norm, "layer")                      # v3.4; conv norm stays batch
         for ok in ("layer", "batch", "none"):
             self.assertEqual(ModelConfig(dense_norm=ok).dense_norm, ok)
