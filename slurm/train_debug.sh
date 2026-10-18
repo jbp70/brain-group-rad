@@ -7,7 +7,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=3
 #SBATCH --mem=64G
-#SBATCH --time=01:00:00
+#SBATCH --time=04:00:00
 #SBATCH --output=/autofs/space/crater_001/users/jn85/BrainRegProjects/GroupwiseReg/logs/%x-%j.out
 #SBATCH --error=/autofs/space/crater_001/users/jn85/BrainRegProjects/GroupwiseReg/logs/%x-%j.err
 # Alternatives (A100 40 GB, full-resolution work later; costs more fairshare on dgx-a100):
@@ -16,8 +16,10 @@
 ##SBATCH -p pubgpu
 ##SBATCH --cpus-per-task=16
 #
-# Milestone-4 debug training job: rigid task only, level 4 (40x56x48 at 4 mm), N = 32, 2000
+# Milestone-4 debug training job: rigid task only, level 4 (40x56x48 at 4 mm), N = 32, 4000
 # steps (warmup 200, cosine), validation every 250 steps on the 39 T1w val cases (fixed groups
+# MEASURED on glacier (A100 40 GB, 2026-10-18): N = 32 peaks at ~26 GB (dry run) / ~34 GB in
+# training, ~1.2 s per step (4000 steps ~1.4 h). The estimate below predates that measurement.
 # and transforms), 'last' checkpoint every 250 steps, 'best' by val_rigid/pair_rms_mm.
 # DO NOT submit without Jay's approval (cluster-access rules).
 #
@@ -48,7 +50,7 @@ JOB_ID="${SLURM_JOB_ID:-manual}"
 RUN_NAME="${RUN_NAME:-m4_debug_$JOB_ID}"
 LEVEL="${LEVEL:-4}"
 N="${N:-32}"
-STEPS="${STEPS:-2000}"
+STEPS="${STEPS:-4000}"
 VAL_EVERY="${VAL_EVERY:-250}"
 WARMUP="${WARMUP:-200}"
 TASK_RATIO="${TASK_RATIO:-rigid:1}"
