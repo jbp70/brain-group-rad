@@ -400,12 +400,17 @@ class GroupDenseBlock(_PreActivation):
 
 
 class NormAct(_PreActivation):
-    """norm -> act only (no group concat, no weights besides the norm's). norm: any of `NORMS`."""
+    """norm -> act only (no group concat, no weights besides the norm's). norm: any of `NORMS`.
+
+    ``activation=False`` drops the activation (norm only; identity if norm is 'none').
+    """
 
     def __init__(self, norm="layer", negative_slope=0.0, bn_momentum=0.99, bn_epsilon=1e-5,
-                 **kwargs):
+                 activation=True, **kwargs):
         super().__init__(**kwargs)
         self._init_pre(norm, negative_slope, bn_momentum, bn_epsilon, False, True)
+        if not activation:
+            self.act = None
 
     def call(self, x, training=None):
         return self._pre(x, training)

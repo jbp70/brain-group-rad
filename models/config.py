@@ -11,6 +11,7 @@ GROUP_CONFIGS = ("A", "B")
 BLOCKS = ("single", "residual")
 CONV_NORMS = ("batch", "instance", "none")
 DENSE_NORMS = ("layer", "batch", "none")
+HEAD_ACTIVATIONS = ("relu", "none")
 
 
 @dataclasses.dataclass
@@ -38,6 +39,10 @@ class ModelConfig:
     # moving statistics (pooling between- and within-group variation) cannot reproduce. On the
     # milestone-4 overfit group that gave 0.36 mm RMS in training mode but ~20 mm in eval mode.
     dense_norm: str = "layer"
+    # Activation of the pre-head norm-act (after the last dense layer): 'relu' (default; LeakyReLU
+    # with `negative_slope`) | 'none' (norm only, so no head-input channel can die; collapse
+    # follow-up of milestone 4). The dense blocks always keep their activation.
+    head_activation: str = "relu"
     # Encoder L2-L6 block type: 'single' conv or 'residual' (two blocks + skip).
     block: str = "single"
     # LeakyReLU slope (0 = ReLU, the rigid project's default).
@@ -71,6 +76,8 @@ class ModelConfig:
             raise ValueError("norm must be one of {}".format(CONV_NORMS))
         if self.dense_norm not in DENSE_NORMS:
             raise ValueError("dense_norm must be one of {}".format(DENSE_NORMS))
+        if self.head_activation not in HEAD_ACTIVATIONS:
+            raise ValueError("head_activation must be one of {}".format(HEAD_ACTIVATIONS))
         if not 0.0 <= self.dropout < 1.0:
             raise ValueError("dropout must be in [0, 1)")
         if self.centering_iters < 1:

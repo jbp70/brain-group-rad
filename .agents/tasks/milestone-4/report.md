@@ -193,6 +193,35 @@ Full width (13.9 M, default model), 1000 steps, no early stop (`--overfit-thresh
 - Narrow model in the suite (Adam 3e-4): stopped at step 583. At that step eval was 0.599 mm and train mode 0.599 mm. At step 250 they were 17.1 vs 4.0 mm (the same transient lag). Other runs today stopped at 532 / 841 steps with final eval 0.74 / 0.65 mm.
 - Files: `overfit_summary_full_{adam,sgdw}_layer.json`, `overfit_full_{adam,sgdw}_layer.log`.
 
+## Collapse diagnostics (follow-up to the two collapsed level-4 runs)
+
+Both real runs (rigid, N = 32, SGDW 3e-3, clipnorm 12) sat at a degenerate fixed point: if every image of a group gets the same pre-head feature vector, the heads output one transform for all of them, GroupCentering cancels it to the identity, and the gradient is exactly zero. The checkpoints showed ~19% dead pre-head channels and a rigid-head kernel norm of 70. New tools to detect and avoid it (all defaults keep the previous behaviour):
+
+| Flag / field | Default | Effect |
+|---|---|---|
+| `--loss-scale-mm2` (`TrainConfig.loss_scale_mm2`, in `config.json` args) | 1.0 | Training objective = (center + λ_pair · pair) / scale. Logged loss terms and RMS stay in unscaled mm² / mm; `train/grad_norm` is the gradient of the scaled objective. With 100 the objective is O(1-20) at init, so the gradients are no longer always clipped to 12 |
+| `--head-activation relu\|none` (`ModelConfig.head_activation`) | relu | `none`: the pre-head norm-act is norm only (LayerNorm, no activation), so no head-input channel can die. Same parameter count; old `config.json` files load as `relu` |
+
+Logged from the train step (computed every step inside the same `tf.function`, still one trace per task; means over each `--log-every` window), as `train_<task>/diag_*`:
+- `diag_feat_spread`: mean over the 512 pre-head features (after `head_norm_act`) of their std across the N images. `diag_feat_rel_spread`: the same divided by the mean |feature|.
+- `diag_dead_frac`: fraction of the pre-head channels that are ≤ 0 for every image in the group.
+- `diag_rot10_norm`: mean over images of the L2 norm of the 10 rotation outputs (the 10D representation is scale-invariant, so a large norm shrinks the rotation gradients).
+- `diag_head_spread`: mean over the 13 rigid-head outputs of their std across the N images.
+
+`train/collapse_suspect` is the number of consecutive finite training steps with `diag_feat_rel_spread < 1e-3` or grad norm < 1e-3 (`TrainConfig.collapse_rel_spread`, `collapse_grad_norm`). When it reaches `collapse_patience` (50 steps, counted per training step, not per log line) a warning goes to stderr and a `collapse_suspect` event to the metrics log, once per streak. The model output dict gains `pre_head` (= `dense`); `params` was already there.
+
+Validation PNGs (`runtime/val_png.py`) give a qualitative check. At every validation, and at the final step of `fit` (an extra validation if that step was not a validation step), each validated task writes `<run>/val_png/<task>_step<step:07d>.png`:
+- Flags: `--val-png` (default true), `--val-png-k` (8), `--val-png-group` (0), `--val-png-gt-row` (true), `--val-png-mean-col` (true).
+- The K images are a fixed seeded choice from that validation group (all of them if the group is smaller).
+- Row 1: the inputs as rendered.
+- Row 2: `transform_image(images, A_i⁻¹)` using the eval-mode matrices of the same validation forward pass, with the per-image centered RMS (mm) under each panel.
+- Row 3: the same resampling with the targets A*_i⁻¹.
+- Last column: the voxelwise mean of each row.
+- Panels show the middle axial slice (z = Z // 2) in grayscale with a fixed [0, 1] window, displayed radiologically: anterior at the top, the subject's right on the left. The title gives the task, step, val center/pair RMS and this convention.
+- matplotlib is imported lazily (Agg `Figure`, no pyplot). A failure prints a warning, logs a `val_png_failed` event and training continues. In overfit mode `main.py` reuses the final-step validation instead of validating twice.
+
+Tests: gradient norm scales by 1/scale while the logged terms stay equal; crafted values for every diagnostic; a group of identical images gives zero spread and triggers the counter and warning (patience 3) with one trace; a healthy group logs finite diagnostics without a warning; `head_activation` relu / none build and train; the new flags parse and validate. PNGs (`tests/test_val_png.py`, `test_main` dry run): fixed selection; display orientation; identity model gives row 1 = row 2; perfect model gives row 2 = row 3; axes count per configuration; file names and pixel size at validation and final step; nothing written when off (including `--val-png false` in `main.py`); a failing PNG does not raise. Suite counts: `test-log-collapse.txt`.
+
 ## Findings
 
 1. **Eval-mode BN gap on the dense path: resolved by LayerNorm (design v3.4).**

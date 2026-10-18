@@ -16,12 +16,13 @@ from tests.runtime_helpers import free_memory, narrow_config, synthetic_group
 import numpy as np
 import tensorflow as tf
 
+from models import transforms as tfm
 from models.group_net import GroupRegLevelModel
 from runtime import checkpoint as C
 from runtime import fixed_data as fd
 from runtime import optimizers as O
 from runtime.logging import RunLogger, make_run_dir
-from runtime.run import TaskSchedule, Trainer, TrainConfig
+from runtime.run import DIAG_KEYS, TaskSchedule, Trainer, TrainConfig, collapse_diagnostics
 from runtime.schedulers import ScheduleConfig
 
 N = 4
@@ -46,9 +47,10 @@ class TrainerCase(unittest.TestCase):
         shutil.rmtree(self.tmp, ignore_errors=True)
         free_memory()
 
-    def make(self, cfg=None, sources=None, val_sets=None, logger=None, opt="adam", amp=False, dropout=0.0):
+    def make(self, cfg=None, sources=None, val_sets=None, logger=None, opt="adam", amp=False, dropout=0.0,
+             **model_kw):
         cfg = cfg or config()
-        model = GroupRegLevelModel(4, narrow_config(dropout=dropout, seed=1)).build_model(N)
+        model = GroupRegLevelModel(4, narrow_config(dropout=dropout, seed=1, **model_kw)).build_model(N)
         optimizer = O.make_optimizer(opt, lr=1e-3, amp=amp)
         if sources is None:
             sources = {t: fd.FixedGroupSource(g["batch"]) for t, g in self.groups.items()}
@@ -284,6 +286,126 @@ class TestResumeAndValidation(TrainerCase):
             self.assertTrue(any(not np.array_equal(a, v.numpy()) for a, v in zip(s0, model.non_trainable_variables)))
         finally:
             tf.keras.mixed_precision.set_global_policy("float32")
+
+
+def _random_head_kernel(model, seed=0):
+    head = model.linear_decoder.rigid_head
+    head.kernel.assign(np.random.default_rng(seed).normal(0, 1e-3, head.kernel.shape).astype(np.float32))
+
+
+class TestLossScale(TrainerCase):
+    def test_gradient_scales_and_logged_terms_do_not(self):
+        scale = 100.0
+        tr1 = self.make(config(loss_scale_mm2=1.0))
+        _random_head_kernel(tr1.model)          # gradient into the encoder too, not only the heads
+        tr2 = self.make(config(loss_scale_mm2=scale))
+        tr2.model.set_weights(tr1.model.get_weights())
+        batch = self.groups["rigid"]["batch"]
+        r1 = tr1.train_step("rigid", batch)
+        r2 = tr2.train_step("rigid", batch)
+        self.assertTrue(r1["finite"] and r2["finite"])
+        self.assertGreater(r1["grad_norm"], 0.0)
+        np.testing.assert_allclose(r2["grad_norm"], r1["grad_norm"] / scale, rtol=1e-3)
+        for k in ("loss", "center", "pair", "center_rms_mm", "pair_rms_mm"):   # unscaled mm^2 / mm
+            np.testing.assert_allclose(r2[k], r1[k], rtol=1e-4, err_msg=k)
+        np.testing.assert_allclose(r2["loss"], r2["center"] + r2["pair"], rtol=1e-5)
+        self.assertGreater(r2["center"], 1.0)    # mm^2 scale, not divided by 100
+        with self.assertRaises(ValueError):
+            self.make(config(loss_scale_mm2=0.0))
+
+
+class TestCollapseDiagnostics(TrainerCase):
+    def identical_group_source(self):
+        g = self.groups["rigid"]
+        rep = lambda a: np.repeat(a[:1], N, axis=0)  # noqa: E731
+        return fd.FixedGroupSource(fd.to_dali_batch(rep(g["images"]), rep(g["T"]), rep(g["T_target"]),
+                                                    "rigid", 4))
+
+    def test_crafted_values(self):
+        pre = np.array([[1.0, -1.0, 0.0, 2.0], [-1.0, -2.0, 0.0, 4.0]], np.float32)
+        params = np.zeros((2, 19), np.float32)
+        params[0, :2] = (3.0, 4.0)
+        params[1, :2] = (6.0, 8.0)
+        params[0, 10:13] = (1.0, 2.0, 3.0)
+        params[1, 10:13] = (1.0, 2.0, 5.0)
+        params[:, 13:] = np.arange(12, dtype=np.float32).reshape(2, 6) * 100   # ignored (affine)
+        d = {k: float(v) for k, v in collapse_diagnostics(tf.constant(pre), tf.constant(params)).items()}
+        self.assertEqual(set(d), set(DIAG_KEYS))
+        self.assertAlmostEqual(d["diag_dead_frac"], 0.5, places=6)          # channels 1 and 2
+        self.assertAlmostEqual(d["diag_feat_spread"], 0.625, places=6)      # stds 1, .5, 0, 1
+        self.assertAlmostEqual(d["diag_feat_rel_spread"], 0.625 / 1.375, places=6)
+        self.assertAlmostEqual(d["diag_rot10_norm"], 7.5, places=5)         # norms 5 and 10
+        self.assertAlmostEqual(d["diag_head_spread"], 4.5 / 13, places=6)   # stds 1.5, 2, 1
+        z = collapse_diagnostics(tf.zeros((3, 4)), tf.zeros((3, 13)))
+        self.assertEqual(float(z["diag_feat_rel_spread"]), 0.0)
+        self.assertEqual(float(z["diag_dead_frac"]), 1.0)
+
+    def test_identical_images_zero_spread_and_warning(self):
+        paths = make_run_dir(self.tmp, "collapse")
+        logger = RunLogger(paths, backend="jsonl", tensorboard=False, quiet=True)
+        tr = self.make(config(collapse_patience=3), sources={"rigid": self.identical_group_source()},
+                       logger=logger)
+        tr.fit(5)
+        logger.close()
+        for h in tr.history:
+            self.assertTrue(h["finite"])
+            self.assertLess(h["diag_feat_spread"], 1e-5)
+            self.assertLess(h["diag_feat_rel_spread"], 1e-5)
+            self.assertLess(h["diag_head_spread"], 1e-5)
+        self.assertEqual((tr.collapse_streak, tr.collapse_warnings), (5, 1))
+        self.assertEqual(tr.trace_counts, {"rigid": 1})
+        with open(logger.metrics_path) as f:
+            recs = [json.loads(line) for line in f]
+        events = [r for r in recs if r["data"].get("event") == "collapse_suspect"]
+        self.assertEqual([r["step"] for r in events], [3])
+        counters = [r["data"]["train/collapse_suspect"] for r in recs if "train/collapse_suspect" in r["data"]]
+        self.assertEqual(counters, [1, 2, 3, 4, 5])
+
+    def test_healthy_group_logs_diagnostics(self):
+        paths = make_run_dir(self.tmp, "healthy")
+        logger = RunLogger(paths, backend="jsonl", tensorboard=False, quiet=True)
+        tr = self.make(config(log_every=3, collapse_patience=2), logger=logger)
+        tr.fit(3)
+        logger.close()
+        self.assertEqual(tr.trace_counts["rigid"], 1)
+        self.assertEqual((tr.collapse_streak, tr.collapse_warnings), (0, 0))
+        with open(logger.metrics_path) as f:
+            recs = [json.loads(line)["data"] for line in f]
+        self.assertEqual(len(recs), 1)
+        m = recs[0]
+        for k in DIAG_KEYS:
+            self.assertTrue(np.isfinite(m["train_rigid/" + k]), k)
+        self.assertGreater(m["train_rigid/diag_feat_rel_spread"], 1e-3)
+        self.assertGreaterEqual(m["train_rigid/diag_dead_frac"], 0.0)
+        self.assertLessEqual(m["train_rigid/diag_dead_frac"], 1.0)
+        self.assertEqual(m["train/collapse_suspect"], 0)
+        # rot10 norm at init: the identity bias of the 10D rotation outputs
+        np.testing.assert_allclose(tr.history[0]["diag_rot10_norm"],
+                                   np.linalg.norm(tfm.identity_rigid_params()[:tfm.ROTATION_DIMS]),
+                                   rtol=1e-4)
+
+
+class TestHeadActivation(TrainerCase):
+    def test_build_and_run(self):
+        for act in ("relu", "none"):
+            tr = self.make(head_activation=act)
+            dec = tr.model.linear_decoder
+            self.assertEqual(dec.head_norm_act.act is None, act == "none")
+            self.assertIsNotNone(dec.head_norm_act.norm)                   # LayerNorm kept
+            res = tr.train_step("rigid", self.groups["rigid"]["batch"])
+            self.assertTrue(res["finite"], act)
+            out = tr.model(self.groups["rigid"]["images"], task="rigid", training=False)
+            pre = out["pre_head"].numpy()
+            np.testing.assert_array_equal(pre, out["dense"].numpy())
+            self.assertEqual(out["params"].shape, (N, tfm.RIGID_PARAMS))
+            if act == "relu":
+                self.assertGreaterEqual(pre.min(), 0.0)
+            else:
+                self.assertLess(pre.min(), 0.0)                             # no activation clamp
+            self.assertLess(res["diag_dead_frac"], 1.0)
+            free_memory()
+        with self.assertRaises(ValueError):
+            narrow_config(head_activation="gelu")
 
 
 if __name__ == "__main__":

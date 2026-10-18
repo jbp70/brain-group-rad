@@ -63,6 +63,22 @@ class TestArgs(unittest.TestCase):
         self.assertEqual(A.ranges_from_args(a)["rigid"], dict(P.DEFAULT_LINEAR_RANGES["rigid"]))
         json.dumps(A.args_to_dict(a))
 
+    def test_loss_scale_and_head_activation_flags(self):
+        a = A.parse_args(["--data", "x"])
+        self.assertEqual((a.loss_scale_mm2, a.head_activation), (1.0, "relu"))
+        self.assertEqual(A.train_config_from_args(a).loss_scale_mm2, 1.0)
+        self.assertEqual(A.model_config_from_args(a).head_activation, "relu")
+        a = A.parse_args(["--data", "x", "--loss-scale-mm2", "100", "--head-activation", "none"])
+        self.assertEqual(A.train_config_from_args(a).loss_scale_mm2, 100.0)
+        self.assertEqual(A.model_config_from_args(a).head_activation, "none")
+        d = A.args_to_dict(a)
+        self.assertEqual((d["loss_scale_mm2"], d["head_activation"]), (100.0, "none"))
+        import contextlib
+        with open(os.devnull, "w") as devnull, contextlib.redirect_stderr(devnull):
+            for bad in (["--loss-scale-mm2", "0"], ["--loss-scale-mm2", "-1"], ["--head-activation", "gelu"]):
+                with self.assertRaises(SystemExit):
+                    A.parse_args(["--data", "x"] + bad)
+
     def test_ratio_and_required_data(self):
         self.assertEqual(dict(A.parse_task_ratio("rigid:3, affine:1")), {"rigid": 3.0, "affine": 1.0})
         with self.assertRaises(NotImplementedError) as cm:

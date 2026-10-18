@@ -9,15 +9,29 @@ of the level, `data_loading.dali_loader.linear_output_signature`)::
       non-finite input images -> zeroed, step marked non-finite (the barycenter's matrix
         inverse raises on NaN instead of propagating it)
       backup BN moving statistics
-      with GradientTape: A = model(images, task, training=True)["A"]; loss = linear_loss(...)
+      with GradientTape: out = model(images, task, training=True); terms = linear_loss(out["A"])
+        objective = terms["loss"] / loss_scale_mm2     (terms stay in mm^2 for the logs)
+      diag = collapse_diagnostics(out["pre_head"], out["params"])   (no gradient, every step)
       grads -> drop None (e.g. the scale/shear head in rigid steps; static, at trace time)
       finite = isfinite(loss) & isfinite(global_norm(grads))
       tf.cond(finite, apply_gradients, skip); if not finite: restore BN statistics
-      step += 1;  returns loss terms, grad_norm, finite, n_vars_updated
+      step += 1;  returns loss terms, diag_*, grad_norm, finite, n_vars_updated
+
+Collapse diagnostics (`collapse_diagnostics`, logged as ``train_<task>/diag_*`` means over the
+log window): a degenerate fixed point where every image of a group gets the same pre-head
+feature vector makes the heads output one transform for all images, GroupCentering cancels it
+to the identity and the gradient is exactly zero. ``fit`` counts consecutive finite steps with
+relative feature spread < ``collapse_rel_spread`` or grad norm < ``collapse_grad_norm``; it logs
+the count as ``train/collapse_suspect`` and warns (stderr + a ``collapse_suspect`` event) when it
+reaches ``collapse_patience``.
 
 Images stay float32 (DALI cannot warp float16); the model casts them to its compute dtype.
 Under --amp the LossScaleOptimizer is always called (it skips non-finite updates itself and
 lowers its scale); the BN rollback and the logs use our finite flag.
+
+Validation PNGs (`runtime.val_png`, when ``val_png_dir`` is set): every `validate()` writes
+``<val_png_dir>/<task>_step<step:07d>.png`` from the eval-mode matrices of group
+``val_png_group``; `fit` also validates at its final step if that was not a validation step.
 
 `rebuild_steps()` re-creates every step function. Call it after changing anything read at trace
 time, in particular `model.set_bn_stats_frozen(...)` (an already traced step keeps updating
@@ -26,9 +40,12 @@ the statistics otherwise).
 import collections
 import dataclasses
 import math
+import os
 import random
 import time
 from typing import Dict, Optional
+
+import sys
 
 import numpy as np
 import tensorflow as tf
@@ -36,6 +53,7 @@ import tensorflow as tf
 from data_loading import dali_loader
 from data_loading import params as P
 from data_loading.postprocess import LinearPostprocess
+from models import transforms as tfm
 from runtime import losses
 from runtime import metrics as M
 from runtime import optimizers as O
@@ -43,6 +61,31 @@ from runtime.args import parse_task_ratio  # noqa: F401  (re-exported)
 from runtime.schedulers import ScheduleConfig, lr_at
 
 POSTPROCESS_SEED_OFFSET = {"rigid": 101, "affine": 202}
+DIAG_KEYS = ("diag_feat_spread", "diag_feat_rel_spread", "diag_dead_frac", "diag_rot10_norm",
+             "diag_head_spread")
+
+
+def collapse_diagnostics(pre_head, params):
+    """Group-collapse diagnostics of one forward pass (TF, float32 scalars).
+
+    Args:
+      pre_head: [N, D] head features (after head_norm_act, before dropout).
+      params: [N, 13 | 19] raw head outputs (10D rotation, 3 translations[, 6 scale/shear]).
+    Returns dict:
+      diag_feat_spread: mean over the D features of the std across the N images;
+      diag_feat_rel_spread: that divided by the mean |pre_head| (0 if all features are 0);
+      diag_dead_frac: fraction of the D channels that are <= 0 for every image;
+      diag_rot10_norm: mean over images of the L2 norm of the 10 rotation outputs;
+      diag_head_spread: mean over the 13 rigid-head outputs of the std across the N images.
+    """
+    f = tf.cast(pre_head, tf.float32)
+    spread = tf.reduce_mean(tf.math.reduce_std(f, axis=0))
+    p = tf.cast(params[:, :tfm.RIGID_PARAMS], tf.float32)
+    return {"diag_feat_spread": spread,
+            "diag_feat_rel_spread": tf.math.divide_no_nan(spread, tf.reduce_mean(tf.abs(f))),
+            "diag_dead_frac": tf.reduce_mean(tf.cast(tf.reduce_all(f <= 0.0, axis=0), tf.float32)),
+            "diag_rot10_norm": tf.reduce_mean(tf.norm(p[:, :tfm.ROTATION_DIMS], axis=-1)),
+            "diag_head_spread": tf.reduce_mean(tf.math.reduce_std(p, axis=0))}
 
 
 class TaskSchedule:
@@ -88,6 +131,8 @@ class TrainConfig:
     ckpt_every: Optional[int] = None
     task_ratio: Dict[str, float] = dataclasses.field(default_factory=lambda: {"rigid": 1.0})
     lambda_pair: float = 1.0
+    # The objective is (center + lambda_pair * pair) / loss_scale_mm2; logs stay in mm^2 / mm.
+    loss_scale_mm2: float = 1.0
     p_pair: float = 0.1
     flip_prob: float = 0.5
     target_iters: int = 10
@@ -99,6 +144,19 @@ class TrainConfig:
     overfit: bool = False
     overfit_threshold_mm: float = 1.0
     overfit_window: int = 10
+    # Collapse warning: this many consecutive finite steps with relative pre-head feature spread
+    # below collapse_rel_spread or grad norm below collapse_grad_norm.
+    collapse_rel_spread: float = 1e-3
+    collapse_grad_norm: float = 1e-3
+    collapse_patience: int = 50
+    # Validation PNGs (runtime.val_png): written to val_png_dir (None = off) at every validation
+    # and at the final step, from validation group val_png_group, K = val_png_k fixed images.
+    val_png_dir: Optional[str] = None
+    val_png_k: int = 8
+    val_png_group: int = 0
+    val_png_gt_row: bool = True
+    val_png_mean_col: bool = True
+    val_png_seed: int = 0
 
 
 def _peak_gpu_mb():
@@ -147,6 +205,9 @@ class Trainer:
         self.trace_counts = {t: 0 for t in self.sources}
         self.val_trace_counts = {}
         self.nonfinite_total = 0
+        self.collapse_streak = 0        # consecutive finite collapse-suspect steps
+        self.collapse_warnings = 0
+        self.val_png_paths = []
         self.history = []
         self.val_history = []
         self.reached = False
@@ -170,6 +231,9 @@ class Trainer:
         pp = self.postprocess[task]
         amp = bool(cfg.amp)
         lam = float(cfg.lambda_pair)
+        loss_scale = float(cfg.loss_scale_mm2)
+        if not (math.isfinite(loss_scale) and loss_scale > 0):
+            raise ValueError("loss_scale_mm2 must be finite and > 0, got %r" % loss_scale)
         S = self.S
 
         def body(images, t_dali, rt_dali=None):
@@ -186,8 +250,12 @@ class Trainer:
             with tf.GradientTape() as tape:
                 out = model(batch["images"], task=task, training=True)
                 terms = losses.linear_loss(out["A"], batch, S, lam)
-                scaled = opt.get_scaled_loss(terms["loss"]) if amp else terms["loss"]
+                objective = terms["loss"]
+                if loss_scale != 1.0:
+                    objective = objective / tf.constant(loss_scale, objective.dtype)
+                scaled = opt.get_scaled_loss(objective) if amp else objective
             grads = tape.gradient(scaled, tvars)
+            diag = collapse_diagnostics(out["pre_head"], out["params"])
             pairs = [(g, v) for g, v in zip(grads, tvars) if g is not None]   # static filter
             gs = [g for g, _ in pairs]
             vs = [v for _, v in pairs]
@@ -213,6 +281,7 @@ class Trainer:
                 tf.cond(finite, lambda: tf.constant(False), restore)
             self.step.assign_add(1)
             res = dict(terms)
+            res.update(diag)
             res.update(grad_norm=gnorm, finite=finite, n_vars_updated=tf.constant(len(pairs)))
             return res
 
@@ -269,12 +338,39 @@ class Trainer:
         return self._val_fns[key]
 
     def _val_errors(self, task, vs, groups, train_mode):
+        """(pooled errors, [A per group] float64)."""
         fn = self._val_fn(task, vs.group_size, train_mode)
-        errs = []
+        errs, mats = [], []
         for g, grp in enumerate(groups):
             A = fn(tf.constant(grp["images"])).numpy().astype(np.float64)
+            mats.append(A)
             errs.append(M.group_errors(A, grp["A_star"], grp["T_target"], self.S_np, seed=g))
-        return M.concat_errors(errs)
+        return M.concat_errors(errs), mats
+
+    def _write_val_png(self, task, grp, A, metrics, step):
+        """One validation PNG (runtime.val_png). Never raises: failures are logged and skipped."""
+        cfg = self.cfg
+        try:
+            from runtime import val_png as V
+            idx = V.select_indices(grp["images"].shape[0], cfg.val_png_k, cfg.val_png_seed)
+            A_sel, A_star = A[idx], np.asarray(grp["A_star"], np.float64)[idx]
+            err = M.centered_errors(A_sel, A_star, self.S_np)["rms_mm"]
+            z = P.LEVEL_SHAPE[self.level][2] // 2
+            title = V.figure_title(task, step, metrics["val_%s/center_rms_mm" % task],
+                                   metrics["val_%s/pair_rms_mm" % task], z)
+            labels = ["val %d" % int(i) for i in np.asarray(grp["index"])[idx]]
+            os.makedirs(cfg.val_png_dir, exist_ok=True)
+            path = os.path.join(cfg.val_png_dir, "%s_step%07d.png" % (task, int(step)))
+            V.write_val_png(path, grp["images"][idx], A_sel, A_star, P.LEVEL_SPACING[self.level],
+                            title, err, gt_row=bool(cfg.val_png_gt_row),
+                            mean_col=bool(cfg.val_png_mean_col), labels=labels)
+            self.val_png_paths.append(path)
+        except Exception as e:  # noqa: BLE001  (a PNG must never stop training)
+            print("WARNING step %d: validation PNG for %s failed: %r" % (int(step), task, e),
+                  file=sys.stderr, flush=True)
+            if self.logger is not None:
+                self.logger.log_event(int(step), {"event": "val_png_failed", "task": task,
+                                                  "error": repr(e)})
 
     def validate(self, max_groups=None):
         """Metrics on the fixed validation sets, pooled over groups.
@@ -291,19 +387,52 @@ class Trainer:
             if not groups:
                 continue
             t0 = time.perf_counter()
-            out.update(M.summarize(self._val_errors(task, vs, groups, False), "val_%s" % task))
+            errs, mats = self._val_errors(task, vs, groups, False)
+            out.update(M.summarize(errs, "val_%s" % task))
             out["val_%s/groups" % task] = len(groups)
             out["val_%s/time_s" % task] = time.perf_counter() - t0
             pre = "val_%s_trainmode" % task
-            tm = M.summarize(self._val_errors(task, vs, groups, True), pre)
+            tm = M.summarize(self._val_errors(task, vs, groups, True)[0], pre)
             for k in ("center_rms_mm", "pair_rms_mm"):
                 out["%s/%s" % (pre, k)] = tm["%s/%s" % (pre, k)]
+            g = int(self.cfg.val_png_group)
+            if self.cfg.val_png_dir and 0 <= g < len(groups):
+                self._write_val_png(task, groups[g], mats[g], out, int(self.step.numpy()))
         return out
 
     # ------------------------------------------------------------------ loop
     def _log(self, step, metrics):
         if self.logger is not None:
             self.logger.log_metrics(step, metrics)
+
+    def _validate_and_log(self, step):
+        val = self.validate()
+        self.val_history.append(dict(val, step=step))
+        self._log(step, val)
+        if self.checkpoint is not None and self.cfg.best_metric in val:
+            self.checkpoint.maybe_save_best(val[self.cfg.best_metric])
+        return val
+
+    def _update_collapse(self, step, task, res):
+        """Count consecutive collapse-suspect finite steps; warn once per streak at the patience."""
+        cfg = self.cfg
+        suspect = (res["diag_feat_rel_spread"] < float(cfg.collapse_rel_spread)
+                   or res["grad_norm"] < float(cfg.collapse_grad_norm))
+        self.collapse_streak = self.collapse_streak + 1 if suspect else 0
+        if self.collapse_streak != int(cfg.collapse_patience):
+            return
+        self.collapse_warnings += 1
+        info = {"event": "collapse_suspect", "task": task, "consecutive_steps": self.collapse_streak,
+                "rel_spread": res["diag_feat_rel_spread"], "grad_norm": res["grad_norm"],
+                "dead_frac": res["diag_dead_frac"]}
+        print("WARNING step %d: possible group collapse (%d consecutive steps with relative "
+              "pre-head feature spread < %g or grad norm < %g; now rel_spread %.3g, grad_norm "
+              "%.3g, dead_frac %.3f)" % (step, self.collapse_streak, cfg.collapse_rel_spread,
+                                         cfg.collapse_grad_norm, res["diag_feat_rel_spread"],
+                                         res["grad_norm"], res["diag_dead_frac"]),
+              file=sys.stderr, flush=True)
+        if self.logger is not None:
+            self.logger.log_event(step, info)
 
     def _window_center_rms(self):
         w = int(self.cfg.overfit_window)
@@ -354,6 +483,8 @@ class Trainer:
                 pre = "train_%s/" % task
                 acc.update({pre + "loss": res["loss"], pre + "center": res["center"],
                             pre + "pair": res["pair"], "train/grad_norm": res["grad_norm"]})
+                acc.update({pre + k: res[k] for k in DIAG_KEYS})
+                self._update_collapse(done, task, res)
             if cfg.log_every and (done % int(cfg.log_every) == 0 or done == end):
                 m = acc.result()
                 for t in self.sources:
@@ -364,6 +495,7 @@ class Trainer:
                 m.update(timing.result())
                 m["lr"] = lr
                 m["nonfinite_total"] = self.nonfinite_total
+                m["train/collapse_suspect"] = self.collapse_streak
                 peak = _peak_gpu_mb()
                 if peak is not None:
                     m["gpu_peak_mb"] = peak
@@ -371,11 +503,7 @@ class Trainer:
                 acc.reset()
                 timing.reset()
             if self.val_sets and cfg.val_every and done % int(cfg.val_every) == 0:
-                last_val = self.validate()
-                self.val_history.append(dict(last_val, step=done))
-                self._log(done, last_val)
-                if self.checkpoint is not None and cfg.best_metric in last_val:
-                    self.checkpoint.maybe_save_best(last_val[cfg.best_metric])
+                last_val = self._validate_and_log(done)
             ckpt_every = cfg.ckpt_every if cfg.ckpt_every is not None else cfg.val_every
             if self.checkpoint is not None and ckpt_every and done % int(ckpt_every) == 0:
                 self.checkpoint.save_last()
@@ -388,10 +516,15 @@ class Trainer:
                         self.reached = True
                         break
         final = int(self.step.numpy())
+        # Validation PNGs also cover the final step: validate there unless that just happened.
+        if (cfg.val_png_dir and self.val_sets and cfg.val_every and final > start
+                and not (self.val_history and self.val_history[-1]["step"] == final)):
+            last_val = self._validate_and_log(final)
         if self.checkpoint is not None and saved_at != final and final > start:
             self.checkpoint.save_last()
         if self.logger is not None:
             self.logger.flush()
         return {"start_step": start, "end_step": final, "nonfinite_total": self.nonfinite_total,
+                "collapse_warnings": self.collapse_warnings,
                 "trace_counts": dict(self.trace_counts), "reached": self.reached,
                 "best_window_center_rms_mm": best_window, "last_val": last_val}

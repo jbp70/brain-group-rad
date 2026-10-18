@@ -66,6 +66,13 @@ class TestMain(MainCase):
         self.assertIn(2, steps)
         self.assertTrue(any("val_rigid/pair_rms_mm" in r["data"] for r in lines[1:]))
         self.assertTrue(any(n.startswith("last-2") for n in os.listdir(os.path.join(d, "ckpt", "last"))))
+        self.assertEqual(os.listdir(os.path.join(d, "val_png")), ["rigid_step0000002.png"])   # --val-png default on
+        free_memory()
+        rc = M.main(["--overfit-one-group", "--overfit-synthetic", "--dry-run", "--group-size", "4",
+                     "--results", os.path.join(self.tmp, "results"), "--run-name", "dry_nopng",
+                     "--val-png", "false"] + NARROW_ARGS + COMMON)
+        self.assertEqual(rc, 0)
+        self.assertFalse(os.path.exists(os.path.join(self.run_dir("dry_nopng"), "val_png")))
 
     def test_real_data_overfit_path(self):
         root = write_fake_export(self.tmp, n_train=5, n_val=2)

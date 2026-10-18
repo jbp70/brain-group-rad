@@ -8,7 +8,7 @@ Pattern from the rigid project's ``runtime/args.py`` (argparse + ``str2bool``). 
   (< 1 mm at step 454); 3e-3 reached < 1 mm at step 325 (milestone-4 report);
 * schedule: 1000 warmup steps, then cosine to lr * 1e-3 at ``--steps``;
 * losses: lambda_pair 1, p_pair 0.1, flip probability 0.5 per axis, 10 target iterations
-  (design 6.1, 3.3);
+  (design 6.1, 3.3); objective divided by --loss-scale-mm2 (default 1, unscaled);
 * augmentation ranges: `data_loading.params.DEFAULT_LINEAR_RANGES` (design 3.2);
 * group size per level: 32 (level 4), 8 (level 2), 2 (level 1) (design 5.1);
 * model: `models.config.ModelConfig` defaults (dense-path norm 'layer'); dropout 0.15, or 0.0
@@ -86,6 +86,12 @@ def build_parser():
     g.add_argument("--val-seed", type=int, default=1234)
     g.add_argument("--log-every", type=int, default=50)
     g.add_argument("--ckpt-every", type=int, default=None, help="save 'last' every K steps (default --val-every)")
+    g.add_argument("--val-png", type=str2bool, default=True,
+                   help="write <run>/val_png/<task>_step<step>.png at every validation and at the final step")
+    g.add_argument("--val-png-k", type=int, default=8, help="images per PNG (all if the group is smaller)")
+    g.add_argument("--val-png-group", type=int, default=0, help="validation group index of the PNGs")
+    g.add_argument("--val-png-gt-row", type=str2bool, default=True, help="third row: ground-truth alignment")
+    g.add_argument("--val-png-mean-col", type=str2bool, default=True, help="last column: mean over the K images")
     g.add_argument("--best-metric", default="val_rigid/pair_rms_mm", help="validation key for the 'best' checkpoint (lower is better)")
     g = p.add_argument_group("optimizer and schedule")
     g.add_argument("--optimizer", default="sgdw", choices=["sgdw", "sgd", "adam", "adamw"])
@@ -111,6 +117,11 @@ def build_parser():
     g = p.add_argument_group("tasks and losses")
     g.add_argument("--task-ratio", default="rigid:1", help="e.g. 'rigid:1,affine:1' (deform: milestone 6)")
     g.add_argument("--lambda-pair", type=float, default=1.0)
+    g.add_argument("--loss-scale-mm2", type=float, default=1.0,
+                   help="divide the training objective (center + lambda_pair * pair, mm^2) by this "
+                   "(> 0). 1 = unscaled. E.g. 100 makes the objective O(1-20) at init, so the "
+                   "gradients are not permanently clipped by --clipnorm. Logged losses and RMS "
+                   "stay in unscaled mm^2 / mm")
     g.add_argument("--p-pair", type=float, default=0.1)
     g.add_argument("--flip-prob", type=float, default=0.5, help="per-axis group flip probability")
     g.add_argument("--target-iters", type=int, default=10)
@@ -134,6 +145,9 @@ def build_parser():
                    help="norm of the dense blocks and the pre-head norm-act (default layer). 'batch' "
                    "is ablation-only: over one group it is group-relative in training mode and "
                    "breaks eval mode (milestone-4 report)")
+    g.add_argument("--head-activation", default=_MC.head_activation, choices=["relu", "none"],
+                   help="activation of the pre-head norm-act: 'relu' (default, follows "
+                   "--negative-slope) or 'none' (norm only)")
     g.add_argument("--filters", type=int_list, default=_MC.filters)
     g.add_argument("--reductions", type=int_list, default=_MC.reductions)
     g.add_argument("--dense", type=int_list, default=_MC.dense)
@@ -174,6 +188,10 @@ def parse_args(argv=None):
         parser.error("--overfit-synthetic needs --overfit-one-group")
     if args.group_size is None:
         args.group_size = DEFAULT_GROUP_SIZE[args.level]
+    if not (math.isfinite(args.loss_scale_mm2) and args.loss_scale_mm2 > 0):
+        parser.error("--loss-scale-mm2 must be finite and > 0, got %r" % args.loss_scale_mm2)
+    if args.val_png_k < 1 or args.val_png_group < 0:
+        parser.error("--val-png-k must be >= 1 and --val-png-group >= 0")
     if args.group_size < 2:
         parser.error("--group-size must be >= 2 (pairwise loss), got %d" % args.group_size)
     if args.dropout is None:
@@ -194,7 +212,8 @@ def model_config_from_args(args):
     return ModelConfig(filters=args.filters, reductions=args.reductions, dense=args.dense,
                        dropout=args.dropout, group_config=args.group_config,
                        dense_group_concat_first=args.dense_group_concat_first, norm=args.norm,
-                       dense_norm=args.dense_norm, block=args.block,
+                       dense_norm=args.dense_norm, head_activation=args.head_activation,
+                       block=args.block,
                        negative_slope=args.negative_slope, bn_momentum=args.bn_momentum,
                        centering_iters=args.centering_iters,
                        translation_scale=args.translation_scale, seed=args.seed)
@@ -217,18 +236,22 @@ def schedule_config_from_args(args):
 
 
 def train_config_from_args(args):
-    """`runtime.run.TrainConfig` (imports TF lazily)."""
+    """`runtime.run.TrainConfig` (imports TF lazily). ``val_png_dir`` stays None: main.py sets it
+    from the run directory when --val-png is on."""
     from runtime.run import TrainConfig
     return TrainConfig(level=args.level, group_size=args.group_size, steps=args.steps,
                        val_every=args.val_every, log_every=args.log_every,
                        ckpt_every=args.ckpt_every, task_ratio=dict(args.task_ratio_parsed),
-                       lambda_pair=args.lambda_pair, p_pair=args.p_pair,
+                       lambda_pair=args.lambda_pair, loss_scale_mm2=args.loss_scale_mm2,
+                       p_pair=args.p_pair,
                        flip_prob=0.0 if args.overfit_one_group else args.flip_prob,
                        target_iters=args.target_iters, amp=args.amp, seed=args.seed,
                        schedule=schedule_config_from_args(args),
                        nonfinite_patience=args.nonfinite_patience, best_metric=args.best_metric,
                        overfit=args.overfit_one_group,
-                       overfit_threshold_mm=args.overfit_threshold_mm)
+                       overfit_threshold_mm=args.overfit_threshold_mm,
+                       val_png_k=args.val_png_k, val_png_group=args.val_png_group,
+                       val_png_gt_row=args.val_png_gt_row, val_png_mean_col=args.val_png_mean_col)
 
 
 def args_to_dict(args):

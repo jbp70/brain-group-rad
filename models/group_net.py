@@ -18,7 +18,8 @@ Encoder (identical trainable parameters at every level, so weights copy across l
 Linear decoder (group blocks in both configs; all of it is after the bottleneck):
 1x1 reductions (192, 96, 48, 24) -> flatten (5040) -> dense 2048 (group concat only with
 ``dense_group_concat_first``) -> dense 512 (group) -> norm -> act -> dropout -> heads (float32)
-(dense-path norm = ``dense_norm``, LayerNorm by default):
+(dense-path norm = ``dense_norm``, LayerNorm by default; the pre-head act is dropped with
+``head_activation='none'``):
 rotation+translation Dense(13) (zero kernel, identity bias) and scale/shear Dense(6) (zeros).
 Rigid: A_raw = [R | t]; affine: A_raw = [R K | t]. A = GroupCentering(A_raw).
 """
@@ -125,7 +126,8 @@ class LinearDecoder(tf.keras.layers.Layer):
                               seed=cfg.seed, name="dense_%d" % i)
             for i, u in enumerate(cfg.dense)]
         self.head_norm_act = L.NormAct(cfg.dense_norm, cfg.negative_slope, cfg.bn_momentum,
-                                       cfg.bn_epsilon, name="head_norm_act")
+                                       cfg.bn_epsilon, activation=cfg.head_activation != "none",
+                                       name="head_norm_act")
         self.dropout = tf.keras.layers.Dropout(cfg.dropout, seed=cfg.seed, name="dropout")
         self.rigid_head = tf.keras.layers.Dense(
             tfm.RIGID_PARAMS, kernel_initializer="zeros",
@@ -167,7 +169,7 @@ class LinearDecoder(tf.keras.layers.Layer):
         else:
             params = tf.concat([p_rigid, self.scale_shear_head(h)], axis=-1)
             a_raw = tfm.affine_matrix(params)
-        return a_raw, params, {"dense": feat, "head_input": h}
+        return a_raw, params, {"dense": feat, "pre_head": feat, "head_input": h}
 
 
 class GroupRegLevelModel(tf.keras.Model):
@@ -177,7 +179,8 @@ class GroupRegLevelModel(tf.keras.Model):
       A_raw [N, 4, 4] float32: raw head matrices (image i -> central space, before centering);
       A [N, 4, 4] float32: GroupCentering(A_raw) = mu^-1 A_raw_i;
       params [N, 13 | 19] float32; bottleneck [N, 5, 7, 6, f5]; skips (list, encoder outputs);
-      dense (pre-dropout head features) and head_input (post-dropout).
+      dense and pre_head (the same tensor: head_norm_act output, pre-dropout) and head_input
+      (post-dropout).
     Images are cast to the compute dtype first (float16 under mixed_float16).
 
     Hooks: the deformable decoder (milestone 6) is ``self.deform_decoder`` (None for now) and

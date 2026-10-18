@@ -128,6 +128,8 @@ def main(argv=None):
         train_cfg.ckpt_every = 0
 
     paths = make_run_dir(args.results, args.run_name)
+    if args.val_png:
+        train_cfg.val_png_dir = os.path.join(paths["root"], "val_png")
     logger = RunLogger(paths, backend=args.log_backend, tensorboard=True, quiet=args.quiet)
     trainer = Trainer(model, optimizer, sources, S, train_cfg, logger=logger, val_sets=val_sets)
     trainer.checkpoint = C.RunCheckpoint(paths["ckpt_last"], paths["ckpt_best"], model, optimizer,
@@ -163,15 +165,20 @@ def main(argv=None):
     summary = trainer.fit()
     final_val = {}
     if args.overfit_one_group and val_sets:
-        # Eval mode is the source of truth: validate once more at the stopping step.
-        final_val = trainer.validate()
-        logger.log_metrics(int(trainer.step.numpy()), final_val)
+        # Eval mode is the source of truth: validate once more at the stopping step (fit already
+        # did when the PNGs are on).
+        stop = int(trainer.step.numpy())
+        if trainer.val_history and trainer.val_history[-1]["step"] == stop:
+            final_val = {k: v for k, v in trainer.val_history[-1].items() if k != "step"}
+        else:
+            final_val = trainer.validate()
+            logger.log_metrics(stop, final_val)
     logger.close()
     if args.overfit_one_group:
         curve = [[h["step"], h["center_rms_mm"], h["pair_rms_mm"]] for h in trainer.history]
         val_curve = [[v["step"], v.get("val_rigid/center_rms_mm"), v.get("val_rigid_trainmode/center_rms_mm")]
                      for v in trainer.val_history]
-        if final_val:
+        if final_val and not (trainer.val_history and trainer.val_history[-1]["step"] == stop):
             val_curve.append([int(trainer.step.numpy()), final_val.get("val_rigid/center_rms_mm"),
                               final_val.get("val_rigid_trainmode/center_rms_mm")])
         out = {"reached": bool(trainer.reached), "threshold_mm": args.overfit_threshold_mm,
