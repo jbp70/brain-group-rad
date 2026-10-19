@@ -1,0 +1,10 @@
+{
+  "verdict": "APPROVED",
+  "findings": [
+    "(non-blocking, likely) G sign not yet confirmed on DALI: the fix depends on DALI 1.18's rotation being right-handed in its own axis order. Run run_verify_glacier.sh <gpu> 1800 verify h,i,j,k before any run uses --global-transform. If only the sign fails, flip params.G_DALI_ANGLE_SIGN.",
+    "(non-blocking, likely) Best metric switches on resume of an older multi-task run: the restored best value was tracked on val_rigid/pair_rms_mm, but new validations are compared on val/mean_pair_rms_mm. Pass --best-metric val_rigid/pair_rms_mm when resuming such a run, or document it.",
+    "(non-blocking, confirmed) Overfit window now skips non-finite steps: the single-task stop criterion used to need the last 10 steps all finite and now averages the last 10 finite steps. Note it, or keep the old strictness for single-task runs.",
+    "(non-blocking, confirmed) G changes every step during the warm-up ramp: the block's angle and translation are scaled by fraction(step), so the control file is rewritten every step and G is not constant within a K-block. Document it, or scale by the fraction at the block's first step."
+  ],
+  "reviewDoc": "d:/Research/Brain_Registration_Projects/brain-group-rad/.agents/tasks/milestone-5/review.md"
+}

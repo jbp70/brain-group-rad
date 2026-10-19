@@ -36,6 +36,8 @@ CURRICULUM_START_DEFAULTS = {
 }
 RANGE_KEYS = ("rotation_deg", "translation_mm", "log_scale", "shear")
 TRAIN_TASKS = ("rigid", "affine")
+# Combined best-checkpoint key (same value as runtime.run.MEAN_PAIR_METRIC; args stays TF-free).
+MEAN_PAIR_METRIC = "val/mean_pair_rms_mm"
 ALL_TASKS = ("rigid", "affine", "deform")
 _MC = ModelConfig()
 
@@ -104,7 +106,11 @@ def build_parser():
     g.add_argument("--val-png-group", type=int, default=0, help="validation group index of the PNGs")
     g.add_argument("--val-png-gt-row", type=str2bool, default=True, help="third row: ground-truth alignment")
     g.add_argument("--val-png-mean-col", type=str2bool, default=True, help="last column: mean over the K images")
-    g.add_argument("--best-metric", default="val_rigid/pair_rms_mm", help="validation key for the 'best' checkpoint (lower is better)")
+    g.add_argument("--best-metric", default=None,
+                   help="validation key for the 'best' checkpoint (lower is better). 'mean_pair_rms_mm' "
+                   "(logged as val/mean_pair_rms_mm) = mean of val_<task>/pair_rms_mm over the trained "
+                   "tasks. Default: mean_pair_rms_mm when more than one task is trained, else "
+                   "val_<task>/pair_rms_mm")
     g = p.add_argument_group("optimizer and schedule")
     g.add_argument("--optimizer", default="adam", choices=["sgdw", "sgd", "adam", "adamw"],
                    help="default adam: every real level-4 SGDW run (lr 3e-3, momentum 0.99; clipped or "
@@ -169,6 +175,19 @@ def build_parser():
                    help="G angle U(-max, max) about an axis uniform on the sphere")
     g.add_argument("--global-trans-max-mm", type=float, default=10.0, help="G translation U(-max, max) mm per axis")
     g.add_argument("--global-resample-every", type=int, default=5, help="draw a new G every K steps")
+    g.add_argument("--global-start-step", type=int, default=0,
+                   help="G warm-up: G = identity (ranges 0) before this step. On real data, G from "
+                   "step 0 collapsed a level-4 rigid run to the identity fixed point (milestone 5); "
+                   "enable G after the per-image task is learned")
+    g.add_argument("--global-ramp-steps", type=int, default=0,
+                   help="then ramp the G ranges linearly from 0 to --global-rot-max-deg / "
+                   "--global-trans-max-mm over this many steps (0 = full ranges at once)")
+    g.add_argument("--init-weights", default=None,
+                   help="warm start: load ONLY the model weights from another run (a checkpoint "
+                   "prefix, or a run's ckpt/best or ckpt/last directory = its latest checkpoint). "
+                   "Same ModelConfig required (checked against the source run's config.json if "
+                   "present). Fresh optimizer, step 0; not allowed when this run dir already has a "
+                   "checkpoint and --resume is on")
     g = p.add_argument_group("DALI")
     g.add_argument("--num-threads", type=int, default=4)
     g.add_argument("--prefetch", type=int, default=1)
@@ -200,7 +219,9 @@ def build_parser():
     g.add_argument("--log-backend", default="auto", choices=["auto", "dllogger", "jsonl"])
     g.add_argument("--dry-run", action="store_true", help="build everything, run 2 steps + 1 validation group, exit")
     g.add_argument("--overfit-one-group", action="store_true",
-                   help="one fixed group of N training images with fixed rigid transforms, TF-side warp (no DALI)")
+                   help="one fixed group of N training images per trained task (rigid: fixed pure-rigid "
+                   "transforms; affine: fixed transforms from the --affine-* ranges), TF-side warp (no "
+                   "DALI); stops when every task's 10-step mean center RMS is below the threshold")
     g.add_argument("--overfit-synthetic", action="store_true", help="overfit on a synthetic phantom (no data needed)")
     g.add_argument("--overfit-threshold-mm", type=float, default=1.0)
     g.add_argument("--overfit-max-steps", type=int, default=1500)
@@ -264,8 +285,15 @@ def parse_args(argv=None):
                 parser.error("--%s must be finite and >= 0, got %r" % (name.replace("_", "-"), v))
         if args.global_resample_every < 1:
             parser.error("--global-resample-every must be >= 1, got %d" % args.global_resample_every)
-    if args.best_metric.startswith("val_rigid/") and "rigid" not in args.task_ratio_parsed:
-        args.best_metric = args.best_metric.replace("val_rigid/", "val_%s/" % next(iter(args.task_ratio_parsed)))
+        if args.global_start_step < 0 or args.global_ramp_steps < 0:
+            parser.error("--global-start-step and --global-ramp-steps must be >= 0")
+    tasks = list(args.task_ratio_parsed)
+    if args.best_metric is None:
+        args.best_metric = MEAN_PAIR_METRIC if len(tasks) > 1 else "val_%s/pair_rms_mm" % tasks[0]
+    elif args.best_metric == "mean_pair_rms_mm":
+        args.best_metric = MEAN_PAIR_METRIC
+    elif args.best_metric.startswith("val_rigid/") and "rigid" not in args.task_ratio_parsed:
+        args.best_metric = args.best_metric.replace("val_rigid/", "val_%s/" % tasks[0])
     return args
 
 
@@ -315,7 +343,9 @@ def task_controls_from_args(args, seed_offset=None):
         cur = (LinearCurriculum(start[task], end[task], args.curriculum_ramp_steps)
                if args.curriculum else None)
         smp = (GlobalTransformSampler(args.global_rot_max_deg, args.global_trans_max_mm,
-                                      args.global_resample_every, seed=args.seed + seed_offset[task])
+                                      args.global_resample_every, seed=args.seed + seed_offset[task],
+                                      start_step=args.global_start_step,
+                                      ramp_steps=args.global_ramp_steps)
                if args.global_transform else None)
         out[task] = TaskControl(end[task], cur, smp)
     return out

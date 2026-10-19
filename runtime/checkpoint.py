@@ -71,6 +71,67 @@ class RunCheckpoint:
         return self._restore(self.latest_best)
 
 
+STEP_KEY = "step/.ATTRIBUTES/VARIABLE_VALUE"
+
+
+def peek_last_step(ckpt_dir_last):
+    """Global step stored in the latest 'last' checkpoint of `ckpt_dir_last`, read from the
+    checkpoint file without building the model (0 if there is none). main.py uses it to write
+    the resumed step's control values before the DALI pipelines start."""
+    path = tf.train.latest_checkpoint(ckpt_dir_last) if os.path.isdir(ckpt_dir_last) else None
+    if not path:
+        return 0
+    return int(tf.train.load_variable(path, STEP_KEY))
+
+
+def resolve_checkpoint(path):
+    """A checkpoint prefix (``.../ckpt/best/best-3``) or a directory holding checkpoints (a run's
+    ``ckpt/best`` or ``ckpt/last``: its latest one) -> the checkpoint prefix. ValueError if none."""
+    path = str(path)
+    if os.path.isdir(path):
+        found = tf.train.latest_checkpoint(path)
+        if not found:
+            raise ValueError("no checkpoint in directory %s" % path)
+        return found
+    if os.path.exists(path + ".index"):
+        return path
+    raise ValueError("--init-weights %s is neither a checkpoint prefix (no %s.index) nor a "
+                     "checkpoint directory" % (path, path))
+
+
+def source_config_path(ckpt_prefix):
+    """config.json of the run that wrote `ckpt_prefix` (<run>/ckpt/<kind>/<name>), or None."""
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(ckpt_prefix))))
+    path = os.path.join(root, "config.json")
+    return path if os.path.exists(path) else None
+
+
+def load_model_weights(model, model_config, path):
+    """Warm start: restore ONLY the model variables of another run's checkpoint into `model`
+    (built, same ModelConfig). Optimizer, step, best value and RNG states are not read.
+
+    The source run's config.json (if present) must have the same ModelConfig except the init
+    seed, as in `GroupRegLevelModel.copy_weights_from`; otherwise ValueError names the fields.
+    Every model variable must be matched in the checkpoint. Returns (checkpoint prefix,
+    source config path or None)."""
+    prefix = resolve_checkpoint(path)
+    cfg_path = source_config_path(prefix)
+    if cfg_path is not None:
+        with open(cfg_path) as f:
+            saved = json.load(f)
+        theirs = {k: v for k, v in ModelConfig.from_dict(saved["model_config"]).to_dict().items()
+                  if k != "seed"}
+        mine = {k: v for k, v in model_config.to_dict().items() if k != "seed"}
+        diff = sorted(k for k in set(mine) | set(theirs) if mine.get(k) != theirs.get(k))
+        if diff:
+            raise ValueError("--init-weights: model config differs from the source run %s in %s; "
+                             "build the model with the same flags" % (cfg_path, diff))
+    status = tf.train.Checkpoint(model=model).restore(prefix)
+    status.expect_partial()                       # the optimizer, step, ... are not loaded
+    status.assert_existing_objects_matched()
+    return prefix, cfg_path
+
+
 def _git_commit():
     try:
         here = os.path.dirname(os.path.abspath(__file__))

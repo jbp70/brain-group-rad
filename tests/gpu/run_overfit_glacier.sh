@@ -6,17 +6,24 @@
 #            the validation set (1 group), runs 2 steps + 1 validation, writes a checkpoint
 #   dryrun_ctl  the same dry run with rigid:1,affine:1, --curriculum true --global-transform true
 #            (control files under results/<run>/control, val_<task>_g sets)
+#   dryrun_mixed  milestone 5: a short REAL-data mixed run, rigid:1,affine:1 (seeded alternation,
+#            one shared Adam), N = 8, level 4, 20 steps, validation (1 group of 8 val cases per
+#            task) and PNGs at steps 10 and 20, best checkpoint on val/mean_pair_rms_mm. Then
+#            tests/gpu/check_mixed_run.py checks the run directory (both tasks trained and
+#            validated with finite values, affine errors present, one trace per task, PNGs
+#            rigid_/affine_step0000020.png, a best checkpoint); its exit code is the mode's.
 #
 # Usage (on glacier, after `git pull` in the clone; pick a free GPU with nvidia-smi first):
-#   bash /autofs/space/crater_001/users/jn85/BrainRegProjects/GroupwiseReg/brain-group-rad/tests/gpu/run_overfit_glacier.sh <gpu_index> [timeout_seconds] [overfit|dryrun|dryrun_ctl]
+#   bash /autofs/space/crater_001/users/jn85/BrainRegProjects/GroupwiseReg/brain-group-rad/tests/gpu/run_overfit_glacier.sh <gpu_index> [timeout_seconds] [overfit|dryrun|dryrun_ctl|dryrun_mixed]
 #
-# Writes only inside $PROJ/scratch/m4: results/<run>/ (config.json, logs, tb, ckpt,
-# overfit_summary.json), <mode>.log, the CUDA JIT cache, the Keras config folder and TMPDIR.
-# TF32 is turned off by main.py (models.precision.configure_tf_precision). Bytecode writing is
-# disabled, so the repo clone stays clean. Exit code: that of main.py (overfit: 1 = threshold
-# not reached; 124 = timeout).
+# Writes only inside $PROJ/scratch/m4 (dryrun_mixed: $PROJ/scratch/m5): results/<run>/
+# (config.json, logs, tb, ckpt, val_png, overfit_summary.json / fit_summary.json), <mode>.log,
+# the CUDA JIT cache, the Keras config folder and TMPDIR. TF32 is turned off by main.py
+# (models.precision.configure_tf_precision). Bytecode writing is disabled, so the repo clone
+# stays clean. Exit code: that of main.py (overfit: 1 = threshold not reached; 124 = timeout),
+# for dryrun_mixed that of main.py if non-zero, else that of check_mixed_run.py.
 set -euo pipefail
-GPU="${1:?usage: run_overfit_glacier.sh <gpu_index> [timeout_seconds] [overfit|dryrun|dryrun_ctl]}"
+GPU="${1:?usage: run_overfit_glacier.sh <gpu_index> [timeout_seconds] [overfit|dryrun|dryrun_ctl|dryrun_mixed]}"
 TIMEOUT_S="${2:-3600}"
 MODE="${3:-overfit}"
 if ! [[ "$GPU" =~ ^[0-9]+$ ]]; then
@@ -27,14 +34,17 @@ if ! [[ "$TIMEOUT_S" =~ ^[0-9]+$ ]]; then
     echo "timeout_seconds must be an integer, got '$TIMEOUT_S'" >&2
     exit 2
 fi
-if [[ "$MODE" != "overfit" && "$MODE" != "dryrun" && "$MODE" != "dryrun_ctl" ]]; then
-    echo "mode must be 'overfit', 'dryrun' or 'dryrun_ctl', got '$MODE'" >&2
+if [[ "$MODE" != "overfit" && "$MODE" != "dryrun" && "$MODE" != "dryrun_ctl" && "$MODE" != "dryrun_mixed" ]]; then
+    echo "mode must be 'overfit', 'dryrun', 'dryrun_ctl' or 'dryrun_mixed', got '$MODE'" >&2
     exit 2
 fi
 PROJ=/autofs/space/crater_001/users/jn85/BrainRegProjects/GroupwiseReg
 REPO="$PROJ/brain-group-rad"
 DATA="$PROJ/data/npy_v2"
 SCRATCH="$PROJ/scratch/m4"
+if [[ "$MODE" == "dryrun_mixed" ]]; then
+    SCRATCH="$PROJ/scratch/m5"
+fi
 SIF=/autofs/space/crater_001/users/jn85/Singularity_Files/tf10_nv.sif
 STAMP="$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$SCRATCH/results" "$SCRATCH/tmp"
@@ -58,15 +68,27 @@ if [[ "$MODE" == "overfit" ]]; then
 elif [[ "$MODE" == "dryrun" ]]; then
     CMD=(python main.py --dry-run --data "$DATA" --level 4 --group-size 8
          --results "$SCRATCH/results" --run-name "dryrun_$STAMP" --num-threads 4 --log-backend jsonl)
-else
+elif [[ "$MODE" == "dryrun_ctl" ]]; then
     CMD=(python main.py --dry-run --data "$DATA" --level 4 --group-size 8
          --results "$SCRATCH/results" --run-name "dryrun_ctl_$STAMP" --num-threads 4 --log-backend jsonl
          --task-ratio rigid:1,affine:1 --curriculum true --global-transform true)
+else
+    RUN="dryrun_mixed_$STAMP"
+    CMD=(python main.py --data "$DATA" --level 4 --group-size 8 --task-ratio rigid:1,affine:1
+         --steps 20 --warmup-steps 5 --log-every 5 --val-every 10 --ckpt-every 10
+         --val-groups 1 --val-group-size 8 --results "$SCRATCH/results" --run-name "$RUN"
+         --resume false --num-threads 4 --log-backend jsonl)
 fi
 LOG="$SCRATCH/$MODE.log"
 set +e
 timeout "$TIMEOUT_S" singularity exec --nv -B /scratch -B /autofs -B /cluster -B /space -B /vast "$SIF" \
     "${CMD[@]}" </dev/null 2>&1 | tee "$LOG"
 rc=${PIPESTATUS[0]}
+if [[ "$MODE" == "dryrun_mixed" && "$rc" -eq 0 ]]; then
+    singularity exec -B /autofs -B /space "$SIF" \
+        python tests/gpu/check_mixed_run.py "$SCRATCH/results/$RUN" --tasks rigid,affine --steps 20 \
+        </dev/null 2>&1 | tee -a "$LOG"
+    rc=${PIPESTATUS[0]}
+fi
 echo "$MODE exit code: $rc (log: $LOG, results: $SCRATCH/results)"
 exit "$rc"

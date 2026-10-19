@@ -179,5 +179,95 @@ class TestMetrics(unittest.TestCase):
         self.assertEqual(acc.result(), {})
 
 
+def known_affine(rng, deg=40.0, ls=0.1, sh=0.05, mm=10.0):
+    """[R U D | t] from known factors -> (matrix, R, log-scales, shears (a, b, c))."""
+    r = rot(rng.normal(size=3), rng.uniform(-deg, deg))
+    s = rng.uniform(-ls, ls, 3)
+    a, b, c = rng.uniform(-sh, sh, 3)
+    u = np.array([[1.0, a, b], [0.0, 1.0, c], [0.0, 0.0, 1.0]])
+    m = np.eye(4)
+    m[:3, :3] = r @ u @ np.diag(np.exp(s))
+    m[:3, 3] = rng.uniform(-mm, mm, 3)
+    return m, r, s, np.array([a, b, c])
+
+
+def ref_angle_deg(r1, r2):
+    c = (np.trace(r1 @ r2.T) - 1.0) / 2.0
+    return np.degrees(np.arccos(np.clip(c, -1.0, 1.0)))
+
+
+class TestAffineMetrics(unittest.TestCase):
+    """Milestone 5: scale / shear / rotation-factor errors (QR, the model's A = [R K | t])."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.rng = np.random.default_rng(11)
+        cls.S = tfm.brain_second_moment(synthetic_mask(cls.rng), SPACING)
+
+    def test_qr_factors_recover_known_factors(self):
+        items = [known_affine(self.rng) for _ in range(6)]
+        L = np.stack([m[:3, :3] for m, _, _, _ in items]).reshape(2, 3, 3, 3)    # batched shape
+        q, ls, sh = M.qr_factors(L)
+        self.assertEqual((q.shape, ls.shape, sh.shape), ((2, 3, 3, 3), (2, 3, 3), (2, 3, 3)))
+        for n, (_, r, s, k) in enumerate(items):
+            i, j = divmod(n, 3)
+            np.testing.assert_allclose(q[i, j], r, atol=1e-12)
+            np.testing.assert_allclose(ls[i, j], s, atol=1e-12)
+            np.testing.assert_allclose(sh[i, j], k, atol=1e-12)
+        q, ls, sh = M.qr_factors(np.eye(3))
+        np.testing.assert_allclose(q, np.eye(3), atol=1e-15)
+        np.testing.assert_allclose(np.concatenate([ls, sh]), 0.0, atol=1e-15)
+
+    def test_affine_matrix_errors_reference(self):
+        pred = [known_affine(self.rng) for _ in range(5)]
+        true = [known_affine(self.rng) for _ in range(5)]
+        e = M.affine_matrix_errors(np.stack([p[0] for p in pred]), np.stack([t[0] for t in true]))
+        for n, (p, t) in enumerate(zip(pred, true)):
+            self.assertAlmostEqual(e["scale_pct"][n], 100.0 * np.mean(np.abs(p[2] - t[2])), places=9)
+            self.assertAlmostEqual(e["shear_pct"][n], 100.0 * np.mean(np.abs(p[3] - t[3])), places=9)
+            self.assertAlmostEqual(e["qr_rot_deg"][n], ref_angle_deg(p[1], t[1]), places=6)
+        z = M.affine_matrix_errors(pred[0][0], pred[0][0])
+        for k in ("scale_pct", "shear_pct", "qr_rot_deg"):
+            self.assertLess(float(z[k]), 1e-6, k)
+        # 5% scale on one axis only -> 100 * log(1.05) / 3 percent
+        m = np.eye(4)
+        m[0, 0] = 1.05
+        self.assertAlmostEqual(float(M.affine_matrix_errors(m, np.eye(4))["scale_pct"]),
+                               100.0 * np.log(1.05) / 3.0, places=10)
+
+    def test_group_errors_affine_keys_and_pairs(self):
+        n = 4
+        A = np.stack([known_affine(self.rng)[0] for _ in range(n)])
+        A_star = np.stack([known_affine(self.rng)[0] for _ in range(n)])
+        T = np.stack([known_affine(self.rng)[0] for _ in range(n)])
+        rigid = M.group_errors(A, A_star, T, self.S)
+        self.assertFalse(any("scale" in k or "shear" in k or "qr_rot" in k for k in rigid))
+        aff = M.group_errors(A, A_star, T, self.S, affine=True)
+        for k in rigid:
+            np.testing.assert_array_equal(aff[k], rigid[k])
+        ce = M.affine_matrix_errors(A, A_star)
+        for k in ("scale_pct", "shear_pct", "qr_rot_deg"):
+            np.testing.assert_allclose(aff["center_" + k], ce[k], rtol=1e-12)
+        ref = {k: [] for k in ("scale_pct", "shear_pct", "qr_rot_deg")}
+        for i in range(n):                         # brute force over ordered pairs, row-major
+            for j in range(n):
+                if i != j:
+                    e = M.affine_matrix_errors(np.linalg.inv(A[j]) @ A[i], T[j] @ np.linalg.inv(T[i]))
+                    for k in ref:
+                        ref[k].append(float(e[k]))
+        for k in ref:
+            np.testing.assert_allclose(aff["pair_" + k], ref[k], rtol=1e-10, atol=1e-12)
+        m = M.summarize(aff, "val_affine")
+        for k in ("center_scale_pct", "center_shear_pct", "center_qr_rot_deg", "pair_scale_pct",
+                  "pair_shear_pct", "pair_qr_rot_deg"):
+            self.assertIn("val_affine/" + k, m)
+
+    def test_mean_pair_rms(self):
+        m = {"val_rigid/pair_rms_mm": 2.0, "val_affine/pair_rms_mm": 4.0, "val_rigid_g/pair_rms_mm": 100.0}
+        self.assertEqual(M.mean_pair_rms(m, ["rigid", "affine"]), 3.0)
+        self.assertEqual(M.mean_pair_rms(m, ["rigid"]), 2.0)
+        self.assertIsNone(M.mean_pair_rms({"val_rigid/pair_rms_mm": 2.0}, ["rigid", "affine"]))
+
+
 if __name__ == "__main__":
     unittest.main()

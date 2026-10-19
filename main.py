@@ -6,6 +6,8 @@ Examples (inside tf10_nv.sif; see slurm/train_debug.sh and tests/gpu/run_overfit
     python main.py --data <export_root> --dry-run              # build, 2 steps + 1 val group
     python main.py --overfit-one-group --data <export_root> --group-size 8
     python main.py --overfit-one-group --overfit-synthetic     # no data, no DALI
+    python main.py --overfit-one-group --overfit-synthetic --task-ratio rigid:1,affine:1
+    python main.py --data <export_root> --init-weights <other run>/ckpt/best   # warm start
 
 Order: parse args (no TF) -> DALI check (unless overfit mode) -> configure_tf_precision() (TF32
 off, memory growth) -> seeds -> mixed_float16 / XLA flags -> data -> model -> optimizer ->
@@ -26,7 +28,12 @@ DALI_MISSING_MSG = ("main.py: nvidia.dali is not importable ({err}). The DALI tr
 
 
 def _build_overfit_data(args, level, tf_mods):
-    """One fixed group (real or synthetic) with fixed pure-rigid transforms, rendered TF-side."""
+    """One fixed group per trained task (same real or synthetic images), rendered TF-side.
+
+    rigid: fixed pure-rigid transforms (--rigid-rotation-deg / --rigid-translation-mm, no
+    scale/shear nuisance), drawn from default_rng(seed) right after the images (as before
+    milestone 5). affine: fixed full affine transforms from the --affine-* ranges, drawn from
+    default_rng([seed, 202]), so mixed runs alternate between two different fixed groups."""
     import numpy as np
     fd, P, tfm, postprocess, dm = tf_mods
     n = args.group_size
@@ -41,21 +48,28 @@ def _build_overfit_data(args, level, tf_mods):
         base, files = fd.load_level_images(args.data, level, "train", n=n, seed=args.seed)
         S = postprocess.brain_S_matrix(level, os.path.join(args.data, dm.TEMPLATE_DIR))
         source_desc = "train images: " + ", ".join(files)
-    ranges = {"rotation_deg": args.rigid_rotation_deg, "translation_mm": args.rigid_translation_mm,
-              "log_scale": 0.0, "shear": 0.0}
-    T, T_target = fd.random_linear_transforms(rng, n, "rigid", ranges, nuisance=False)
-    rendered = fd.render_group(base, T, spacing)
-    batch = fd.to_dali_batch(rendered, T, T_target, "rigid", level)
-    sources = {"rigid": fd.FixedGroupSource(batch)}
-    val_sets = {"rigid": fd.ValidationSet.from_group(rendered, T, T_target, "rigid", level,
-                                                     args.target_iters)}
+    sources, val_sets = {}, {}
+    for task in args.task_ratio_parsed:
+        if task == "rigid":
+            ranges = {"rotation_deg": args.rigid_rotation_deg,
+                      "translation_mm": args.rigid_translation_mm, "log_scale": 0.0, "shear": 0.0}
+            T, T_target = fd.random_linear_transforms(rng, n, "rigid", ranges, nuisance=False)
+        else:
+            ranges = A.ranges_from_args(args)[task]
+            T, T_target = fd.random_linear_transforms(
+                np.random.default_rng([int(args.seed), fd.VAL_TASK_SEED[task]]), n, task, ranges)
+        rendered = fd.render_group(base, T, spacing)
+        sources[task] = fd.FixedGroupSource(fd.to_dali_batch(rendered, T, T_target, task, level))
+        val_sets[task] = fd.ValidationSet.from_group(rendered, T, T_target, task, level,
+                                                     args.target_iters)
     return sources, val_sets, S, source_desc
 
 
-def _build_dali_data(args, level, tf_mods):
+def _build_dali_data(args, level, tf_mods, start_step=0):
     """DALI sources, validation sets, S, description and the task controls ({} unless
     --curriculum / --global-transform: then <results>/<run-name>/control/<task>.npy is written
-    with the step-0 values before the pipelines start)."""
+    with the values of `start_step` (the resumed step, 0 for a new run) before the pipelines
+    start, so the first prefetched batches of a resumed run already use its ranges and G)."""
     fd, P, tfm, postprocess, dm = tf_mods
     ranges = A.ranges_from_args(args)
     aug = P.IntensityAugConfig() if args.intensity_aug else P.IntensityAugConfig.off()
@@ -63,7 +77,7 @@ def _build_dali_data(args, level, tf_mods):
     control_kw = {}
     if controls:
         control_kw = {"control_dir": os.path.join(args.results, args.run_name, "control"),
-                      "control_init": {t: c.values_at(0) for t, c in controls.items()}}
+                      "control_init": {t: c.values_at(int(start_step)) for t, c in controls.items()}}
     data = dm.LinearDataModule(args.data, level, args.group_size, seed=args.seed, split="train",
                                rigid_ranges=ranges["rigid"], affine_ranges=ranges["affine"],
                                intensity_aug=aug, num_threads=args.num_threads,
@@ -124,14 +138,30 @@ def main(argv=None):
     level = args.level
     tf_mods = (fd, P, tfm, postprocess, dm)
     controls = {}
+    if args.init_weights and args.resume and C.peek_last_step(
+            os.path.join(args.results, args.run_name, "ckpt", "last")) > 0:
+        raise SystemExit("main.py: --init-weights starts a NEW run at step 0, but %s already has a "
+                         "checkpoint and --resume is on; use a new --run-name (or --resume false)"
+                         % os.path.join(args.results, args.run_name))
     if args.overfit_one_group:
         sources, val_sets, S, data_desc = _build_overfit_data(args, level, tf_mods)
     else:
-        sources, val_sets, S, data_desc, controls = _build_dali_data(args, level, tf_mods)
+        # Resume: the control files must start at the resumed step (review-curriculum issue 5),
+        # so the step is read from the checkpoint before the pipelines are built.
+        start_step = 0
+        if args.resume:
+            start_step = C.peek_last_step(os.path.join(args.results, args.run_name, "ckpt", "last"))
+        sources, val_sets, S, data_desc, controls = _build_dali_data(args, level, tf_mods, start_step)
 
     model_cfg = A.model_config_from_args(args)
     model = GroupRegLevelModel(level, model_cfg).build_model(args.group_size)
     counts = model.count_params_by_part()
+    init_info = None
+    if args.init_weights:
+        # Warm start (model variables only; fresh optimizer, step 0). Resume was excluded above.
+        prefix, src_cfg = C.load_model_weights(model, model_cfg, args.init_weights)
+        init_info = {"checkpoint": os.path.abspath(prefix),
+                     "source_config": os.path.abspath(src_cfg) if src_cfg else None}
     optimizer = O.make_optimizer(args.optimizer, lr=args.lr, weight_decay=args.weight_decay,
                                  momentum=args.momentum, dampening=args.dampening,
                                  nesterov=args.nesterov, decoupled=args.decoupled,
@@ -151,11 +181,15 @@ def main(argv=None):
     trainer.checkpoint = C.RunCheckpoint(paths["ckpt_last"], paths["ckpt_best"], model, optimizer,
                                          trainer.step, extra=trainer.checkpoint_variables())
     resumed = False
-    if args.resume and trainer.checkpoint.latest_last:
+    if init_info is not None:
+        if not args.quiet:
+            print("init weights from %s (source config %s)" % (init_info["checkpoint"],
+                                                               init_info["source_config"]))
+    elif args.resume and trainer.checkpoint.latest_last:
         C.check_config_compatible(paths["config"], model_cfg)
         resumed = trainer.checkpoint.restore_last()
     C.write_config(paths["config"], model_cfg, A.args_to_dict(args),
-                   extra={"param_counts": dict(counts), "data": data_desc})
+                   extra={"param_counts": dict(counts), "data": data_desc, "init_weights": init_info})
     logger.log_params(dict(A.args_to_dict(args), run_dir=paths["root"], resumed=resumed,
                            resumed_step=int(trainer.step.numpy()), data=data_desc,
                            trainable_params=counts["trainable"],
@@ -179,6 +213,11 @@ def main(argv=None):
         return 0 if ok else 1
 
     summary = trainer.fit()
+    if not args.overfit_one_group:
+        # Trace counts etc. of this fit() call (tests/gpu/check_mixed_run.py reads them).
+        from runtime.logging import to_jsonable
+        with open(os.path.join(paths["root"], "fit_summary.json"), "w") as f:
+            json.dump(to_jsonable({k: v for k, v in summary.items() if k != "last_val"}), f, indent=1)
     final_val = {}
     if args.overfit_one_group and val_sets:
         # Eval mode is the source of truth: validate once more at the stopping step (fit already
@@ -191,16 +230,31 @@ def main(argv=None):
             logger.log_metrics(stop, final_val)
     logger.close()
     if args.overfit_one_group:
+        tasks = list(args.task_ratio_parsed)
         curve = [[h["step"], h["center_rms_mm"], h["pair_rms_mm"]] for h in trainer.history]
-        val_curve = [[v["step"], v.get("val_rigid/center_rms_mm"), v.get("val_rigid_trainmode/center_rms_mm")]
-                     for v in trainer.val_history]
+        # val_curve rows: step, then (eval, train-mode) center RMS per task (rigid only: the
+        # milestone-4 layout [step, eval, train mode]).
+        val_cols = ["step"]
+        for t in tasks:
+            val_cols += ["%s_eval_center_rms_mm" % t if len(tasks) > 1 else "eval_center_rms_mm",
+                         "%s_trainmode_center_rms_mm" % t if len(tasks) > 1 else "trainmode_center_rms_mm"]
+
+        def val_row(step, v):
+            row = [step]
+            for t in tasks:
+                row += [v.get("val_%s/center_rms_mm" % t), v.get("val_%s_trainmode/center_rms_mm" % t)]
+            return row
+
+        val_curve = [val_row(v["step"], v) for v in trainer.val_history]
         if final_val and not (trainer.val_history and trainer.val_history[-1]["step"] == stop):
-            val_curve.append([int(trainer.step.numpy()), final_val.get("val_rigid/center_rms_mm"),
-                              final_val.get("val_rigid_trainmode/center_rms_mm")])
+            val_curve.append(val_row(int(trainer.step.numpy()), final_val))
         out = {"reached": bool(trainer.reached), "threshold_mm": args.overfit_threshold_mm,
                "window": train_cfg.overfit_window, "steps_run": len(trainer.history),
-               "end_step": summary["end_step"],
+               "end_step": summary["end_step"], "tasks": tasks,
+               "trace_counts": summary["trace_counts"],
                "best_window_center_rms_mm": summary["best_window_center_rms_mm"],
+               "window_center_rms_by_task": summary["window_center_rms_by_task"],
+               "task_curve": [h["task"] for h in trainer.history],
                "final_center_rms_mm": curve[-1][1] if curve else None,
                "optimizer": args.optimizer, "lr": args.lr, "schedule": args.schedule,
                "group_size": args.group_size, "level": level, "synthetic": args.overfit_synthetic,
@@ -210,16 +264,18 @@ def main(argv=None):
                "gpu_peak_mb": _peak_mb(tf),
                "curve_columns": ["step", "center_rms_mm", "pair_rms_mm"], "curve": curve,
                "val": trainer.val_history, "final_val": final_val,
-               "val_curve_columns": ["step", "eval_center_rms_mm", "trainmode_center_rms_mm"],
-               "val_curve": val_curve}
+               "val_curve_columns": val_cols, "val_curve": val_curve}
         from runtime.logging import to_jsonable
         with open(os.path.join(paths["root"], "overfit_summary.json"), "w") as f:
             json.dump(to_jsonable(out), f, indent=1)
-        print("overfit: reached=%s best 10-step mean center RMS %.4f mm after %d steps; final "
-              "val center RMS eval %.4f mm, train mode %.4f mm" % (
-                  trainer.reached, summary["best_window_center_rms_mm"] or float("nan"),
-                  len(trainer.history), final_val.get("val_rigid/center_rms_mm", float("nan")),
-                  final_val.get("val_rigid_trainmode/center_rms_mm", float("nan"))))
+        per_task = "; ".join(
+            "%s eval %.4f mm, train mode %.4f mm" % (
+                t, final_val.get("val_%s/center_rms_mm" % t, float("nan")),
+                final_val.get("val_%s_trainmode/center_rms_mm" % t, float("nan"))) for t in tasks)
+        print("overfit: reached=%s best %d-step mean center RMS (worst task) %.4f mm after %d steps; "
+              "final val center RMS: %s" % (
+                  trainer.reached, train_cfg.overfit_window,
+                  summary["best_window_center_rms_mm"] or float("nan"), len(trainer.history), per_task))
         return 0 if trainer.reached else 1
     return 0
 

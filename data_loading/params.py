@@ -234,8 +234,9 @@ def _translation_np(t):
 
 
 def _rotation_np(angle_deg, axis):
-    """Right-handed rotation about `axis` (Rodrigues). DALI's sign convention is not assumed by
-    anything downstream: the pipeline emits whatever matrix DALI built."""
+    """Right-handed rotation about `axis` (Rodrigues), the same matrix as DALI 1.18's
+    ``fn.transforms.rotation`` (``rotation3D(axis, deg2rad(angle))`` in
+    include/dali/core/geom/transform.h), in the coordinates the axis is given in."""
     ax = np.asarray(axis, np.float64)
     ax = ax / np.linalg.norm(ax)
     th = np.deg2rad(angle_deg)
@@ -243,6 +244,25 @@ def _rotation_np(angle_deg, axis):
     m = np.eye(4)
     m[:3, :3] = np.eye(3) + np.sin(th) * k + (1 - np.cos(th)) * (k @ k)
     return m
+
+
+# Sign applied to the control file's G angle before it reaches DALI (milestone 5, review-curriculum
+# issue 2). DALI builds the right-handed rotation R_d(a_d, th) in DALI (reversed) axis order, with
+# a_d = P a for the file's TF-order axis a, and M_tf = P M_dali P (P = axis reversal; the
+# isotropic voxel scaling and the centering commute with it). P swaps x and z, an improper
+# orthogonal matrix (det -1), and for any orthogonal Q: Q R(u, th) Q^T = R(det(Q) Q u, th). So
+# P R(P a, th) P = R(-P P a, th) = R(-a, th) = R(a, -th): passing the file's angle unchanged
+# would emit G = R(axis, -angle) in TF space. DALI therefore gets -angle, and the emitted G is
+# R(axis, +angle) in TF space (`runtime.curriculum.global_matrix_mm`, the val_<task>_g sets and
+# the logged control_g_angle_deg). The per-image rotations are reflected the same way, which
+# needs no fix: their angle distribution is symmetric and the emitted matrices are the truth.
+G_DALI_ANGLE_SIGN = -1.0
+
+
+def control_global_dali_angle(g_angle_deg):
+    """The angle (degrees) DALI receives for the control file's G angle (`G_DALI_ANGLE_SIGN`);
+    mirrors `dali_loader.control_global_params`."""
+    return G_DALI_ANGLE_SIGN * float(g_angle_deg)
 
 
 def control_global_dali(g_axis_xyz, g_t_mm_xyz, level):

@@ -1,6 +1,6 @@
 # Unified groupwise rigid / affine / deformable registration: design document
 
-Status: v3.5 (2026-10-18). Incorporates Jay's answers to the v1 and v2 open questions. Decisions that changed since v1 are marked *(v2)*, *(v3)* or *(v3.x)*. v3.4: the dense path uses LayerNorm by default (section 4.4). v3.5: opt-in augmentation curriculum and shared global transform G (section 3.2). Remaining items are in section 12.
+Status: v3.6 (2026-10-19). Incorporates Jay's answers to the v1 and v2 open questions. Decisions that changed since v1 are marked *(v2)*, *(v3)* or *(v3.x)*. v3.4: the dense path uses LayerNorm by default (section 4.4). v3.5: opt-in augmentation curriculum and shared global transform G (section 3.2). v3.6: mixed rigid + affine task schedule with one shared optimizer, the combined best metric, affine metrics (sections 5.2, 7), the G angle sign, G warm-up and warm start (section 3.2). Remaining items are in section 12.
 
 Related documents:
 - Reference-code review: `.agents/tasks/reference-code-review/report.md` (local only)
@@ -89,7 +89,9 @@ Baselines: BrainMorph, KeyMorph, SynthMorph (affine/joint), MultiMorph, ANTs, Fr
 - **Global transform G:** one rigid G per group (all N images of a batch), about the image center. Rotation is U(−`--global-rot-max-deg`, +) (default 45°) about an axis uniform on the sphere; translation is U(±`--global-trans-max-mm`) mm per axis (default 10). It uses a fixed range (no curriculum) and is resampled every `--global-resample-every` steps (default 5), deterministic per (seed, step // K).
 - **Composition:** T_i = G · Rt_i · S_i, with G applied last (template side) in one combined matrix, so there is still one interpolation. Rigid target: G · Rt_i (the network undoes G and Rt_i, not the nuisance S_i). Affine target: the full T_i. Flips are still F T F on T and target. The pipeline also emits G_dali `[N,3,4]` and `control_version` `[N]`. The trainer logs `g_mixed_batch`, the control values and the version lag.
 - **Why G:** with independent per-image poses the group barycenter stays close to the template (MNI) pose, so "predict back to MNI" is nearly the barycentric answer. A shared G moves the barycenter (μ* → μ* G⁻¹), so the central space is a random large pose. Note: **G does not remove the per-image pose shortcut.** A network can still estimate each image's absolute pose and center the group. G only shifts the training distribution towards large shared poses, in which that pose estimate has to cover G's range as well.
-- **Validation:** `val_<task>` stays G = identity (the best checkpoint stays on `val_rigid/pair_rms_mm`). With `--global-transform` there is also `val_<task>_g`: the same groups and per-image transforms plus one fixed seeded G per group from the same range, rendered TF-side. It writes its own PNGs (`<task>_g_step*.png`).
+- **G angle sign** *(v3.6)*: the file stores the axis in TF order; DALI gets the reversed axis. Reversing x and z is a reflection P, and P R(P a, θ) P = R(a, −θ), so DALI receives −angle (`params.G_DALI_ANGLE_SIGN`). The emitted G is then R(axis, +angle) in TF mm, i.e. `global_matrix_mm` of the file's values, as logged and as used by `val_<task>_g`. Glacier check (i) is strict on the signed axis and angle.
+- **G from step 0 collapsed on real data; enable G after the per-image task is learned (start step / ramp, or warm start)** *(v3.6)*. A level-4 rigid run with the curriculum and G on from step 0 (±45° / ±10 mm, every 5 steps) reached the identity fixed point (relative pre-head feature spread 0.071 → 3e-5 by step 400, val_rigid stuck at 26.5 mm), while Adam runs without G learned at ±15° and ±45°. Options: `--global-start-step S` (G = identity before S) and `--global-ramp-steps R` (G's angle and translation half-widths ramp linearly from 0 at S to the maxima at S + R; still deterministic per (seed, step // K); logged as `train_<task>/control_g_rot_max_deg`), or `--init-weights` (load only the model weights of a finished run, same ModelConfig, fresh optimizer at step 0).
+- **Validation:** `val_<task>` stays G = identity (the best checkpoint stays on `val_<task>/pair_rms_mm`, or the combined metric of section 5.2). With `--global-transform` there is also `val_<task>_g`: the same groups and per-image transforms plus one fixed seeded G per group from the same range, rendered TF-side. It writes its own PNGs (`<task>_g_step*.png`).
 
 ### 3.3 Post-DALI processing in TF (in the train step, outside the tape)
 
@@ -252,7 +254,9 @@ N is finalized from measured memory. With N = 2–4 at full resolution, BN stati
 
 - Each step trains exactly one task. There are three `tf.function` train steps (rigid, affine, deformable), each traced once per level.
 - **Task ratio** deformable : rigid : affine = **2 : 1 : 1** (hyperparameter). Rigid and affine share most of the linear decoder, so this roughly balances updates between the linear and deformable decoders.
-- **One shared optimizer** *(v2)*: SGDW with `global_clipnorm` from the rigid project, with its LR warmup/cycle schedule and file-backed range curriculum. Log per-task losses to catch interference.
+- **One shared optimizer** *(v2)*: SGDW with `global_clipnorm` from the rigid project, with its LR warmup/cycle schedule and file-backed range curriculum. Log per-task losses to catch interference. *(Milestone 4: the default is Adam 3e-4, since SGDW collapsed on real data.)*
+- **Mixed linear tasks** *(v3.6, milestone 5)*: `--task-ratio rigid:1,affine:1`. The task of step s is a stateless seeded draw from (seed, s), so a resumed run gets the same sequence. Each task has its own `tf.function`, traced once over the whole run (flips, curriculum and G on or off). The single optimizer is built on **all** trainable variables before the first step, so the affine-only scale/shear head has its Adam slots even when the run starts with rigid steps; rigid steps drop that head's None gradients at trace time, and the first affine step creates no variable and retraces nothing.
+- **Best checkpoint with several tasks** *(v3.6)*: `--best-metric` defaults to `mean_pair_rms_mm` (logged as `val/mean_pair_rms_mm`), the mean of `val_<task>/pair_rms_mm` over the trained tasks (the G = I sets only), when more than one task is trained, and to `val_<task>/pair_rms_mm` for a single task. Any explicit key still works.
 - Mixed precision (`mixed_float16`) and XLA are optional flags. A custom training loop replaces Keras `fit`.
 
 ---
@@ -290,7 +294,7 @@ Labels: one-hot over the merged 19-channel set (3.4), warped with Ψ_i using lin
 
 | Task | Metrics |
 |---|---|
-| Rigid / affine | RMS displacement error (mm), rotation error (deg), translation error (mm): centered and all pairs. Cycle error over triplets (≈ 0 by construction; a numerics check) |
+| Rigid / affine | RMS displacement error (mm), rotation error (deg), translation error (mm): centered and all pairs. Cycle error over triplets (≈ 0 by construction; a numerics check). Affine also *(v3.6)*: from the QR factors L = Q·U·D of predicted and true matrices, scale error 100·mean\|Δ log D\| (%), shear error 100·mean\|ΔU\| (%), and the rotation-factor error ∠(Q Q_trueᵀ) (deg) |
 | Deformable | Dice (template and pairwise) on the merged set; full-label Dice at evaluation; % negative Jacobian determinant; inverse consistency ‖Ψ_i ∘ Ψ_i⁻¹ − id‖ (mm); centrality ‖mean_i v_i‖ |
 | All | Per-task loss curves (task interference), step time, peak GPU memory |
 

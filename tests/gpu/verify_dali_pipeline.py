@@ -28,12 +28,15 @@ Checks (each prints PASS / FAIL / INFO; the exit code is 1 if any check FAILs):
 Control file (curriculum / global transform G, design 3.2 v3.5; real level-4 data, aug OFF):
   (h) re-read: version v1 with rot 5 deg, 3 batches, rewrite v2 with rot 40 deg; within <= 3
       batches the emitted version changes and the sampled max rotation follows it (lag reported).
-  (i) G shared: identical G_dali over the batch, matching the written axis / angle / translation
-      (and the numpy mirror up to the DALI angle sign); T_i = G Rt_i S_i with Rt_i rigid within the
-      per-image ranges and S_i the nuisance (rigid), or Rt_i S_i within the ranges (affine).
+  (i) G shared: identical G_dali over the batch, equal in TF mm to R(axis, +angle) with the
+      written SIGNED axis and angle and the written translation (global_matrix_mm), and to the
+      numpy mirror fed with the angle DALI receives (params.G_DALI_ANGLE_SIGN); T_i = G Rt_i S_i
+      with Rt_i rigid within the per-image ranges and S_i the nuisance (rigid), or Rt_i S_i
+      within the ranges (affine).
   (j) targets with G: barycentric targets from G Rt_i (rigid) / T_i (affine) central and
-      pair-consistent; DALI render == TF render of the emitted T_i (single interpolation) and the
-      round trip matches the TF-only one (criteria of (b)).
+      pair-consistent; the barycenter moves with G (mu*(G) = mu*(I) G^-1 within --tol-bary);
+      DALI render == TF render of the emitted T_i (single interpolation) and the round trip
+      matches the TF-only one (criteria of (b)).
   (k) curriculum start values written: sampled rotation / translation / log-scale / shear
       magnitudes stay within them (and are not collapsed to 0).
 Select checks with --checks (e.g. h,i,j,k). All temporary files go to a fresh folder under
@@ -68,7 +71,7 @@ from data_loading import postprocess as pp  # noqa: E402
 from models import layers  # noqa: E402
 from models import transforms as tfm  # noqa: E402
 from runtime import args as A  # noqa: E402
-from runtime.curriculum import ControlWriter  # noqa: E402
+from runtime.curriculum import ControlWriter, global_matrix_mm  # noqa: E402
 
 LEVEL = 4
 SHAPE = P.LEVEL_SHAPE[LEVEL]
@@ -620,22 +623,27 @@ def check_i(files, tmp, args):
         g_d = o[-2].astype(np.float64)
         shared = float(np.abs(g_d - g_d[:1]).max())
         g_mm = pp.dali_to_mm(g_d[:1], LEVEL).numpy()[0].astype(np.float64)
+        # Strict on the SIGNED axis and angle (milestone 5): rotation_axis gives the axis whose
+        # rotation angle is in [0, 180], so for G = R(G_AXIS, +G_ANGLE) (0 < G_ANGLE < 180) it
+        # must be +G_AXIS, and the matrix must equal global_matrix_mm of the written values.
         ang = rotation_angle_deg(g_mm)
-        axis_dot = abs(float(np.dot(rotation_axis(g_mm), G_AXIS)))
+        axis_dot = float(np.dot(rotation_axis(g_mm), G_AXIS))
         t_err = float(np.abs(g_mm[:3, 3] - np.asarray(G_T_MM)).max())
-        # numpy mirror (sign of the DALI angle not assumed: both signs tried)
-        mirror = {}
-        for sgn in (1.0, -1.0):
-            m = P.linear_matrices_np(0.0, (0.0, 0.0, 1.0), (0, 0, 0), (0, 0, 0), (0, 0, 0), SHAPE,
-                                     g_angle_deg=sgn * G_ANGLE, g_axis_dali=axis_d, g_t_vox_dali=t_d)
-            mirror["%+d" % sgn] = float(np.abs(m["G"][:3] - g_d[0]).max())
+        g_ref = global_matrix_mm(G_AXIS, G_ANGLE, G_T_MM)
+        g_ref_err = float(np.abs(g_mm - g_ref).max())
+        # numpy mirror of the DALI graph with the angle DALI receives (params.G_DALI_ANGLE_SIGN)
+        m = P.linear_matrices_np(0.0, (0.0, 0.0, 1.0), (0, 0, 0), (0, 0, 0), (0, 0, 0), SHAPE,
+                                 g_angle_deg=P.control_global_dali_angle(G_ANGLE), g_axis_dali=axis_d,
+                                 g_t_vox_dali=t_d)
+        mirror = float(np.abs(m["G"][:3] - g_d[0]).max())
         t_mm = pp.dali_to_mm(o[1], LEVEL).numpy().astype(np.float64)
         g_inv = np.linalg.inv(g_mm)
-        d = {"G_shared_max_abs": shared, "G_angle_deg": ang, "G_axis_abs_dot": axis_dot,
-             "G_translation_err_mm": t_err, "G_vs_numpy_mirror_max_abs": mirror,
+        d = {"G_shared_max_abs": shared, "G_angle_deg": ang, "G_axis_signed_dot": axis_dot,
+             "G_translation_err_mm": t_err, "G_vs_global_matrix_mm_max_abs": g_ref_err,
+             "G_vs_numpy_mirror_max_abs": mirror,
              "version": sorted(set(o[-1].reshape(-1).tolist()))}
         task_ok = (shared < 1e-6 and abs(ang - G_ANGLE) < 0.01 and axis_dot > 1 - 1e-5
-                   and t_err < 1e-3 and min(mirror.values()) < 1e-3)
+                   and t_err < 1e-3 and g_ref_err < 1e-3 and mirror < 1e-3)
         ls, sh = rng[task]["log_scale"], rng[task]["shear"]
         if task == "rigid":
             tgt = pp.dali_to_mm(o[2], LEVEL).numpy().astype(np.float64)
@@ -646,18 +654,17 @@ def check_i(files, tmp, args):
             rot = [rotation_angle_deg(m) for m in rt]
             diag = np.diagonal(s_i[:, :3, :3], axis1=1, axis2=2)
             lower = np.array([s_i[:, 1, 0], s_i[:, 2, 0], s_i[:, 2, 1]])
-            recompose = float(np.abs(g_mm[None] @ rt @ s_i - t_mm).max())
+            # (The former recompose sub-check G (G^-1 tgt)(tgt^-1 T) == T was an identity for any
+            # output and is dropped; the render of T itself is checked independently in (j).)
             d.update({"Rt_rigidity_err": rigid_err, "Rt_max_rot_deg": max(rot),
                       "Rt_max_translation_mm": float(np.abs(rt[:, :3, 3]).max()),
                       "S_translation_max_mm": float(np.abs(s_i[:, :3, 3]).max()),
                       "S_lower_max": float(np.abs(lower).max()),
-                      "S_diag_range": [float(diag.min()), float(diag.max())],
-                      "recompose_max_abs": recompose})
+                      "S_diag_range": [float(diag.min()), float(diag.max())]})
             task_ok &= (rigid_err < 1e-4 and max(rot) <= 20.0 + 0.01
                         and d["Rt_max_translation_mm"] <= 5.0 + 1e-3
                         and d["S_translation_max_mm"] < 1e-3 and d["S_lower_max"] < 1e-5
-                        and np.exp(-ls) - 1e-5 <= diag.min() and diag.max() <= np.exp(ls) + 1e-5
-                        and recompose < 1e-4)
+                        and np.exp(-ls) - 1e-5 <= diag.min() and diag.max() <= np.exp(ls) + 1e-5)
         else:
             m = g_inv @ t_mm                                 # Rt_i S_i
             rot = [rotation_angle_deg(x) for x in m]
@@ -674,9 +681,12 @@ def check_i(files, tmp, args):
         ok &= task_ok
     record("i_global_shared", ok,
            "G identical over the batch (max diff rigid %.1e / affine %.1e), angle %.3f deg (written %g), "
-           "|t - written| %.1e mm, T = G Rt S with Rt within 20 deg / 5 mm"
+           "signed axis dot %.6f, |G - global_matrix_mm(written)| %.1e, |t - written| %.1e mm, "
+           "T = G Rt S with Rt within 20 deg / 5 mm"
            % (info["rigid"]["G_shared_max_abs"], info["affine"]["G_shared_max_abs"],
-              info["rigid"]["G_angle_deg"], G_ANGLE, info["rigid"]["G_translation_err_mm"]), **info)
+              info["rigid"]["G_angle_deg"], G_ANGLE, info["rigid"]["G_axis_signed_dot"],
+              info["rigid"]["G_vs_global_matrix_mm_max_abs"], info["rigid"]["G_translation_err_mm"]),
+           **info)
 
 
 def check_j(files, src, brain, s_mom, tmp, args):
@@ -731,16 +741,19 @@ def check_j(files, src, brain, s_mom, tmp, args):
              "direct_max_abs": max_direct, "worst_ncc_gap": max(gaps), "min_ncc": min(nccs),
              "flip_axes": out["flip_axes"].numpy()}
         task_ok = (rms_center < 1e-3 and rms_pair < 1e-3 and max_direct < args.tol_direct
-                   and max(gaps) < args.tol_ncc_gap)
+                   and max(gaps) < args.tol_ncc_gap and bary_equiv < args.tol_bary)
         d["passed"] = bool(task_ok)
         info[task] = d
         ok &= task_ok
     r = info["rigid"]
     record("j_targets_with_global", ok,
-           "rigid center %.1e / pairs %.1e mm, barycenter rot %.1f deg; single-interp max |diff| "
-           "rigid %.1e / affine %.1e; worst NCC gap rigid %.1e / affine %.1e"
-           % (r["rms_center_mm"], r["rms_pair_mm"], r["barycenter_rot_deg"], r["direct_max_abs"],
-              info["affine"]["direct_max_abs"], r["worst_ncc_gap"], info["affine"]["worst_ncc_gap"]),
+           "rigid center %.1e / pairs %.1e mm, barycenter rot %.1f deg, |mu*(G) - mu*(I) G^-1| rigid "
+           "%.1e / affine %.1e (< %g); single-interp max |diff| rigid %.1e / affine %.1e; worst NCC "
+           "gap rigid %.1e / affine %.1e"
+           % (r["rms_center_mm"], r["rms_pair_mm"], r["barycenter_rot_deg"],
+              r["barycenter_equivariance_max_abs"], info["affine"]["barycenter_equivariance_max_abs"],
+              args.tol_bary, r["direct_max_abs"], info["affine"]["direct_max_abs"], r["worst_ncc_gap"],
+              info["affine"]["worst_ncc_gap"]),
            **info)
 
 
@@ -809,6 +822,11 @@ def main():
     ap.add_argument("--tol-ncc-gap", type=float, default=1e-3,
                     help="max NCC shortfall of the DALI round trip vs the TF-only round trip (b)")
     ap.add_argument("--tol-direct", type=float, default=2e-3, help="max |DALI - TF| single interp (b)")
+    ap.add_argument("--tol-bary", type=float, default=1e-6,
+                    help="max |mu*(G) - mu*(I) G^-1| entry (matrix entries, translations in mm) in (j); "
+                    "the fixed point starts at I, so only its convergence error remains (max 1.7e-14 "
+                    "over 20 synthetic groups per task at 10 iterations, G 30 deg / Rt 20 deg, float64; "
+                    ".agents/tasks/milestone-5/measure_bary.py)")
     ap.add_argument("--keep-tmp", action="store_true")
     args = ap.parse_args()
     checks = set(c.strip() for c in args.checks.split(",") if c.strip())

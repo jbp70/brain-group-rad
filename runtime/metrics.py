@@ -9,6 +9,14 @@ Centered errors compare A_i with A_i*. Pairwise errors compare A_j^-1 A_i with T
 ordered pairs i != j. The cycle error (A numerics check, ~0 by construction) is the RMS of
 P_ki P_jk P_ij - I over random distinct triplets.
 
+Affine-specific errors (``group_errors(..., affine=True)``, milestone 5). Each 3x3 linear part is
+factored as L = Q K (QR, the model's own parametrization A = [R K | t], design 4.4) with Q a
+rotation and K = U D upper triangular: D = diag(exp(s)) the per-axis scales, U unit upper
+triangular with the shears (k_xy, k_xz, k_yz) = (K01 / K11, K02 / K22, K12 / K22). Per matrix:
+* scale_pct: 100 * mean over the 3 axes of |s - s_true| (log-scale difference, ~ percent);
+* shear_pct: 100 * mean over the 3 shears of |k - k_true|;
+* qr_rot_deg: angle of Q Q_true^T (the rotation factor; `rot_deg` uses the polar rotation).
+
 `group_errors` returns per-matrix arrays (so validation can pool them over groups);
 `summarize` turns them into means (+ p95 of the RMS values) under a key prefix.
 """
@@ -17,6 +25,29 @@ import numpy as np
 
 def _np(x):
     return np.asarray(x, np.float64)
+
+
+def qr_factors(L):
+    """L = Q K for [..., 3, 3] -> (Q [..., 3, 3], log_scale [..., 3], shear [..., 3]).
+
+    K has a positive diagonal (so Q is a rotation when det L > 0). log_scale = log diag(K);
+    shear = (K01 / K11, K02 / K22, K12 / K22), the entries of U in K = U diag(K). Loops over the
+    leading dimensions (numpy 1.21 has no batched QR)."""
+    L = _np(L)
+    lead = L.shape[:-2]
+    flat = L.reshape((-1, 3, 3))
+    q_out = np.empty_like(flat)
+    ls = np.empty((flat.shape[0], 3))
+    sh = np.empty((flat.shape[0], 3))
+    for n in range(flat.shape[0]):
+        q, k = np.linalg.qr(flat[n])
+        sgn = np.where(np.diag(k) < 0, -1.0, 1.0)
+        q, k = q * sgn[None, :], sgn[:, None] * k
+        d = np.diag(k)
+        q_out[n] = q
+        ls[n] = np.log(d)
+        sh[n] = (k[0, 1] / d[1], k[0, 2] / d[2], k[1, 2] / d[2])
+    return q_out.reshape(lead + (3, 3)), ls.reshape(lead + (3,)), sh.reshape(lead + (3,))
 
 
 def polar_rotation(L):
@@ -53,6 +84,15 @@ def matrix_errors(M, M_true, S):
     return {"rms_mm": point_rms(M - M_true, S),
             "rot_deg": rotation_angle_deg(rel),
             "trans_mm": np.linalg.norm(M[..., :3, 3] - M_true[..., :3, 3], axis=-1)}
+
+
+def affine_matrix_errors(M, M_true):
+    """dict(scale_pct, shear_pct, qr_rot_deg) per matrix from the QR factors (module docstring)."""
+    q, ls, sh = qr_factors(_np(M)[..., :3, :3])
+    q0, ls0, sh0 = qr_factors(_np(M_true)[..., :3, :3])
+    return {"scale_pct": 100.0 * np.mean(np.abs(ls - ls0), axis=-1),
+            "shear_pct": 100.0 * np.mean(np.abs(sh - sh0), axis=-1),
+            "qr_rot_deg": rotation_angle_deg(q @ np.swapaxes(q0, -1, -2))}
 
 
 def centered_errors(A, A_star, S):
@@ -94,15 +134,34 @@ def cycle_errors(A, S, n_triplets=64, seed=0):
     return {"rms_mm": point_rms(c - np.eye(4), S), "triplets": tri}
 
 
-def group_errors(A, A_star, T_target, S, n_triplets=64, seed=0):
-    """Per-matrix error arrays of one group (unprefixed keys)."""
+def group_errors(A, A_star, T_target, S, n_triplets=64, seed=0, affine=False):
+    """Per-matrix error arrays of one group (unprefixed keys). ``affine=True`` adds
+    center_/pair_{scale_pct, shear_pct, qr_rot_deg} (`affine_matrix_errors`)."""
     out = {}
     for k, v in centered_errors(A, A_star, S).items():
         out["center_" + k] = v
     for k, v in pairwise_errors(A, T_target, S).items():
         out["pair_" + k] = v
     out["cycle_rms_mm"] = cycle_errors(A, S, n_triplets, seed)["rms_mm"]
+    if affine:
+        A, T = _np(A), _np(T_target)
+        for k, v in affine_matrix_errors(A, A_star).items():
+            out["center_" + k] = v
+        i, j = all_ordered_pairs(A.shape[0])
+        pred = np.linalg.inv(A[j]) @ A[i]
+        true = T[j] @ np.linalg.inv(T[i])
+        for k, v in affine_matrix_errors(pred, true).items():
+            out["pair_" + k] = v
     return out
+
+
+def mean_pair_rms(metrics, tasks):
+    """Combined best-checkpoint metric: mean of ``val_<task>/pair_rms_mm`` over `tasks`, or None
+    if any of them is missing."""
+    vals = [metrics.get("val_%s/pair_rms_mm" % t) for t in tasks]
+    if not vals or any(v is None for v in vals):
+        return None
+    return float(np.mean(vals))
 
 
 def summarize(errors, prefix):
@@ -118,9 +177,10 @@ def summarize(errors, prefix):
     return out
 
 
-def group_metrics(A, A_star, T_target, S, prefix, n_triplets=64, seed=0):
-    """`summarize(group_errors(...), prefix)`: center/pair rms, rot, trans and cycle rms."""
-    return summarize(group_errors(A, A_star, T_target, S, n_triplets, seed), prefix)
+def group_metrics(A, A_star, T_target, S, prefix, n_triplets=64, seed=0, affine=False):
+    """`summarize(group_errors(...), prefix)`: center/pair rms, rot, trans and cycle rms (plus
+    the affine errors with ``affine=True``)."""
+    return summarize(group_errors(A, A_star, T_target, S, n_triplets, seed, affine), prefix)
 
 
 def concat_errors(list_of_errors):

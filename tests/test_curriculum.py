@@ -91,6 +91,35 @@ class TestGlobalTransformSampler(unittest.TestCase):
         self.assertEqual(k10.params(9)["angle_deg"], k10.params(0)["angle_deg"])
         self.assertNotEqual(k10.params(10)["angle_deg"], k10.params(9)["angle_deg"])
 
+    def test_warmup_start_and_ramp(self):
+        # G warm-up (milestone 5): identity before S, linear ramp of the ranges over [S, S + R].
+        plain = C.GlobalTransformSampler(45.0, 10.0, resample_every=5, seed=3)
+        s = C.GlobalTransformSampler(45.0, 10.0, resample_every=5, seed=3, start_step=100, ramp_steps=200)
+        for step in (0, 50, 99):
+            p = s.params(step)
+            self.assertEqual((s.fraction(step), s.rot_max_at(step), s.trans_max_at(step)), (0.0, 0.0, 0.0))
+            self.assertEqual(p["angle_deg"], 0.0)
+            np.testing.assert_array_equal(p["translation_mm"], 0.0)
+        for step, f in ((100, 0.0), (150, 0.25), (200, 0.5), (299, 0.995), (300, 1.0), (1000, 1.0)):
+            self.assertAlmostEqual(s.fraction(step), f, places=12)
+            self.assertAlmostEqual(s.rot_max_at(step), 45.0 * f, places=10)
+            self.assertAlmostEqual(s.trans_max_at(step), 10.0 * f, places=10)
+            p, q = s.params(step), plain.params(step)      # same block draw, ranges scaled by f
+            np.testing.assert_array_equal(p["axis"], q["axis"])
+            self.assertAlmostEqual(p["angle_deg"], f * q["angle_deg"], places=10)
+            np.testing.assert_allclose(p["translation_mm"], f * q["translation_mm"], atol=1e-12)
+            self.assertLessEqual(abs(p["angle_deg"]), s.rot_max_at(step) + 1e-9)
+        # deterministic (pure function of the step), and the defaults are the plain sampler
+        s2 = C.GlobalTransformSampler(45.0, 10.0, resample_every=5, seed=3, start_step=100, ramp_steps=200)
+        for step in (120, 250, 400):
+            self.assertEqual(s.params(step)["angle_deg"], s2.params(step)["angle_deg"])
+        d = C.GlobalTransformSampler(45.0, 10.0, resample_every=5, seed=3, start_step=0, ramp_steps=0)
+        self.assertEqual([d.params(i)["angle_deg"] for i in range(20)], [plain.params(i)["angle_deg"] for i in range(20)])
+        jump = C.GlobalTransformSampler(45.0, 10.0, start_step=10)          # no ramp: full at S
+        self.assertEqual((jump.fraction(9), jump.fraction(10)), (0.0, 1.0))
+        with self.assertRaises(ValueError):
+            C.GlobalTransformSampler(45.0, 10.0, start_step=-1)
+
     def test_axis_and_ranges(self):
         s = C.GlobalTransformSampler(30.0, 8.0, resample_every=1, seed=0)
         ps = [s.params(i) for i in range(2000)]
@@ -220,6 +249,32 @@ class TestNumpyMirrorWithG(unittest.TestCase):
         ax = np.array([r[2, 1] - r[1, 2], r[0, 2] - r[2, 0], r[1, 0] - r[0, 1]])
         self.assertAlmostEqual(abs(float(ax @ axis_tf / np.linalg.norm(ax) / np.linalg.norm(axis_tf))), 1.0, 6)
 
+    def test_g_angle_sign(self):
+        # Review-curriculum issue 2: DALI's rotation is the right-handed Rodrigues matrix in DALI
+        # (reversed) axis order (params._rotation_np). Passed unchanged, the file's angle gives
+        # R(axis, -angle) in TF space; with control_global_dali_angle (what
+        # dali_loader.control_global_params feeds DALI) it is R(axis, +angle) = global_matrix_mm.
+        shape, level = P.LEVEL_SHAPE[4], 4
+        rng = np.random.default_rng(3)
+        self.assertEqual(P.G_DALI_ANGLE_SIGN, -1.0)
+        for _ in range(5):
+            axis_tf = rng.normal(size=3)
+            axis_tf /= np.linalg.norm(axis_tf)
+            angle, t_mm = float(rng.uniform(-45, 45)), rng.uniform(-10, 10, 3)
+            axis_d, t_d = P.control_global_dali(axis_tf, t_mm, level)
+            ref = C.global_matrix_mm(axis_tf, angle, t_mm)
+            zero = dict(angle_deg=0.0, axis_dali=(0.0, 0.0, 1.0), t_vox_dali=(0, 0, 0),
+                        log_scale_xyz=(0, 0, 0), shear_xyz=(0, 0, 0), shape_xyz=shape)
+
+            def g_tf(dali_angle):
+                m = P.linear_matrices_np(g_angle_deg=dali_angle, g_axis_dali=axis_d, g_t_vox_dali=t_d, **zero)
+                return tfm.dali_voxel_to_tf_mm(m["G"], shape, 4.0).numpy()
+
+            np.testing.assert_allclose(g_tf(P.control_global_dali_angle(angle)), ref, atol=1e-9)
+            np.testing.assert_allclose(g_tf(angle), C.global_matrix_mm(axis_tf, -angle, t_mm), atol=1e-9)
+            if abs(angle) > 1.0:
+                self.assertGreater(np.abs(g_tf(angle) - ref).max(), 1e-3)
+
 
 class TestPostprocessWithG(unittest.TestCase):
     def test_targets_from_g_rt_and_flips(self):
@@ -342,6 +397,16 @@ class TestCurriculumArgs(unittest.TestCase):
         only_g = A.task_controls_from_args(A.parse_args(["--data", "x", "--global-transform", "true"]))
         self.assertIsNone(only_g["rigid"].curriculum)
         self.assertEqual(only_g["rigid"].values_at(0)["rotation_deg"], 45.0)
+        self.assertEqual((only_g["rigid"].sampler.start_step, only_g["rigid"].sampler.ramp_steps), (0, 0))
+        warm = A.task_controls_from_args(A.parse_args(["--data", "x", "--global-transform", "true",
+                                                       "--global-start-step", "500",
+                                                       "--global-ramp-steps", "1000"]))
+        self.assertEqual((warm["rigid"].sampler.start_step, warm["rigid"].sampler.ramp_steps), (500, 1000))
+        self.assertEqual(warm["rigid"].values_at(499)["g_angle_deg"], 0.0)
+        import contextlib
+        with open(os.devnull, "w") as dn, contextlib.redirect_stderr(dn):
+            with self.assertRaises(SystemExit):
+                A.parse_args(["--data", "x", "--global-transform", "true", "--global-start-step", "-1"])
 
 
 class TestDataModuleControl(unittest.TestCase):

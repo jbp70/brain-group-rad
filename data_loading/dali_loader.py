@@ -162,12 +162,18 @@ def control_linear_params(ctl, level):
 
 def control_global_params(ctl, level):
     """G parameters from the control vector: angle (degrees), axis and translation (voxels) in
-    DALI axis order (the file stores TF order x, y, z; mirrored by `params.control_global_dali`)."""
+    DALI axis order (the file stores TF order x, y, z; mirrored by `params.control_global_dali`).
+
+    The angle is multiplied by `params.G_DALI_ANGLE_SIGN` (-1): reversing the axis order is a
+    reflection, so DALI's right-handed rotation about the reversed axis by +angle is
+    R(axis, -angle) in TF space (derivation at `params.G_DALI_ANGLE_SIGN`). With the sign flip
+    the emitted G is R(axis, +angle) in TF space, i.e. `runtime.curriculum.global_matrix_mm` of
+    the file's values, as logged (control_g_angle_deg) and as used by the val_<task>_g sets."""
     i = P.CONTROL_INDEX
     inv_s = 1.0 / P.LEVEL_SPACING[P.check_level(level)]
     ax = [ctl[i["g_axis_x"]], ctl[i["g_axis_y"]], ctl[i["g_axis_z"]]]
     t = [ctl[i["g_tx_mm"]] * inv_s, ctl[i["g_ty_mm"]] * inv_s, ctl[i["g_tz_mm"]] * inv_s]
-    return {"angle": ctl[i["g_angle_deg"]], "axis": fn.stack(*ax[::-1]),
+    return {"angle": ctl[i["g_angle_deg"]] * P.G_DALI_ANGLE_SIGN, "axis": fn.stack(*ax[::-1]),
             "translation": fn.stack(*t[::-1])}
 
 

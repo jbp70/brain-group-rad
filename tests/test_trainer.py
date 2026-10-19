@@ -1,4 +1,7 @@
 """Trainer loop (runtime.run): task schedule, None-gradient filtering, NaN guard, trace counts,
+mixed rigid + affine interleaving with one optimizer (milestone 5: seeded alternation, one trace
+per task with flips / curriculum / G on or off, Adam slots for the affine head before the first
+affine step, affine validation errors, the combined best metric and affine PNGs),
 rebuild_steps after a BN freeze, resume, validation (eval mode and the non-updating training-mode
 diagnostics), a mixed-precision smoke test and a forced float16 overflow (loss-scale skip).
 
@@ -16,10 +19,12 @@ from tests.runtime_helpers import free_memory, narrow_config, synthetic_group
 import numpy as np
 import tensorflow as tf
 
+from data_loading import params as P
 from models import transforms as tfm
 from models.group_net import GroupRegLevelModel
 from runtime import checkpoint as C
 from runtime import fixed_data as fd
+from runtime import metrics as M
 from runtime import optimizers as O
 from runtime.logging import RunLogger, make_run_dir
 from runtime.run import DIAG_KEYS, TaskSchedule, Trainer, TrainConfig, collapse_diagnostics
@@ -159,6 +164,117 @@ class TestTrainStep(TrainerCase):
             self.assertTrue(np.array_equal(a, b))
         self.assertTrue(any(not np.array_equal(a, v.numpy()) for a, v in zip(g1, affine)))
         self.assertEqual(tr.trace_counts["rigid"], 2)
+
+
+def _seed_starting_rigid(k=3):
+    """A schedule seed whose rigid:1,affine:1 draws start with k rigid steps."""
+    for seed in range(1000):
+        s = TaskSchedule({"rigid": 1.0, "affine": 1.0}, seed)
+        if [s.draw(i) for i in range(k)] == ["rigid"] * k:
+            return seed
+    raise AssertionError("no seed found")
+
+
+class TestMixedTasks(TrainerCase):
+    """Milestone 5: rigid + affine interleaved with ONE optimizer (design 5.2)."""
+
+    def control_sources(self):
+        """Per-task controls (curriculum + G, writers under tmp) and batches with extras."""
+        from runtime import curriculum as CU
+        controls, sources = {}, {}
+        for i, t in enumerate(("rigid", "affine")):
+            end = dict(P.DEFAULT_LINEAR_RANGES[t])
+            start = dict(end, rotation_deg=10.0, translation_mm=2.0)
+            controls[t] = CU.TaskControl(end, CU.LinearCurriculum(start, end, 10),
+                                         CU.GlobalTransformSampler(45.0, 10.0, 3, seed=i),
+                                         writer=CU.ControlWriter(os.path.join(self.tmp, "control", t + ".npy")))
+            g = np.tile(np.eye(4)[:3][None], (N, 1, 1)).astype(np.float32)
+            extras = (tf.constant(g), tf.constant(np.ones([N], np.float32)))
+            sources[t] = fd.FixedGroupSource(tuple(self.groups[t]["batch"]) + extras)
+        return controls, sources
+
+    def test_interleaving_starting_rigid(self):
+        seed = _seed_starting_rigid(3)
+        n_steps = 30
+        for variant in ("flips_off", "flips_controls_on"):
+            with self.subTest(variant=variant):
+                cfg = config(task_ratio={"rigid": 1.0, "affine": 1.0}, seed=seed,
+                             flip_prob=0.0 if variant == "flips_off" else 0.5)
+                controls, sources = ({}, None) if variant == "flips_off" else self.control_sources()
+                model = GroupRegLevelModel(4, narrow_config(dropout=0.0, seed=1)).build_model(N)
+                opt = O.make_optimizer("adam", lr=1e-3)
+                tr = Trainer(model, opt, sources or {t: fd.FixedGroupSource(g["batch"])
+                                                     for t, g in self.groups.items()},
+                             self.groups["rigid"]["S"], cfg, controls=controls)
+                tvars = model.trainable_variables
+                # Adam slots exist for every trainable variable (incl. the affine-only head)
+                # before the first step: m and v per variable (Keras 2.10 experimental Adam;
+                # variables() does not list the iteration counter).
+                n_opt = len(opt.variables())
+                self.assertEqual(n_opt, 2 * len(tvars))
+                head = model.linear_decoder.scale_shear_head
+                self.assertEqual(sum("scale_shear_head" in v.name for v in opt.variables()),
+                                 2 * len(head.trainable_variables))
+                ss0 = [v.numpy().copy() for v in head.trainable_variables]
+                tr.fit(3)                                           # rigid only
+                self.assertEqual([h["task"] for h in tr.history], ["rigid"] * 3)
+                for a, v in zip(ss0, head.trainable_variables):
+                    self.assertTrue(np.array_equal(a, v.numpy()), v.name)
+                self.assertEqual(tr.trace_counts, {"rigid": 1, "affine": 0})
+                tr.fit(n_steps - 3)
+                tasks = [h["task"] for h in tr.history]
+                self.assertEqual(tasks, [tr.schedule.draw(s) for s in range(n_steps)])
+                self.assertGreater(tasks.count("affine"), 5)
+                self.assertGreater(tasks.count("rigid"), 5)
+                self.assertEqual(tr.trace_counts, {"rigid": 1, "affine": 1})
+                self.assertEqual(len(opt.variables()), n_opt)       # no slot created later
+                self.assertEqual(int(opt.iterations.numpy()), n_steps)
+                self.assertTrue(all(h["finite"] for h in tr.history))
+                for h in tr.history:
+                    want = len(tvars) - 2 if h["task"] == "rigid" else len(tvars)
+                    self.assertEqual(h["n_vars_updated"], want)
+                self.assertFalse(np.array_equal(ss0[0], head.kernel.numpy()))
+                if controls:
+                    for t, c in controls.items():
+                        self.assertGreater(c.writer.version, 1)
+                        rec = next(h for h in tr.history if h["task"] == t)
+                        self.assertIn("control_rot_deg", rec)
+                        self.assertEqual(rec["control_g_rot_max_deg"], 45.0)   # no G warm-up
+                free_memory()
+
+    def test_mixed_validation_best_metric_and_pngs(self):
+        val_sets = {t: fd.ValidationSet.from_group(g["images"], g["T"], g["T_target"], t, 4)
+                    for t, g in self.groups.items()}
+        png = os.path.join(self.tmp, "png")
+        paths = make_run_dir(self.tmp, "mixed")
+        cfg = config(task_ratio={"rigid": 1.0, "affine": 1.0}, val_every=2, val_png_dir=png, val_png_k=2)
+        tr = self.make(cfg, val_sets=val_sets)
+        from runtime.run import MEAN_PAIR_METRIC
+        self.assertEqual(tr.best_metric, MEAN_PAIR_METRIC)
+        tr.checkpoint = C.RunCheckpoint(paths["ckpt_last"], paths["ckpt_best"], tr.model, tr.optimizer,
+                                        tr.step, extra=tr.checkpoint_variables())
+        tr.fit(4)
+        self.assertEqual([v["step"] for v in tr.val_history], [2, 4])
+        for v in tr.val_history:
+            self.assertAlmostEqual(v[MEAN_PAIR_METRIC],
+                                   0.5 * (v["val_rigid/pair_rms_mm"] + v["val_affine/pair_rms_mm"]), places=12)
+            for k in ("center_scale_pct", "center_shear_pct", "center_qr_rot_deg", "pair_scale_pct",
+                      "pair_shear_pct", "pair_qr_rot_deg"):
+                self.assertTrue(np.isfinite(v["val_affine/" + k]), k)
+                self.assertNotIn("val_rigid/" + k, v)
+                self.assertNotIn("val_affine_trainmode/" + k, v)
+        best = min(v[MEAN_PAIR_METRIC] for v in tr.val_history)
+        self.assertAlmostEqual(float(tr.checkpoint.best_metric.numpy()), best, places=10)
+        self.assertIsNotNone(tr.checkpoint.latest_best)
+        self.assertEqual(sorted(os.listdir(png)), ["affine_step0000002.png", "affine_step0000004.png",
+                                                   "rigid_step0000002.png", "rigid_step0000004.png"])
+        # Identity model at init: the affine val errors equal those of the identity matrices.
+        tr0 = self.make(config(), val_sets={"affine": val_sets["affine"]})
+        m = tr0.validate()
+        a_star = val_sets["affine"].groups[0]["A_star"]
+        ref = M.affine_matrix_errors(np.tile(np.eye(4), (N, 1, 1)), a_star)
+        self.assertAlmostEqual(m["val_affine/center_scale_pct"], float(np.mean(ref["scale_pct"])), places=4)
+        self.assertGreater(m["val_affine/center_scale_pct"], 0.5)   # the fixed group has real scale
 
 
 class TestResumeAndValidation(TrainerCase):
@@ -469,6 +585,22 @@ class TestControls(TrainerCase):
         fresh = CU.TaskControl(end, CU.LinearCurriculum(start, end, 4),
                                CU.GlobalTransformSampler(45.0, 10.0, resample_every=2, seed=1))
         self.assertEqual(fresh.values_at(3), ctl.values_at(3))
+
+    def test_g_warmup_logged(self):
+        from runtime import curriculum as CU
+        end = {"rotation_deg": 45.0, "translation_mm": 15.0, "log_scale": 0.0, "shear": 0.0}
+        ctl = CU.TaskControl(end, None, CU.GlobalTransformSampler(45.0, 10.0, resample_every=2, seed=1,
+                                                                  start_step=2, ramp_steps=2),
+                             writer=CU.ControlWriter(os.path.join(self.tmp, "control", "rigid.npy")))
+        batch = tuple(self.groups["rigid"]["batch"]) + self.extras()
+        model = GroupRegLevelModel(4, narrow_config(dropout=0.0, seed=1)).build_model(N)
+        tr = Trainer(model, O.make_optimizer("adam", lr=1e-3), {"rigid": fd.FixedGroupSource(batch)},
+                     self.groups["rigid"]["S"], config(), controls={"rigid": ctl})
+        tr.fit(5)
+        self.assertEqual([h["control_g_rot_max_deg"] for h in tr.history], [0.0, 0.0, 0.0, 22.5, 45.0])
+        self.assertEqual([h["control_g_angle_deg"] for h in tr.history[:3]], [0.0, 0.0, 0.0])
+        self.assertNotEqual(tr.history[4]["control_g_angle_deg"], 0.0)
+        self.assertAlmostEqual(ctl.writer.read()["g_angle_deg"], ctl.values_at(4)["g_angle_deg"], places=4)
 
     def test_named_val_sets_and_pngs(self):
         g = self.groups["rigid"]

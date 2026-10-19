@@ -40,6 +40,13 @@ control_version are split off before the step function (same traced signature) a
 ``train_<task>/{g_mixed_batch, control_version_lag, control_rot_deg, control_trans_mm,
 control_g_angle_deg}`` (window means). Flips still act as F T F on the emitted T and target.
 
+Mixed tasks (design 5.2, milestone 5): `TaskSchedule` draws the task of each step from (seed,
+step) only, every task has its own tf.function (traced once), and all of them share ONE
+optimizer. That optimizer is built on ALL trainable variables in `__init__`, so the affine-only
+scale/shear head has its Adam slots before the first affine step even when the run starts with
+rigid steps (whose None gradients for that head are dropped at trace time); a later first affine
+step creates no variable and retraces nothing.
+
 `rebuild_steps()` re-creates every step function. Call it after changing anything read at trace
 time, in particular `model.set_bn_stats_frozen(...)` (an already traced step keeps updating
 the statistics otherwise).
@@ -68,6 +75,22 @@ from runtime.args import parse_task_ratio  # noqa: F401  (re-exported)
 from runtime.schedulers import ScheduleConfig, lr_at
 
 POSTPROCESS_SEED_OFFSET = {"rigid": 101, "affine": 202}
+# Combined best-checkpoint metric (milestone 5): mean of val_<task>/pair_rms_mm over the trained
+# tasks; the default --best-metric when more than one task is trained.
+MEAN_PAIR_METRIC = "val/mean_pair_rms_mm"
+MEAN_PAIR_ALIASES = ("mean_pair_rms_mm", MEAN_PAIR_METRIC)
+
+
+def resolve_best_metric(best_metric, tasks):
+    """Validation key of the 'best' checkpoint. None: `MEAN_PAIR_METRIC` if more than one task is
+    trained, else ``val_<task>/pair_rms_mm``; 'mean_pair_rms_mm' is an alias of
+    `MEAN_PAIR_METRIC`; any other value is used as given."""
+    tasks = list(tasks)
+    if best_metric is None:
+        return MEAN_PAIR_METRIC if len(tasks) > 1 else "val_%s/pair_rms_mm" % tasks[0]
+    if best_metric in MEAN_PAIR_ALIASES:
+        return MEAN_PAIR_METRIC
+    return best_metric
 DIAG_KEYS = ("diag_feat_spread", "diag_feat_rel_spread", "diag_dead_frac", "diag_rot10_norm",
              "diag_head_spread")
 
@@ -147,7 +170,11 @@ class TrainConfig:
     seed: int = 0
     schedule: ScheduleConfig = dataclasses.field(default_factory=ScheduleConfig)
     nonfinite_patience: int = 20
-    best_metric: str = "val_rigid/pair_rms_mm"
+    # None: val/mean_pair_rms_mm with more than one task, else val_<task>/pair_rms_mm
+    # (`resolve_best_metric`; 'mean_pair_rms_mm' is accepted as an alias).
+    best_metric: Optional[str] = None
+    # Overfit mode stops when the overfit_window-step mean center RMS of EVERY trained task
+    # (its own last overfit_window finite steps) is below overfit_threshold_mm.
     overfit: bool = False
     overfit_threshold_mm: float = 1.0
     overfit_window: int = 10
@@ -212,6 +239,7 @@ class Trainer:
         missing = [t for t in self.schedule.tasks if t not in self.sources]
         if missing:
             raise ValueError("no data source for task(s) %s" % missing)
+        self.best_metric = resolve_best_metric(cfg.best_metric, self.schedule.tasks)
         self.step = tf.Variable(0, dtype=tf.int64, trainable=False, name="global_step")
         self.postprocess = {t: LinearPostprocess(t, self.level, flip_prob=cfg.flip_prob, p_pair=cfg.p_pair,
                                                  seed=cfg.seed + POSTPROCESS_SEED_OFFSET[t],
@@ -313,12 +341,16 @@ class Trainer:
         batch_tuple = tuple(batch_tuple)
         return batch_tuple[:k], batch_tuple[k:]
 
-    def control_metrics(self, task, extras, values):
+    def control_metrics(self, task, extras, values, step=None):
         """Per-step control logs: g_mixed_batch (1 if the batch's G_dali differ across samples),
-        the current control values and the version lag (writer version - batch version)."""
+        the current control values, the G warm-up maximum angle control_g_rot_max_deg (with a
+        sampler and `step`) and the version lag (writer version - batch version)."""
         out = {"control_rot_deg": float(values["rotation_deg"]),
                "control_trans_mm": float(values["translation_mm"]),
                "control_g_angle_deg": float(values["g_angle_deg"])}
+        sampler = getattr(self.controls.get(task), "sampler", None)
+        if sampler is not None and step is not None:
+            out["control_g_rot_max_deg"] = float(sampler.rot_max_at(step))
         if len(extras) >= 2:
             g = np.asarray(extras[0], np.float64)
             ver = np.asarray(extras[1], np.float64).reshape(-1)
@@ -383,7 +415,8 @@ class Trainer:
         for g, grp in enumerate(groups):
             A = fn(tf.constant(grp["images"])).numpy().astype(np.float64)
             mats.append(A)
-            errs.append(M.group_errors(A, grp["A_star"], grp["T_target"], self.S_np, seed=g))
+            errs.append(M.group_errors(A, grp["A_star"], grp["T_target"], self.S_np, seed=g,
+                                       affine=task == "affine" and not train_mode))
         return M.concat_errors(errs), mats
 
     def _write_val_png(self, task, grp, A, metrics, step):
@@ -417,8 +450,12 @@ class Trainer:
         """Metrics on the fixed validation sets, pooled over groups.
 
         ``val_<task>/...``: eval mode (moving BN statistics, dropout off), the source of truth
-        (best checkpoint). ``val_<task>_trainmode/{center,pair}_rms_mm``: the same groups with
-        training-mode BN (no statistics update, dropout off), to expose any train/eval gap.
+        (best checkpoint). Affine sets also report center_/pair_{scale_pct, shear_pct,
+        qr_rot_deg} (`runtime.metrics.affine_matrix_errors`).
+        ``val_<task>_trainmode/{center,pair}_rms_mm``: the same groups with training-mode BN (no
+        statistics update, dropout off), to expose any train/eval gap.
+        ``val/mean_pair_rms_mm``: mean of ``val_<task>/pair_rms_mm`` over the trained tasks
+        (sets named exactly like the task, i.e. without G), when every one was validated.
         """
         out = {}
         for name, vs in self.val_sets.items():
@@ -440,6 +477,9 @@ class Trainer:
             g = int(self.cfg.val_png_group)
             if self.cfg.val_png_dir and 0 <= g < len(groups):
                 self._write_val_png(name, groups[g], mats[g], out, int(self.step.numpy()))
+        mean_pair = M.mean_pair_rms(out, self.schedule.tasks)
+        if mean_pair is not None:
+            out[MEAN_PAIR_METRIC] = mean_pair
         return out
 
     # ------------------------------------------------------------------ loop
@@ -451,8 +491,8 @@ class Trainer:
         val = self.validate()
         self.val_history.append(dict(val, step=step))
         self._log(step, val)
-        if self.checkpoint is not None and self.cfg.best_metric in val:
-            self.checkpoint.maybe_save_best(val[self.cfg.best_metric])
+        if self.checkpoint is not None and self.best_metric in val:
+            self.checkpoint.maybe_save_best(val[self.best_metric])
         return val
 
     def _update_collapse(self, step, task, res):
@@ -476,12 +516,28 @@ class Trainer:
         if self.logger is not None:
             self.logger.log_event(step, info)
 
-    def _window_center_rms(self):
+    def window_center_rms_by_task(self):
+        """{task: mean center RMS of its last overfit_window finite steps} for the trained tasks
+        (None for a task with fewer steps)."""
         w = int(self.cfg.overfit_window)
-        vals = [h["center_rms_mm"] for h in self.history[-w:] if h["finite"]]
-        if len(vals) < w:
+        out = {}
+        for t in self.schedule.tasks:
+            vals = []
+            for h in reversed(self.history):
+                if h["task"] == t and h["finite"]:
+                    vals.append(h["center_rms_mm"])
+                    if len(vals) == w:
+                        break
+            out[t] = float(np.mean(vals)) if len(vals) == w else None
+        return out
+
+    def _window_center_rms(self):
+        """Worst task's window mean (`window_center_rms_by_task`), None until every task has a
+        full window. Equals the plain window mean with a single task."""
+        vals = list(self.window_center_rms_by_task().values())
+        if any(v is None for v in vals):
             return None
-        return float(np.mean(vals))
+        return max(vals)
 
     def fit(self, num_steps=None):
         """Train until step == cfg.steps (num_steps=None) or for `num_steps` more steps."""
@@ -513,7 +569,7 @@ class Trainer:
                    "compute_ms": 1e3 * (t2 - t1)}
             rec.update(res)
             if task in ctl_values:
-                cm = self.control_metrics(task, extras, ctl_values[task])
+                cm = self.control_metrics(task, extras, ctl_values[task], step=s)
                 rec.update(cm)
                 acc.update({"train_%s/%s" % (task, k): v for k, v in cm.items()})
             self.history.append(rec)
@@ -577,4 +633,5 @@ class Trainer:
         return {"start_step": start, "end_step": final, "nonfinite_total": self.nonfinite_total,
                 "collapse_warnings": self.collapse_warnings,
                 "trace_counts": dict(self.trace_counts), "reached": self.reached,
-                "best_window_center_rms_mm": best_window, "last_val": last_val}
+                "best_window_center_rms_mm": best_window,
+                "window_center_rms_by_task": self.window_center_rms_by_task(), "last_val": last_val}

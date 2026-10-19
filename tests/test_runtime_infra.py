@@ -80,6 +80,27 @@ class TestArgs(unittest.TestCase):
                 with self.assertRaises(SystemExit):
                     A.parse_args(["--data", "x"] + bad)
 
+    def test_best_metric_defaults(self):
+        # Milestone 5: combined val/mean_pair_rms_mm by default with more than one task.
+        from runtime.run import MEAN_PAIR_METRIC, resolve_best_metric
+        self.assertEqual(A.MEAN_PAIR_METRIC, MEAN_PAIR_METRIC)
+        cases = [([], "val_rigid/pair_rms_mm"),
+                 (["--task-ratio", "affine:1"], "val_affine/pair_rms_mm"),
+                 (["--task-ratio", "rigid:1,affine:1"], MEAN_PAIR_METRIC),
+                 (["--best-metric", "mean_pair_rms_mm"], MEAN_PAIR_METRIC),
+                 (["--task-ratio", "rigid:1,affine:1", "--best-metric", "val_rigid/pair_rms_mm"],
+                  "val_rigid/pair_rms_mm"),
+                 (["--task-ratio", "affine:1", "--best-metric", "val_rigid/center_rms_mm"],
+                  "val_affine/center_rms_mm")]
+        for extra, want in cases:
+            a = A.parse_args(["--data", "x"] + extra)
+            self.assertEqual(a.best_metric, want, extra)
+            self.assertEqual(A.train_config_from_args(a).best_metric, want)
+        self.assertEqual(resolve_best_metric(None, ["rigid"]), "val_rigid/pair_rms_mm")
+        self.assertEqual(resolve_best_metric(None, ["rigid", "affine"]), MEAN_PAIR_METRIC)
+        self.assertEqual(resolve_best_metric("mean_pair_rms_mm", ["rigid"]), MEAN_PAIR_METRIC)
+        self.assertEqual(resolve_best_metric("val_x/y", ["rigid", "affine"]), "val_x/y")
+
     def test_ratio_and_required_data(self):
         self.assertEqual(dict(A.parse_task_ratio("rigid:3, affine:1")), {"rigid": 3.0, "affine": 1.0})
         with self.assertRaises(NotImplementedError) as cm:
@@ -180,6 +201,52 @@ class TestCheckpoint(TempDirCase):
         model2, opt2, step2, gen2, ck2 = self.make()
         ck2.restore_last()
         self.assertEqual(float(ck2.best_metric.numpy()), 4.0)
+
+    def test_load_model_weights_warm_start(self):
+        # --init-weights: model variables only, from a saved tiny run; config mismatch raises.
+        root = os.path.join(self.tmp, "src")
+        paths = make_run_dir(self.tmp, "src")
+        model = GroupRegLevelModel(4, narrow_config(dropout=0.0)).build_model(3)
+        opt = O.make_optimizer("adam", lr=1e-3)
+        O.build_optimizer(opt, model.trainable_variables)
+        step = tf.Variable(0, dtype=tf.int64)
+        ck = C.RunCheckpoint(paths["ckpt_last"], paths["ckpt_best"], model, opt, step)
+        self.train_two_steps(model, opt, step)
+        ck.save_last()
+        C.write_config(paths["config"], narrow_config(dropout=0.0), {})
+        ref = [v.numpy() for v in model.variables]
+        self.assertTrue(any(np.any(v != 0) for v in [w.numpy() for w in model.linear_decoder.rigid_head.weights]))
+        for src in (paths["ckpt_last"], ck.latest_last):              # directory and prefix forms
+            m2 = GroupRegLevelModel(4, narrow_config(dropout=0.0, seed=99)).build_model(3)
+            opt2 = O.make_optimizer("adam", lr=1e-3)
+            O.build_optimizer(opt2, m2.trainable_variables)
+            step2 = tf.Variable(0, dtype=tf.int64)
+            prefix, cfg = C.load_model_weights(m2, narrow_config(dropout=0.0, seed=99), src)
+            self.assertEqual(prefix, ck.latest_last)
+            self.assertEqual(os.path.abspath(cfg), os.path.abspath(os.path.join(root, "config.json")))
+            for a, b in zip(ref, m2.variables):
+                self.assertTrue(np.array_equal(a, b.numpy()), b.name)
+            self.assertEqual(int(opt2.iterations.numpy()), 0)        # optimizer not loaded
+            self.assertTrue(all(not np.any(v.numpy()) for v in opt2.variables()))
+            self.assertEqual(int(step2.numpy()), 0)
+        m3 = GroupRegLevelModel(4, narrow_config(dropout=0.0, translation_scale=10.0)).build_model(3)
+        with self.assertRaises(ValueError) as cm:
+            C.load_model_weights(m3, narrow_config(dropout=0.0, translation_scale=10.0), paths["ckpt_last"])
+        self.assertIn("translation_scale", str(cm.exception))
+        with self.assertRaises(ValueError):
+            C.load_model_weights(m3, narrow_config(dropout=0.0), os.path.join(self.tmp, "missing"))
+        with self.assertRaises(ValueError):
+            C.load_model_weights(m3, narrow_config(dropout=0.0), paths["ckpt_best"])   # empty dir
+
+    def test_peek_last_step(self):
+        # Review-curriculum issue 5: main.py reads the resumed step before building the pipelines.
+        self.assertEqual(C.peek_last_step(os.path.join(self.tmp, "nothing")), 0)
+        model, opt, step, gen, ck = self.make()
+        self.assertEqual(C.peek_last_step(os.path.join(self.tmp, "last")), 0)
+        for s in (7, 12):
+            step.assign(s)
+            ck.save_last()
+            self.assertEqual(C.peek_last_step(os.path.join(self.tmp, "last")), s)
 
     def test_config_json_and_compatibility(self):
         path = os.path.join(self.tmp, "config.json")

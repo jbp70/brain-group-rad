@@ -10,7 +10,9 @@ both off no control file exists and the pipelines use their constant ranges.
 * `GlobalTransformSampler`: G = rotation by U(-rot_max, rot_max) degrees about an axis uniform on
   the sphere, plus a translation U(-trans_max, trans_max) mm per axis. One G per group (all
   images of a batch), resampled every ``resample_every`` steps. Deterministic per
-  (seed, step // resample_every).
+  (seed, step // resample_every). Optional warm-up (milestone 5): the ranges are 0 before
+  ``start_step``, then ramp linearly to the maxima over ``ramp_steps`` steps (on real data, G
+  from step 0 collapsed the rigid run to the identity fixed point).
 * `ControlWriter`: atomic writes (temp file in the same folder + os.replace), a version counter,
   no write when the values did not change.
 * `TaskControl`: the control values of one task at a step (curriculum or the end ranges, plus G
@@ -106,7 +108,8 @@ class GlobalTransformSampler:
       seed: base seed (the trainer uses a different seed per task).
     """
 
-    def __init__(self, rot_max_deg, trans_max_mm, resample_every=5, seed=0):
+    def __init__(self, rot_max_deg, trans_max_mm, resample_every=5, seed=0, start_step=0,
+                 ramp_steps=0):
         self.rot_max_deg = float(rot_max_deg)
         self.trans_max_mm = float(trans_max_mm)
         for name, v in (("rot_max_deg", self.rot_max_deg), ("trans_max_mm", self.trans_max_mm)):
@@ -116,14 +119,42 @@ class GlobalTransformSampler:
         if self.resample_every < 1:
             raise ValueError("resample_every must be >= 1, got %d" % self.resample_every)
         self.seed = int(seed)
+        self.start_step = int(start_step)
+        self.ramp_steps = int(ramp_steps)
+        if self.start_step < 0 or self.ramp_steps < 0:
+            raise ValueError("start_step and ramp_steps must be >= 0, got %d, %d"
+                             % (self.start_step, self.ramp_steps))
 
     def block(self, step):
         return int(step) // self.resample_every
 
+    def fraction(self, step):
+        """G warm-up factor of the ranges: 0 before start_step, then a linear ramp to 1 over
+        ramp_steps steps (immediately 1 with ramp_steps = 0), then 1."""
+        s = int(step)
+        if s < self.start_step:
+            return 0.0
+        if self.ramp_steps == 0:
+            return 1.0
+        return min(float(s - self.start_step) / self.ramp_steps, 1.0)
+
+    def rot_max_at(self, step):
+        return self.fraction(step) * self.rot_max_deg
+
+    def trans_max_at(self, step):
+        return self.fraction(step) * self.trans_max_mm
+
     def params(self, step):
+        """G at `step`: the block's draw (np.random.default_rng([seed, step // K]), full ranges)
+        with the angle and translation scaled by `fraction(step)`, so U(-f max, f max). With the
+        defaults (start 0, no ramp) f = 1 and the draws are those of the plain sampler."""
         b = self.block(step)
         out = sample_global_params(np.random.default_rng([self.seed, b]), self.rot_max_deg,
                                    self.trans_max_mm)
+        f = self.fraction(step)
+        if f != 1.0:
+            out["angle_deg"] = float(out["angle_deg"] * f)
+            out["translation_mm"] = out["translation_mm"] * f
         out["block"] = b
         return out
 
