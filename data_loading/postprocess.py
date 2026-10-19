@@ -13,6 +13,15 @@ Matrix flow for one linear batch (group of N images):
 4. Targets: A_i* = barycentric_targets(T_target) = mu*^-1 T_i^-1 with
    mu* = barycenter{T_i^-1}; T_target = Rt (rigid: excludes the nuisance S_i) or T (affine).
    Pair targets P_ij* = T_target_j T_target_i^-1 for sampled ordered pairs (i, j), i != j.
+5. Global transform G (design 3.2 v3.5, only with a control file): DALI already emits
+   T_dali = G Rt_i S_i and Rt_dali = G Rt_i, so with the steps above
+       T_target = F (G Rt_i) F (rigid) or F (G Rt_i S_i) F (affine),
+       A_i* = mu*^-1 T_target_i^-1,  mu* = barycenter{T_target_i^-1},  P_ij* = T_target_j T_target_i^-1.
+   The rigid pair targets become G Rt_j Rt_i^-1 G^-1 (the relative pose, conjugated by G), and
+   the barycenter moves with G (mu* = mu*(G = I) G^-1 for a right-equivariant barycenter), so
+   the central space is no longer close to the template pose. Nothing in this module changes
+   for G: the formulas take whatever DALI emitted. The trainer passes only the first 3 (rigid)
+   / 2 (affine) DALI outputs here; G_dali and control_version are for logging.
 
 Everything is batched over the group axis and works inside tf.function. Randomness comes from
 a seeded `tf.random.Generator` (deterministic for a given seed and call sequence).

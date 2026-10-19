@@ -99,6 +99,60 @@ def linear_ranges(task, level, rotation_deg=None, translation_mm=None, log_scale
                         **vals)
 
 
+# ---------------------------------------------------------------------------- control file
+# Curriculum + global transform G (design 3.2, v3.5). One control file per pipeline,
+# ``<run_dir>/control/<task>.npy``: a float32 vector of CONTROL_SIZE values, written atomically by
+# `runtime.curriculum.ControlWriter` and re-read by the DALI pipeline for every batch
+# (`dali_loader.read_control`). Layout (the single definition; indices below):
+#   0 rot_deg      per-image rotation half-width (degrees)          U(-1, 1) * rot_deg
+#   1 trans_mm     per-image translation half-width (mm, per axis)  U(-1, 1) * trans_mm
+#   2 log_scale    per-image log-scale half-width (per axis)        U(-1, 1) * log_scale
+#   3 shear        per-image shear half-width (k_xy, k_xz, k_yz)    U(-1, 1) * shear
+#   4-6 g_axis     G rotation axis, TF axis order (x, y, z), unit norm
+#   7 g_angle_deg  G rotation angle (degrees); 0 = no rotation
+#   8-10 g_t_mm    G translation (mm, TF axis order x, y, z); 0 = no translation
+#   11 version     monotonically increasing write counter (emitted per sample by the pipeline)
+# The same G applies to every sample of a batch (= group). G is about the image center, like the
+# per-image transforms, and is composed last: T_i = G Rt_i S_i.
+CONTROL_FIELDS = ("rot_deg", "trans_mm", "log_scale", "shear", "g_axis_x", "g_axis_y", "g_axis_z",
+                  "g_angle_deg", "g_tx_mm", "g_ty_mm", "g_tz_mm", "version")
+CONTROL_SIZE = len(CONTROL_FIELDS)
+CONTROL_INDEX = {k: i for i, k in enumerate(CONTROL_FIELDS)}
+CONTROL_RANGE_KEYS = ("rotation_deg", "translation_mm", "log_scale", "shear")
+DEFAULT_G_AXIS = (0.0, 0.0, 1.0)
+
+
+def control_vector(rotation_deg, translation_mm, log_scale, shear, g_axis=DEFAULT_G_AXIS,
+                   g_angle_deg=0.0, g_translation_mm=(0.0, 0.0, 0.0), version=0):
+    """Control values -> float32 vector [CONTROL_SIZE] (layout above). ``g_axis`` is normalized;
+    the ranges must be finite and >= 0 and the G values finite."""
+    ranges = [float(v) for v in (rotation_deg, translation_mm, log_scale, shear)]
+    for k, v in zip(CONTROL_RANGE_KEYS, ranges):
+        if not math.isfinite(v) or v < 0:
+            raise ValueError("control {} must be finite and >= 0, got {!r}".format(k, v))
+    axis = np.asarray(g_axis, np.float64).reshape(3)
+    norm = float(np.linalg.norm(axis))
+    if not (math.isfinite(norm) and norm > 0):
+        raise ValueError("g_axis must be a finite non-zero vector, got {!r}".format(g_axis))
+    gt = np.asarray(g_translation_mm, np.float64).reshape(3)
+    rest = [float(g_angle_deg), float(version)] + gt.tolist()
+    if not all(math.isfinite(v) for v in rest):
+        raise ValueError("G angle, translation and version must be finite")
+    vec = ranges + (axis / norm).tolist() + [float(g_angle_deg)] + gt.tolist() + [float(version)]
+    return np.asarray(vec, np.float32)
+
+
+def parse_control(vec):
+    """Inverse of `control_vector`: float32 [CONTROL_SIZE] -> dict(rotation_deg, translation_mm,
+    log_scale, shear, g_axis (3,), g_angle_deg, g_translation_mm (3,), version)."""
+    v = np.asarray(vec, np.float64).reshape(-1)
+    if v.size != CONTROL_SIZE:
+        raise ValueError("control vector must have %d values, got %d" % (CONTROL_SIZE, v.size))
+    return {"rotation_deg": float(v[0]), "translation_mm": float(v[1]), "log_scale": float(v[2]),
+            "shear": float(v[3]), "g_axis": v[4:7].copy(), "g_angle_deg": float(v[7]),
+            "g_translation_mm": v[8:11].copy(), "version": int(round(v[11]))}
+
+
 @dataclass
 class IntensityAugConfig:
     """Per-image intensity augmentation (ported from the rigid project's DALI pipeline).
@@ -191,15 +245,30 @@ def _rotation_np(angle_deg, axis):
     return m
 
 
+def control_global_dali(g_axis_xyz, g_t_mm_xyz, level):
+    """G axis and translation of the control file (TF order, mm) -> DALI order (axis, voxels).
+
+    Mirrors `dali_loader.control_global_params`: the axis and the translation are reversed to
+    DALI axis order and the translation is divided by the level's spacing (as the per-image
+    translation, `mm_to_voxels`)."""
+    s = LEVEL_SPACING[check_level(level)]
+    axis = np.asarray(g_axis_xyz, np.float64).reshape(3)[::-1]
+    t = np.asarray(g_t_mm_xyz, np.float64).reshape(3)[::-1] / s
+    return axis, t
+
+
 def linear_matrices_np(angle_deg, axis_dali, t_vox_dali, log_scale_xyz, shear_xyz, shape_xyz,
-                       pixel_center=DALI_PIXEL_CENTER):
-    """Numpy mirror of the DALI graph in `dali_loader.build_linear_matrices` (float64, 4x4).
+                       pixel_center=DALI_PIXEL_CENTER, g_angle_deg=0.0, g_axis_dali=DEFAULT_G_AXIS,
+                       g_t_vox_dali=(0.0, 0.0, 0.0)):
+    """Numpy mirror of the DALI graph in `dali_loader.build_linear_matrices` and
+    `dali_loader.build_global_linear_matrices` (float64, 4x4).
 
     Composition (centered coordinates, column vectors, rightmost applied first):
-        T  = C+ . Tr . R . K . C-        (rendered transform, template -> image i)
-        Rt = C+ . Tr . R . C-            (rigid part; T = Rt . S with S = C+ K C-)
-        T^-1 = C+ . K^-1 . R^-1 . Tr^-1 . C-   (pull matrix passed to warp_affine)
-    with C+- translations by +-dali_center. Returns dict(T, T_inv, Rt), DALI order.
+        T  = G . C+ . Tr . R . K . C-    (rendered transform, template -> image i)
+        Rt = G . C+ . Tr . R . C-        (rigid target part; T = Rt . S with S = C+ K C-)
+        T^-1 = C+ . K^-1 . R^-1 . Tr^-1 . C- . G^-1   (pull matrix passed to warp_affine)
+        G  = C+ . Tg . Rg . C-           (shared global transform; identity by default)
+    with C+- translations by +-dali_center. Returns dict(T, T_inv, Rt, G), DALI order.
     """
     c = dali_center(shape_xyz, pixel_center)
     cp, cm = _translation_np(c), _translation_np(-np.asarray(c))
@@ -211,6 +280,10 @@ def linear_matrices_np(angle_deg, axis_dali, t_vox_dali, log_scale_xyz, shear_xy
     tr = _translation_np(t_vox_dali)
     tr_inv = _translation_np(-np.asarray(t_vox_dali, np.float64))
     r_inv = _rotation_np(-angle_deg, axis_dali)
-    return {"T": cp @ tr @ r @ k @ cm,
-            "T_inv": cp @ k_inv @ r_inv @ tr_inv @ cm,
-            "Rt": cp @ tr @ r @ cm}
+    g = cp @ _translation_np(g_t_vox_dali) @ _rotation_np(g_angle_deg, g_axis_dali) @ cm
+    g_inv = (cp @ _rotation_np(-g_angle_deg, g_axis_dali)
+             @ _translation_np(-np.asarray(g_t_vox_dali, np.float64)) @ cm)
+    return {"T": g @ cp @ tr @ r @ k @ cm,
+            "T_inv": cp @ k_inv @ r_inv @ tr_inv @ cm @ g_inv,
+            "Rt": g @ cp @ tr @ r @ cm,
+            "G": g}

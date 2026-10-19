@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Run tests/run_tests_wsl.sh and record the full output in this folder's test-log.txt.
+# Run tests/run_tests_wsl.sh and record the full output in this folder's test-log.txt (or the
+# file name given as the first argument, e.g. test-log-curriculum.txt).
 REPO=/mnt/d/Research/Brain_Registration_Projects/brain-group-rad
-LOG="$REPO/.agents/tasks/milestone-4/test-log.txt"
+LOG="$REPO/.agents/tasks/milestone-4/${1:-test-log.txt}"
 cd "$REPO"
 {
   echo "# Milestone 4 test log. Command: wsl -d Ubuntu bash .agents/tasks/milestone-4/record_tests.sh"

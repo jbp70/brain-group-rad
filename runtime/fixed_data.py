@@ -159,6 +159,10 @@ def load_level_images(export_root, level, split, n=None, seed=0, contrast=None, 
 # ---------------------------------------------------------------------------- validation
 # Fixed per-task seed component of the validation sets (not the task's position in the ratio).
 VAL_TASK_SEED = {"rigid": 101, "affine": 202}
+# Extra seed component of the per-group global transform of the val_<task>_g sets.
+VAL_G_SEED = 303
+# Name suffix of the validation sets with a global transform: val_<task>_g.
+VAL_G_SUFFIX = "_g"
 
 
 class ValidationSet:
@@ -181,12 +185,18 @@ class ValidationSet:
 
     @classmethod
     def build(cls, images, task, level, group_size, n_groups=None, ranges=None, seed=1234,
-              target_iters=10):
+              target_iters=10, global_transform=None):
         """Groups g = images[perm[(g Nv + k) % n_val]], k < Nv; default n_groups = ceil(n_val / Nv).
 
         Seeding depends only on (seed, task, g): the permutation uses (seed, task id) and the
         transforms of group g use (seed, task id, g), so a task's set does not change with the
         order (or presence) of other tasks in the task ratio.
+
+        ``global_transform``: optional dict(rotation_deg, translation_mm) (design 3.2 v3.5). Each
+        group then also gets one fixed G (`runtime.curriculum.sample_global_params`, seeded by
+        (seed, task id, g, VAL_G_SEED)) composed last, T_i <- G T_i and T_target_i <- G T_target_i,
+        with the same groups and per-image transforms as without it. ``G`` and ``G_params`` are
+        stored in each group.
         """
         level = P.check_level(level)
         if task not in VAL_TASK_SEED:
@@ -205,9 +215,18 @@ class ValidationSet:
             idx = np.asarray([perm[(g * nv + k) % n_val] for k in range(nv)])
             rng = np.random.default_rng([int(seed), tid, g])
             T, tgt = random_linear_transforms(rng, nv, task, ranges, nuisance=True)
+            extra = {}
+            if global_transform is not None:
+                from runtime.curriculum import global_matrix_mm, sample_global_params
+                gp = sample_global_params(np.random.default_rng([int(seed), tid, g, VAL_G_SEED]),
+                                          float(global_transform["rotation_deg"]),
+                                          float(global_transform["translation_mm"]))
+                G = global_matrix_mm(gp["axis"], gp["angle_deg"], gp["translation_mm"])
+                T, tgt = G @ T, G @ tgt
+                extra = {"G": G, "G_params": gp}
             rendered = render_group(images[idx], T, P.LEVEL_SPACING[level])
-            groups.append({"images": rendered, "T": T, "T_target": tgt,
-                           "A_star": cls._targets(tgt, target_iters), "index": idx})
+            groups.append(dict({"images": rendered, "T": T, "T_target": tgt,
+                                "A_star": cls._targets(tgt, target_iters), "index": idx}, **extra))
         return cls(task, level, groups)
 
     @classmethod
@@ -224,13 +243,22 @@ class ValidationSet:
 
 
 def build_validation_sets(images, tasks, level, group_size, n_groups=None, ranges=None, seed=1234,
-                          target_iters=10):
+                          target_iters=10, global_transform=None):
     """{task: ValidationSet.build(...)} for each task, all with the same base ``seed``.
 
     ``ranges``: {task: ranges dict} or None. Each set depends only on (seed, task, group index),
     so e.g. the rigid set is the same for task ratios 'rigid:1' and 'affine:1,rigid:2'.
+    ``global_transform``: optional dict(rotation_deg, translation_mm); adds a set
+    ``<task>_g`` per task (same groups and per-image transforms plus one fixed G per group).
     """
     ranges = ranges or {}
-    return {t: ValidationSet.build(images, t, level, group_size, n_groups, ranges.get(t), seed=seed,
-                                   target_iters=target_iters)
-            for t in tasks}
+    out = {}
+    for t in tasks:
+        out[t] = ValidationSet.build(images, t, level, group_size, n_groups, ranges.get(t), seed=seed,
+                                     target_iters=target_iters)
+    if global_transform is not None:
+        for t in tasks:
+            out[t + VAL_G_SUFFIX] = ValidationSet.build(
+                images, t, level, group_size, n_groups, ranges.get(t), seed=seed,
+                target_iters=target_iters, global_transform=global_transform)
+    return out

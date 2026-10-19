@@ -1,0 +1,12 @@
+{
+  "verdict": "APPROVED",
+  "findings": [
+    "Non-blocking: DALI graph unexercised. The control reader re-read, DataNode scalar arithmetic and G composition in DALI 1.18 have not run yet. Run run_verify_glacier.sh <gpu> 1800 verify h,i,j,k and run_overfit_glacier.sh <gpu> 1800 dryrun_ctl before any training run uses --curriculum or --global-transform.",
+    "Non-blocking (likely): G angle sign ambiguity. Reversing the TF axis to DALI order is a reflection, so the emitted G is probably R(axis, -angle) in TF space, and check i accepts both signs. After glacier reports which mirror sign matched, fix the sign in control_global_params if needed and make check i strict on the signed axis and angle.",
+    "Non-blocking (confirmed): check i's recompose sub-check (g_mm @ (g_inv @ tgt) @ (inv(tgt) @ t_mm) == t_mm) holds for any output. Drop it or replace it with an independent reconstruction.",
+    "Non-blocking (confirmed): check j computes barycenter_equivariance_max_abs but does not include it in task_ok. Add a tolerance so the barycenter shift (mu* -> mu* G^-1) is actually tested.",
+    "Non-blocking (confirmed): on resume, main writes values_at(0) before the checkpoint restore, so the first prefetched batch(es) use the curriculum start values. Write the resumed step's values at startup, or keep it documented.",
+    "Non-blocking (likely): with controls on, which file version a batch reads depends on prefetch timing, so same-seed runs are not bitwise reproducible. Keep control_version_lag logged and note in the design that bitwise reproducibility holds only with both features off."
+  ],
+  "reviewDoc": "d:\\Research\\Brain_Registration_Projects\\brain-group-rad\\.agents\\tasks\\milestone-4\\review-curriculum.md"
+}

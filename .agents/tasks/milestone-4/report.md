@@ -235,6 +235,62 @@ Tests: gradient norm scales by 1/scale while the logged terms stay equal; crafte
 
 5. **First-call cuDNN NaN on the GTX 1080 (local, unrelated to LayerNorm).** With cuDNN autotune on, the first full-width backward pass of a process returned 512 NaN entries (of 442,368) in the encoder l3 conv-kernel gradient. The gradient into l2 and every later call stayed finite. `diag_nan_grad.py` reproduced it with dense_norm batch and layer alike, with and without the 512 MB workspace cap. It did not occur on the CPU or with `TF_CUDNN_USE_AUTOTUNE=0`. It made `TestGradients` flaky, so the local runner now sets autotune off. In training, the NaN guard would skip such a step. Whether the cluster GPUs show it is unverified.
 
+## Curriculum and global transform (design v3.5)
+
+Both features are opt-in. With the defaults (`--curriculum false --global-transform false`), no control file is written, the pipelines keep their constant ranges and output tuples, and the train steps keep their traced signatures. Current commands therefore behave as before (tested: `TestControls.test_off_is_unchanged`, `TestDataModuleControl.test_off_by_default`).
+
+Flags (all saved in `config.json`):
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--curriculum` | false | Linear ramp of the per-image half-widths from start to end, then constant |
+| `--curriculum-ramp-steps` | 2000 | Ramp length in steps |
+| `--<task>-rotation-deg-start`, `--<task>-translation-mm-start` | 15, 5 | Start values; `--<task>-rotation-deg` etc. are the end values |
+| `--<task>-log-scale-start`, `--<task>-shear-start` | rigid: = end (nuisance not ramped); affine: log 1.03, 0.01 | |
+| `--global-transform` | false | One shared rigid G per group, T_i = G Rt_i S_i; adds `val_<task>_g` |
+| `--global-rot-max-deg` | 45 | G angle U(−max, max) about an axis uniform on the sphere |
+| `--global-trans-max-mm` | 10 | G translation U(−max, max) mm per axis |
+| `--global-resample-every` | 5 | New G every K steps, deterministic per (seed, step // K) |
+
+Start ≤ end is checked only with `--curriculum`, so existing commands with small end ranges still parse. Both features are rejected with `--overfit-one-group`, which has no DALI pipeline.
+
+Implementation:
+
+- **Control file:** `<run_dir>/control/<task>.npy`, float32[12]. The layout lives in `data_loading/params.py` (`CONTROL_FIELDS`, `control_vector`, `parse_control`).
+  - `runtime/curriculum.py`: `LinearCurriculum`, `GlobalTransformSampler`, `ControlWriter` (temp file + `os.replace`, version counter, no write when unchanged) and `TaskControl`.
+  - `LinearDataModule(control_dir=..., control_init=...)` writes the step-0 file (version 1) before the pipelines start.
+- **DALI** (`dali_loader.LinearPipeline(control_file=...)`):
+  - `read_control` is a second `fn.readers.numpy`, with the reference scale-reader settings (single file, unsharded, no shuffle, `dont_use_mmap=True`, `read_ahead=False`, `pad_last_batch=True`).
+  - `control_linear_params` draws the per-image values as U(−1, 1) × control value, with mm converted to voxels by 1/spacing. `control_global_params` reverses the TF-order axis and translation to DALI order.
+  - `build_global_linear_matrices` composes G last in one matrix, so there is still a single `warp_affine` interpolation.
+  - Extra outputs: G_dali `[N,3,4]` and control_version `[N]`. With no control file, the old graph and outputs are unchanged.
+  - Numpy mirror: `params.linear_matrices_np(..., g_*)`.
+- **Targets:** DALI emits Rt_dali = G Rt_i and T_dali = G Rt_i S_i, so `LinearPostprocess` needs no change. Its docstring documents the formulas.
+  - T_target = F (G Rt_i) F for rigid, and F T_i F for affine.
+  - A*_i = μ*⁻¹ T_target_i⁻¹, with μ* = μ*(G = I) G⁻¹. The unit test checks this against an independent scipy reference.
+- **Trainer** (`Trainer(controls=...)`): at the start of each step, before `next(source)`, it writes every task's control values for that step. It splits off G_dali and control_version before the traced step. It logs `train_<task>/{g_mixed_batch, control_version_lag, control_rot_deg, control_trans_mm, control_g_angle_deg}` as window means.
+  - The prefix is `train_<task>/` rather than the brief's `train/<task>/`, to match the existing per-task train metrics.
+  - Flips are unchanged (F T F on the emitted T and target).
+  - Resume: the values are pure functions of the step. Only the first 1-2 prefetched batches after a resume can come from the step-0 file that the data module writes at start-up. Their emitted matrices are still the truth.
+- **Validation:** `val_<task>` is unchanged. With `--global-transform`, `build_validation_sets(..., global_transform=...)` adds `val_<task>_g`: the same groups and per-image transforms, plus one fixed G per group, seeded by (val_seed, task, group, 303), from the training range and rendered TF-side.
+  - `Trainer.validate` names metrics and PNGs by the set name (`val_rigid_g/...`, `rigid_g_step*.png`).
+  - The best checkpoint stays on `--best-metric` (default `val_rigid/pair_rms_mm`).
+
+GPU verification (new checks h-k in `tests/gpu/verify_dali_pipeline.py`; a-g unchanged; the default `--checks` now runs a-k). Glacier command, which writes only under `GroupwiseReg/scratch/m2`:
+
+```bash
+bash /autofs/space/crater_001/users/jn85/BrainRegProjects/GroupwiseReg/brain-group-rad/tests/gpu/run_verify_glacier.sh <gpu> 1800 verify h,i,j,k
+# end-to-end DALIDataset + trainer with both features on (2 steps + 1 validation; scratch/m4):
+bash /autofs/space/crater_001/users/jn85/BrainRegProjects/GroupwiseReg/brain-group-rad/tests/gpu/run_overfit_glacier.sh <gpu> 1800 dryrun_ctl
+```
+
+- (h) Rewrite the control file from version 1 (rot 5°) to version 2 (rot 40°). The emitted version must change within 3 batches, and the max sampled rotation must follow it. Reports the lag in batches.
+- (i) G_dali must be identical across the batch and match the written angle, axis and translation (and the numpy mirror, up to DALI's angle sign). T_i must decompose as G Rt_i S_i, with Rt_i rigid within 20° / 5 mm and S_i the nuisance. For affine, G⁻¹ T_i must lie within the ranges.
+- (j) Rigid and affine with G: the targets must be central and pair-consistent (< 1e-3 mm). The DALI render must equal the TF render of the emitted T_i, and the round-trip NCC gap must stay within the check-(b) tolerances.
+- (k) With the curriculum start values written, the sampled rotation, translation, log-scale and shear magnitudes must stay within them over 32 samples per task, and must not collapse to 0.
+
+Not verified locally (no DALI in WSL): the DALI graph itself, i.e. the control reader's re-read behaviour, the scalar DataNode arithmetic and G composition in DALI 1.18, and the end-to-end DALI dry run with the flags on. The DALI-guarded unit test `test_pipeline_with_control_file` and checks h-k cover these on glacier. Local tests: see `test-log-curriculum.txt`.
+
 ## Commands for the orchestrator / Jay
 
 1. Glacier (pick a free GPU with `nvidia-smi` first, then `git pull` in the clone). These write only under `.../GroupwiseReg/scratch/m4`:

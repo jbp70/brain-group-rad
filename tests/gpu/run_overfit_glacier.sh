@@ -4,9 +4,11 @@
 #            transforms, TF-side warp; must reach a 10-step mean centered RMS < 1 mm)
 #   dryrun   main.py --dry-run with the real DALI pipeline (N = 8): builds the DALI datasets,
 #            the validation set (1 group), runs 2 steps + 1 validation, writes a checkpoint
+#   dryrun_ctl  the same dry run with rigid:1,affine:1, --curriculum true --global-transform true
+#            (control files under results/<run>/control, val_<task>_g sets)
 #
 # Usage (on glacier, after `git pull` in the clone; pick a free GPU with nvidia-smi first):
-#   bash /autofs/space/crater_001/users/jn85/BrainRegProjects/GroupwiseReg/brain-group-rad/tests/gpu/run_overfit_glacier.sh <gpu_index> [timeout_seconds] [overfit|dryrun]
+#   bash /autofs/space/crater_001/users/jn85/BrainRegProjects/GroupwiseReg/brain-group-rad/tests/gpu/run_overfit_glacier.sh <gpu_index> [timeout_seconds] [overfit|dryrun|dryrun_ctl]
 #
 # Writes only inside $PROJ/scratch/m4: results/<run>/ (config.json, logs, tb, ckpt,
 # overfit_summary.json), <mode>.log, the CUDA JIT cache, the Keras config folder and TMPDIR.
@@ -14,7 +16,7 @@
 # disabled, so the repo clone stays clean. Exit code: that of main.py (overfit: 1 = threshold
 # not reached; 124 = timeout).
 set -euo pipefail
-GPU="${1:?usage: run_overfit_glacier.sh <gpu_index> [timeout_seconds] [overfit|dryrun]}"
+GPU="${1:?usage: run_overfit_glacier.sh <gpu_index> [timeout_seconds] [overfit|dryrun|dryrun_ctl]}"
 TIMEOUT_S="${2:-3600}"
 MODE="${3:-overfit}"
 if ! [[ "$GPU" =~ ^[0-9]+$ ]]; then
@@ -25,8 +27,8 @@ if ! [[ "$TIMEOUT_S" =~ ^[0-9]+$ ]]; then
     echo "timeout_seconds must be an integer, got '$TIMEOUT_S'" >&2
     exit 2
 fi
-if [[ "$MODE" != "overfit" && "$MODE" != "dryrun" ]]; then
-    echo "mode must be 'overfit' or 'dryrun', got '$MODE'" >&2
+if [[ "$MODE" != "overfit" && "$MODE" != "dryrun" && "$MODE" != "dryrun_ctl" ]]; then
+    echo "mode must be 'overfit', 'dryrun' or 'dryrun_ctl', got '$MODE'" >&2
     exit 2
 fi
 PROJ=/autofs/space/crater_001/users/jn85/BrainRegProjects/GroupwiseReg
@@ -53,9 +55,13 @@ if [[ "$MODE" == "overfit" ]]; then
     CMD=(python main.py --overfit-one-group --data "$DATA" --level 4 --group-size 8
          --overfit-max-steps 3000 --warmup-steps 100 --results "$SCRATCH/results" --run-name "overfit_$STAMP"
          --log-every 50 --val-every 250 --log-backend jsonl)
-else
+elif [[ "$MODE" == "dryrun" ]]; then
     CMD=(python main.py --dry-run --data "$DATA" --level 4 --group-size 8
          --results "$SCRATCH/results" --run-name "dryrun_$STAMP" --num-threads 4 --log-backend jsonl)
+else
+    CMD=(python main.py --dry-run --data "$DATA" --level 4 --group-size 8
+         --results "$SCRATCH/results" --run-name "dryrun_ctl_$STAMP" --num-threads 4 --log-backend jsonl
+         --task-ratio rigid:1,affine:1 --curriculum true --global-transform true)
 fi
 LOG="$SCRATCH/$MODE.log"
 set +e

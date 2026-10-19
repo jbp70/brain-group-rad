@@ -1,6 +1,6 @@
 # Unified groupwise rigid / affine / deformable registration: design document
 
-Status: v3.4 (2026-10-18). Incorporates Jay's answers to the v1 and v2 open questions. Decisions that changed since v1 are marked *(v2)*, *(v3)* or *(v3.x)*. v3.4: the dense path uses LayerNorm by default (section 4.4). Remaining items are in section 12.
+Status: v3.5 (2026-10-18). Incorporates Jay's answers to the v1 and v2 open questions. Decisions that changed since v1 are marked *(v2)*, *(v3)* or *(v3.x)*. v3.4: the dense path uses LayerNorm by default (section 4.4). v3.5: opt-in augmentation curriculum and shared global transform G (section 3.2). Remaining items are in section 12.
 
 Related documents:
 - Reference-code review: `.agents/tasks/reference-code-review/report.md` (local only)
@@ -81,6 +81,15 @@ Baselines: BrainMorph, KeyMorph, SynthMorph (affine/joint), MultiMorph, ANTs, Fr
 - **Intensity augmentation** from the rigid project (noise, brightness, contrast, gamma, simulated low resolution), per image. **No flips in DALI.**
 - **Memory:** `prefetch_queue_depth=1` per pipeline to start, plus TF memory growth (or a fixed TF memory limit). Measure, then tune.
 - **Determinism:** one seed per pipeline (seed + 0/1/2), and a seeded Python RNG for the task schedule and flips.
+
+**Curriculum and global transform** *(v3.5)*. Both are opt-in (`--curriculum`, `--global-transform`, default off). With both off nothing below exists and the pipelines run with constant ranges as before.
+
+- **Control file**, one per pipeline: `<run_dir>/control/<task>.npy`, float32 `[rot_deg, trans_mm, log_scale, shear, g_axis_x, g_axis_y, g_axis_z, g_angle_deg, g_tx_mm, g_ty_mm, g_tz_mm, version]` (TF axis order, mm; defined once in `data_loading/params.py`). A second `fn.readers.numpy` reads it every batch, following the reference project's curriculum scale reader: one file, no shuffle, `dont_use_mmap=True`, `read_ahead=False` (so the file is re-read, not cached), and `pad_last_batch=True` (so every sample of a batch sees the same record). No `external_source`. The trainer rewrites it atomically (temp file + `os.replace`) at the start of each step, only when values change, and increments `version`. The data module writes the step-0 file before the pipelines start. Because of the prefetch, a rewrite reaches the batches after about one batch. The emitted matrices are always the truth, so the targets are correct regardless.
+- **Curriculum:** the per-image half-widths are U(−1, 1) × control value. They ramp linearly from `--<task>-*-start` to the `--<task>-*` values (which become the end values) over `--curriculum-ramp-steps` (default 2000), then stay constant. Start defaults: rigid 15° / 5 mm (scale/shear nuisance not ramped); affine 15° / 5 mm / log 1.03 / 0.01.
+- **Global transform G:** one rigid G per group (all N images of a batch), about the image center. Rotation is U(−`--global-rot-max-deg`, +) (default 45°) about an axis uniform on the sphere; translation is U(±`--global-trans-max-mm`) mm per axis (default 10). It uses a fixed range (no curriculum) and is resampled every `--global-resample-every` steps (default 5), deterministic per (seed, step // K).
+- **Composition:** T_i = G · Rt_i · S_i, with G applied last (template side) in one combined matrix, so there is still one interpolation. Rigid target: G · Rt_i (the network undoes G and Rt_i, not the nuisance S_i). Affine target: the full T_i. Flips are still F T F on T and target. The pipeline also emits G_dali `[N,3,4]` and `control_version` `[N]`. The trainer logs `g_mixed_batch`, the control values and the version lag.
+- **Why G:** with independent per-image poses the group barycenter stays close to the template (MNI) pose, so "predict back to MNI" is nearly the barycentric answer. A shared G moves the barycenter (μ* → μ* G⁻¹), so the central space is a random large pose. Note: **G does not remove the per-image pose shortcut.** A network can still estimate each image's absolute pose and center the group. G only shifts the training distribution towards large shared poses, in which that pose estimate has to cover G's range as well.
+- **Validation:** `val_<task>` stays G = identity (the best checkpoint stays on `val_rigid/pair_rms_mm`). With `--global-transform` there is also `val_<task>_g`: the same groups and per-image transforms plus one fixed seeded G per group from the same range, rendered TF-side. It writes its own PNGs (`<task>_g_step*.png`).
 
 ### 3.3 Post-DALI processing in TF (in the train step, outside the tape)
 

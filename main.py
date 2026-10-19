@@ -53,23 +53,37 @@ def _build_overfit_data(args, level, tf_mods):
 
 
 def _build_dali_data(args, level, tf_mods):
+    """DALI sources, validation sets, S, description and the task controls ({} unless
+    --curriculum / --global-transform: then <results>/<run-name>/control/<task>.npy is written
+    with the step-0 values before the pipelines start)."""
     fd, P, tfm, postprocess, dm = tf_mods
     ranges = A.ranges_from_args(args)
     aug = P.IntensityAugConfig() if args.intensity_aug else P.IntensityAugConfig.off()
+    controls = A.task_controls_from_args(args)
+    control_kw = {}
+    if controls:
+        control_kw = {"control_dir": os.path.join(args.results, args.run_name, "control"),
+                      "control_init": {t: c.values_at(0) for t, c in controls.items()}}
     data = dm.LinearDataModule(args.data, level, args.group_size, seed=args.seed, split="train",
                                rigid_ranges=ranges["rigid"], affine_ranges=ranges["affine"],
                                intensity_aug=aug, num_threads=args.num_threads,
-                               prefetch_queue_depth=args.prefetch, shuffle_mode=args.shuffle_mode)
+                               prefetch_queue_depth=args.prefetch, shuffle_mode=args.shuffle_mode,
+                               **control_kw)
+    for t, c in controls.items():
+        c.writer = data.control_writers[t]
     sources = {t: data.iterator(t) for t in args.task_ratio_parsed}
     val_images, _ = fd.load_level_images(args.data, level, "val")
     nv = args.val_group_size or min(args.group_size, val_images.shape[0])
     n_groups = 1 if args.dry_run else args.val_groups
+    g_val = ({"rotation_deg": args.global_rot_max_deg, "translation_mm": args.global_trans_max_mm}
+             if args.global_transform else None)
     # Seeded by (val_seed, task, group index), not by the task's position in the ratio.
     val_sets = fd.build_validation_sets(val_images, list(args.task_ratio_parsed), level, nv, n_groups,
-                                        ranges, seed=args.val_seed, target_iters=args.target_iters)
+                                        ranges, seed=args.val_seed, target_iters=args.target_iters,
+                                        global_transform=g_val)
     S = postprocess.brain_S_matrix(level, data.template_dir)
     desc = "DALI %d train files, %d val images" % (len(data.files), val_images.shape[0])
-    return sources, val_sets, S, desc
+    return sources, val_sets, S, desc, controls
 
 
 def main(argv=None):
@@ -109,10 +123,11 @@ def main(argv=None):
 
     level = args.level
     tf_mods = (fd, P, tfm, postprocess, dm)
+    controls = {}
     if args.overfit_one_group:
         sources, val_sets, S, data_desc = _build_overfit_data(args, level, tf_mods)
     else:
-        sources, val_sets, S, data_desc = _build_dali_data(args, level, tf_mods)
+        sources, val_sets, S, data_desc, controls = _build_dali_data(args, level, tf_mods)
 
     model_cfg = A.model_config_from_args(args)
     model = GroupRegLevelModel(level, model_cfg).build_model(args.group_size)
@@ -131,7 +146,8 @@ def main(argv=None):
     if args.val_png:
         train_cfg.val_png_dir = os.path.join(paths["root"], "val_png")
     logger = RunLogger(paths, backend=args.log_backend, tensorboard=True, quiet=args.quiet)
-    trainer = Trainer(model, optimizer, sources, S, train_cfg, logger=logger, val_sets=val_sets)
+    trainer = Trainer(model, optimizer, sources, S, train_cfg, logger=logger, val_sets=val_sets,
+                      controls=controls)
     trainer.checkpoint = C.RunCheckpoint(paths["ckpt_last"], paths["ckpt_best"], model, optimizer,
                                          trainer.step, extra=trainer.checkpoint_variables())
     resumed = False

@@ -20,11 +20,25 @@ Outputs (all float32, all on GPU):
 Images are channel-last with the numpy array axis order (x, y, z) (DALI layout "DHWC").
 `data_loading.postprocess` converts the matrices to TF centered-mm 4x4.
 
-No flips in DALI (they are per group, in TF). No external_source (the curriculum hook, if added
-later, is a numpy reader over a scale file as in the reference curriculum.py).
+Control file (curriculum and global transform G, design 3.2 v3.5; only when `control_file` is
+given, default off). A second numpy reader re-reads the control vector
+(`params.CONTROL_FIELDS`) every batch (`read_control`). The per-image half-widths become
+U(-1, 1) * control value instead of constants, and one shared G = C+ . Tg . Rg . C- (about the
+image center, from the file's axis / angle / translation) is composed last:
+    T_i    = G . Rt_i . S_i         rendered transform (one combined matrix, one interpolation)
+    Rt_dali = G . Rt_i              rigid target part (the network undoes G and Rt_i, not S_i)
+    T_i^-1 = S_i^-1 . Rt_i^-1 . G^-1   pull matrix
+and two outputs are appended: G_dali [N, 3, 4] (per sample, so a batch mixing two control states
+is detectable) and control_version [N] (float32). With G = I and the end ranges in the file the
+distribution equals the constant-range pipeline.
+
+No flips in DALI (they are per group, in TF). No external_source (it failed under model.fit in
+the reference project; the control file is read by a numpy reader as in its curriculum.py).
 
 This module imports without DALI; building a pipeline needs nvidia.dali (`require_dali`).
 """
+import os
+
 import numpy as np
 
 from data_loading import params as P
@@ -43,6 +57,7 @@ except ImportError as _e:  # local WSL envs have no DALI
     _DALI_IMPORT_ERROR = _e
 
 READER_NAME = "ImageReader"
+CONTROL_READER_NAME = "ControlReader"
 
 
 def require_dali():
@@ -50,8 +65,11 @@ def require_dali():
         raise ImportError("nvidia.dali is required for the DALI pipelines (%s)" % _DALI_IMPORT_ERROR)
 
 
-def linear_output_signature(task, level, batch_size):
-    """Static output shapes and dtype names of `LinearPipeline` (no DALI needed)."""
+def linear_output_signature(task, level, batch_size, control=False):
+    """Static output shapes and dtype names of `LinearPipeline` (no DALI needed).
+
+    ``control=True`` (pipeline with a control file) appends G_dali [N, 3, 4] and
+    control_version [N]."""
     if task not in P.TASKS:
         raise ValueError("task must be one of {}, got {!r}".format(P.TASKS, task))
     n = int(batch_size)
@@ -59,7 +77,16 @@ def linear_output_signature(task, level, batch_size):
     shapes = [(n,) + tuple(shape) + (1,), (n, 3, 4)]
     if task == "rigid":
         shapes.append((n, 3, 4))
+    if control:
+        shapes += [(n, 3, 4), (n,)]
     return tuple(shapes), tuple(["float32"] * len(shapes))
+
+
+def base_output_count(task):
+    """Number of outputs without the control extras: 3 (rigid) or 2 (affine)."""
+    if task not in P.TASKS:
+        raise ValueError("task must be one of {}, got {!r}".format(P.TASKS, task))
+    return 3 if task == "rigid" else 2
 
 
 # ---------------------------------------------------------------------------- graph helpers
@@ -110,6 +137,63 @@ def random_linear_params(ranges):
             "shear": _uniform_vec(ranges.shear)}
 
 
+def _scaled_uniform(scale):
+    """U(-1, 1) * scale for a scalar DataNode `scale` (per sample)."""
+    return fn.random.uniform(range=(-1.0, 1.0)) * scale
+
+
+def _scaled_uniform_vec(scale, n=3):
+    # Independent scalar draws stacked, so only scalar x scalar arithmetic is needed.
+    return fn.stack(*[_scaled_uniform(scale) for _ in range(n)])
+
+
+def control_linear_params(ctl, level):
+    """Per-sample random parameters (same meaning as `random_linear_params`) whose half-widths
+    come from the control vector `ctl` (`params.CONTROL_FIELDS`): U(-1, 1) * value. The
+    translation is converted mm -> voxels of `level` (1 / spacing, as `params.mm_to_voxels`)."""
+    i = P.CONTROL_INDEX
+    inv_s = 1.0 / P.LEVEL_SPACING[P.check_level(level)]
+    return {"angle": _scaled_uniform(ctl[i["rot_deg"]]),
+            "axis": fn.random.normal(shape=[3]),
+            "translation": _scaled_uniform_vec(ctl[i["trans_mm"]] * inv_s),
+            "log_scale": _scaled_uniform_vec(ctl[i["log_scale"]]),
+            "shear": _scaled_uniform_vec(ctl[i["shear"]])}
+
+
+def control_global_params(ctl, level):
+    """G parameters from the control vector: angle (degrees), axis and translation (voxels) in
+    DALI axis order (the file stores TF order x, y, z; mirrored by `params.control_global_dali`)."""
+    i = P.CONTROL_INDEX
+    inv_s = 1.0 / P.LEVEL_SPACING[P.check_level(level)]
+    ax = [ctl[i["g_axis_x"]], ctl[i["g_axis_y"]], ctl[i["g_axis_z"]]]
+    t = [ctl[i["g_tx_mm"]] * inv_s, ctl[i["g_ty_mm"]] * inv_s, ctl[i["g_tz_mm"]] * inv_s]
+    return {"angle": ctl[i["g_angle_deg"]], "axis": fn.stack(*ax[::-1]),
+            "translation": fn.stack(*t[::-1])}
+
+
+def control_reader_kwargs(path, name=CONTROL_READER_NAME):
+    """Keyword arguments of the control-file reader (pure Python, unit-tested without DALI).
+
+    Mirrors the reference rigid project's curriculum scale reader (``_make_scale_reader``), which
+    worked under DALI 1.18 where ``fn.external_source`` did not: one file, unsharded, unshuffled,
+    ``dont_use_mmap=True`` and ``read_ahead=False`` so the file is opened and read again for every
+    batch (with mmap or read-ahead the reader could keep the first contents), and
+    ``pad_last_batch=True`` so the single record fills the batch (every sample of a batch sees
+    the same values). The path must be absolute. The trainer's atomic ``os.replace`` makes every
+    read see either the old or the new file in full. Because of the pipeline prefetch, a rewrite
+    shows up after about 1-2 batches; the emitted ``control_version`` says which state a batch
+    used (measured by tests/gpu/verify_dali_pipeline.py check (h)).
+    """
+    return {"device": "cpu", "files": [os.path.abspath(str(path))], "num_shards": 1,
+            "shard_id": 0, "random_shuffle": False, "shuffle_after_epoch": False,
+            "read_ahead": False, "dont_use_mmap": True, "pad_last_batch": True, "name": name}
+
+
+def read_control(path, name=CONTROL_READER_NAME):
+    """The control vector [CONTROL_SIZE] float32 per sample (CPU DataNode), re-read every batch."""
+    return fn.readers.numpy(**control_reader_kwargs(path, name))
+
+
 def constant_linear_params(angle_deg, axis, translation_vox, log_scale=(0.0, 0.0, 0.0),
                            shear=(0.0, 0.0, 0.0)):
     """Fixed parameters (same meaning as `random_linear_params`), e.g. for convention tests."""
@@ -144,6 +228,45 @@ def build_linear_matrices(prm, shape_xyz, pixel_center=P.DALI_PIXEL_CENTER):
     t_pull = fn.transforms.combine(c_minus, tr_inv, rot_inv, k_inv, c_plus)
     rt = fn.transforms.combine(c_minus, rot, tr, c_plus)
     return t_fwd, t_pull, rt
+
+
+def _rotation_pair(prm):
+    ax = prm["axis"]
+    norm = dmath.max(dmath.sqrt(ax[0] * ax[0] + ax[1] * ax[1] + ax[2] * ax[2]), 1e-6)
+    axis = fn.stack(ax[0] / norm, ax[1] / norm, ax[2] / norm)
+    angle = prm["angle"]
+    return (fn.transforms.rotation(angle=angle, axis=axis),
+            fn.transforms.rotation(angle=-angle, axis=axis))
+
+
+def build_global_linear_matrices(prm, gprm, shape_xyz, pixel_center=P.DALI_PIXEL_CENTER):
+    """(T, T_inv, Rt, G) with the shared global transform G composed last (module docstring).
+
+    ``prm``: per-image parameters (`control_linear_params` / `random_linear_params`); ``gprm``:
+    G parameters (`control_global_params`). G = C+ . Tg . Rg . C- about the same center as the
+    per-image transforms. Mirrored in numpy by `params.linear_matrices_np` (g_* arguments).
+    """
+    c = P.dali_center(shape_xyz, pixel_center)
+    c_minus = fn.transforms.translation(offset=[-v for v in c])
+    c_plus = fn.transforms.translation(offset=c)
+    rot, rot_inv = _rotation_pair(prm)
+    t = prm["translation"]
+    tr = fn.transforms.translation(offset=t)
+    tr_inv = fn.transforms.translation(offset=-t)
+    ls, sh = prm["log_scale"], prm["shear"]
+    fwd, inv = P.scale_shear_rows(dmath.exp(ls[0]), dmath.exp(ls[1]), dmath.exp(ls[2]),
+                                  sh[0], sh[1], sh[2], zero=_zero())
+    k, k_inv = _stack_matrix(fwd), _stack_matrix(inv)
+    g_rot, g_rot_inv = _rotation_pair(gprm)
+    gt = gprm["translation"]
+    g_tr = fn.transforms.translation(offset=gt)
+    g_tr_inv = fn.transforms.translation(offset=-gt)
+    # fn.transforms.combine applies its inputs in the listed order (first = rightmost factor).
+    t_fwd = fn.transforms.combine(c_minus, k, rot, tr, g_rot, g_tr, c_plus)
+    t_pull = fn.transforms.combine(c_minus, g_tr_inv, g_rot_inv, tr_inv, rot_inv, k_inv, c_plus)
+    rt = fn.transforms.combine(c_minus, rot, tr, g_rot, g_tr, c_plus)
+    g = fn.transforms.combine(c_minus, g_rot, g_tr, c_plus)
+    return t_fwd, t_pull, rt, g
 
 
 SHUFFLE_MODES = ("epoch", "buffer")
@@ -260,13 +383,17 @@ class LinearPipeline(Pipeline):
       initial_fill: shuffle buffer size for shuffle_mode='buffer' (None ->
         `params.auto_initial_fill`, ~1 GiB host).
       prefetch_queue_depth: DALI prefetch depth (default 1, design 3.2).
+      control_file: path of the task's control .npy (`params.CONTROL_FIELDS`), or None (default:
+        constant ranges, no extra outputs). When given, the per-image half-widths and G come from
+        the file, which must exist before the pipeline runs, and the outputs gain G_dali and
+        control_version; the rotation_deg ... shear arguments are then unused.
     """
 
     def __init__(self, task, level, files, batch_size, seed=0, file_root=None, shuffle=True,
                  rotation_deg=None, translation_mm=None, log_scale=None, shear=None,
                  intensity_aug=None, num_threads=4, device_id=0, prefetch_queue_depth=1,
                  initial_fill=None, pixel_center=P.DALI_PIXEL_CENTER, exec_async=True,
-                 exec_pipelined=True, shuffle_mode="epoch"):
+                 exec_pipelined=True, shuffle_mode="epoch", control_file=None):
         require_dali()
         if shuffle_mode not in SHUFFLE_MODES:
             raise ValueError("shuffle_mode must be one of {}, got {!r}".format(SHUFFLE_MODES, shuffle_mode))
@@ -293,17 +420,27 @@ class LinearPipeline(Pipeline):
                              if initial_fill is None else int(initial_fill))
         self.intensity_aug = P.IntensityAugConfig() if intensity_aug is None else intensity_aug
         self.pixel_center = float(pixel_center)
+        self.control_file = None if control_file is None else os.path.abspath(str(control_file))
 
     def output_signature(self):
-        return linear_output_signature(self.task, self.level, self.group_size)
+        return linear_output_signature(self.task, self.level, self.group_size,
+                                       control=self.control_file is not None)
 
     def define_graph(self):
         imgs = read_images(self.files, self.volume_shape, self.file_root, self.shuffle, self.initial_fill,
                            self.reader_seed, shuffle_mode=self.shuffle_mode)
-        t_fwd, t_pull, rt = build_linear_matrices(random_linear_params(self.ranges), self.volume_shape,
-                                                  self.pixel_center)
+        extra = ()
+        if self.control_file is None:
+            t_fwd, t_pull, rt = build_linear_matrices(random_linear_params(self.ranges), self.volume_shape,
+                                                      self.pixel_center)
+        else:
+            ctl = read_control(self.control_file)
+            t_fwd, t_pull, rt, g = build_global_linear_matrices(
+                control_linear_params(ctl, self.level), control_global_params(ctl, self.level),
+                self.volume_shape, self.pixel_center)
+            extra = (g.gpu(), ctl[P.CONTROL_INDEX["version"]].gpu())
         imgs = warp_linear(imgs, t_pull)
         imgs = intensity_augment(imgs, self.intensity_aug, self.volume_shape)
         if self.task == "rigid":
-            return imgs, t_fwd.gpu(), rt.gpu()
-        return imgs, t_fwd.gpu()
+            return (imgs, t_fwd.gpu(), rt.gpu()) + extra
+        return (imgs, t_fwd.gpu()) + extra

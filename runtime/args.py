@@ -12,6 +12,9 @@ Pattern from the rigid project's ``runtime/args.py`` (argparse + ``str2bool``). 
 * losses: lambda_pair 1, p_pair 0.1, flip probability 0.5 per axis, 10 target iterations
   (design 6.1, 3.3); objective divided by --loss-scale-mm2 (default 1, unscaled);
 * augmentation ranges: `data_loading.params.DEFAULT_LINEAR_RANGES` (design 3.2);
+* curriculum (--curriculum) and global transform (--global-transform): both OFF (design 3.2
+  v3.5). With --curriculum the --<task>-* range flags are the END values and --<task>-*-start
+  the start values (start <= end is checked only then);
 * group size per level: 32 (level 4), 8 (level 2), 2 (level 1) (design 5.1);
 * model: `models.config.ModelConfig` defaults (dense-path norm 'layer'); dropout 0.15, or 0.0
   in overfit mode.
@@ -25,6 +28,13 @@ from data_loading import params as P
 from models.config import ModelConfig
 
 DEFAULT_GROUP_SIZE = {4: 32, 2: 8, 1: 2}
+# Curriculum start values (--<task>-*-start). None = the end value (--<task>-*): the rigid
+# scale/shear nuisance does not ramp by default.
+CURRICULUM_START_DEFAULTS = {
+    "rigid": {"rotation_deg": 15.0, "translation_mm": 5.0, "log_scale": None, "shear": None},
+    "affine": {"rotation_deg": 15.0, "translation_mm": 5.0, "log_scale": math.log(1.03), "shear": 0.01},
+}
+RANGE_KEYS = ("rotation_deg", "translation_mm", "log_scale", "shear")
 TRAIN_TASKS = ("rigid", "affine")
 ALL_TASKS = ("rigid", "affine", "deform")
 _MC = ModelConfig()
@@ -133,11 +143,32 @@ def build_parser():
     g = p.add_argument_group("augmentation (half-widths of uniform ranges)")
     for task in TRAIN_TASKS:
         d = P.DEFAULT_LINEAR_RANGES[task]
-        g.add_argument("--%s-rotation-deg" % task, type=float, default=d["rotation_deg"])
+        g.add_argument("--%s-rotation-deg" % task, type=float, default=d["rotation_deg"],
+                       help="(with --curriculum: the end value, likewise the other range flags)")
         g.add_argument("--%s-translation-mm" % task, type=float, default=d["translation_mm"])
         g.add_argument("--%s-log-scale" % task, type=float, default=d["log_scale"])
         g.add_argument("--%s-shear" % task, type=float, default=d["shear"])
     g.add_argument("--intensity-aug", type=str2bool, default=True)
+    g = p.add_argument_group("curriculum and global transform (design 3.2 v3.5; both default off)")
+    g.add_argument("--curriculum", type=str2bool, default=False,
+                   help="linear ramp of the per-image ranges from the --<task>-*-start values to "
+                   "the --<task>-* values (the end values) over --curriculum-ramp-steps steps")
+    g.add_argument("--curriculum-ramp-steps", type=int, default=2000)
+    for task in TRAIN_TASKS:
+        d = CURRICULUM_START_DEFAULTS[task]
+        g.add_argument("--%s-rotation-deg-start" % task, type=float, default=d["rotation_deg"])
+        g.add_argument("--%s-translation-mm-start" % task, type=float, default=d["translation_mm"])
+        g.add_argument("--%s-log-scale-start" % task, type=float, default=d["log_scale"],
+                       help=None if d["log_scale"] is not None else "default: --%s-log-scale" % task)
+        g.add_argument("--%s-shear-start" % task, type=float, default=d["shear"],
+                       help=None if d["shear"] is not None else "default: --%s-shear" % task)
+    g.add_argument("--global-transform", type=str2bool, default=False,
+                   help="one shared random rigid G per group (all images of a batch), composed "
+                   "last: T_i = G Rt_i S_i; the network undoes G and Rt_i. Adds val_<task>_g sets")
+    g.add_argument("--global-rot-max-deg", type=float, default=45.0,
+                   help="G angle U(-max, max) about an axis uniform on the sphere")
+    g.add_argument("--global-trans-max-mm", type=float, default=10.0, help="G translation U(-max, max) mm per axis")
+    g.add_argument("--global-resample-every", type=int, default=5, help="draw a new G every K steps")
     g = p.add_argument_group("DALI")
     g.add_argument("--num-threads", type=int, default=4)
     g.add_argument("--prefetch", type=int, default=1)
@@ -208,6 +239,31 @@ def parse_args(argv=None):
         args.run_name = "l%d_%s_%s" % (args.level, ratio, datetime.datetime.now().strftime("%Y%m%d-%H%M%S"))
     if args.overfit_one_group:
         args.steps = args.overfit_max_steps
+    for task in TRAIN_TASKS:
+        for k in ("log_scale", "shear"):
+            name = "%s_%s_start" % (task, k)
+            if getattr(args, name) is None:
+                setattr(args, name, float(getattr(args, "%s_%s" % (task, k))))
+    if args.curriculum or args.global_transform:
+        if args.overfit_one_group:
+            parser.error("--curriculum / --global-transform need the DALI pipeline (not --overfit-one-group)")
+    if args.curriculum:
+        if args.curriculum_ramp_steps < 0:
+            parser.error("--curriculum-ramp-steps must be >= 0, got %d" % args.curriculum_ramp_steps)
+        for task in args.task_ratio_parsed:
+            for k in RANGE_KEYS:
+                s = getattr(args, "%s_%s_start" % (task, k))
+                e = getattr(args, "%s_%s" % (task, k))
+                if not (math.isfinite(s) and 0 <= s <= e):
+                    parser.error("--%s-%s-start must be in [0, --%s-%s = %g], got %g"
+                                 % (task, k.replace("_", "-"), task, k.replace("_", "-"), e, s))
+    if args.global_transform:
+        for name in ("global_rot_max_deg", "global_trans_max_mm"):
+            v = getattr(args, name)
+            if not (math.isfinite(v) and v >= 0):
+                parser.error("--%s must be finite and >= 0, got %r" % (name.replace("_", "-"), v))
+        if args.global_resample_every < 1:
+            parser.error("--global-resample-every must be >= 1, got %d" % args.global_resample_every)
     if args.best_metric.startswith("val_rigid/") and "rigid" not in args.task_ratio_parsed:
         args.best_metric = args.best_metric.replace("val_rigid/", "val_%s/" % next(iter(args.task_ratio_parsed)))
     return args
@@ -230,6 +286,38 @@ def ranges_from_args(args):
     for task in TRAIN_TASKS:
         out[task] = {k: float(getattr(args, "%s_%s" % (task, k)))
                      for k in ("rotation_deg", "translation_mm", "log_scale", "shear")}
+    return out
+
+
+def curriculum_start_from_args(args):
+    """{task: dict(rotation_deg, translation_mm, log_scale, shear)} from the --<task>-*-start flags."""
+    return {task: {k: float(getattr(args, "%s_%s_start" % (task, k))) for k in RANGE_KEYS}
+            for task in TRAIN_TASKS}
+
+
+def controls_enabled(args):
+    """True if a control file is needed (--curriculum or --global-transform)."""
+    return bool(args.curriculum or args.global_transform)
+
+
+def task_controls_from_args(args, seed_offset=None):
+    """{task: `runtime.curriculum.TaskControl`} for the ratio's tasks, or {} when both features
+    are off. G uses seed ``args.seed + seed_offset[task]`` (default rigid 0, affine 1). The
+    writers are attached by the caller (`LinearDataModule.control_writers`)."""
+    if not controls_enabled(args):
+        return {}
+    from runtime.curriculum import GlobalTransformSampler, LinearCurriculum, TaskControl
+    seed_offset = seed_offset or {"rigid": 0, "affine": 1}
+    end = ranges_from_args(args)
+    start = curriculum_start_from_args(args)
+    out = {}
+    for task in args.task_ratio_parsed:
+        cur = (LinearCurriculum(start[task], end[task], args.curriculum_ramp_steps)
+               if args.curriculum else None)
+        smp = (GlobalTransformSampler(args.global_rot_max_deg, args.global_trans_max_mm,
+                                      args.global_resample_every, seed=args.seed + seed_offset[task])
+               if args.global_transform else None)
+        out[task] = TaskControl(end[task], cur, smp)
     return out
 
 

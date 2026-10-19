@@ -10,6 +10,8 @@ Modules:
 * `checkpoint`: last/best checkpoint managers and the run config JSON (TF).
 * `logging`: dllogger (if importable) or JSON lines, plus TensorBoard scalars.
 * `fixed_data`: TF-side data without DALI (phantoms, fixed groups, the validation set).
+* `curriculum`: augmentation curriculum, shared global transform G and the control-file writer
+  (numpy only).
 * `run`: task schedule, `TrainConfig` and the `Trainer` loop (TF).
 
 This package imports nothing on its own; import the submodules you need.

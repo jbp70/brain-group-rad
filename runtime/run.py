@@ -33,6 +33,13 @@ Validation PNGs (`runtime.val_png`, when ``val_png_dir`` is set): every `validat
 ``<val_png_dir>/<task>_step<step:07d>.png`` from the eval-mode matrices of group
 ``val_png_group``; `fit` also validates at its final step if that was not a validation step.
 
+Curriculum / global transform (``controls``, `runtime.curriculum`, default none): at the start
+of each step, before fetching the batch, every task's control file gets the values of that
+step (pure functions of the step, so a resume restores them). The batch's trailing G_dali and
+control_version are split off before the step function (same traced signature) and logged as
+``train_<task>/{g_mixed_batch, control_version_lag, control_rot_deg, control_trans_mm,
+control_g_angle_deg}`` (window means). Flips still act as F T F on the emitted T and target.
+
 `rebuild_steps()` re-creates every step function. Call it after changing anything read at trace
 time, in particular `model.set_bn_stats_frozen(...)` (an already traced step keeps updating
 the statistics otherwise).
@@ -179,10 +186,17 @@ class Trainer:
       cfg: `TrainConfig`.
       logger: optional `runtime.logging.RunLogger`; checkpoint: optional `RunCheckpoint` (can be
         attached later, it needs `trainer.step` and `checkpoint_variables()`).
-      val_sets: optional {task: `runtime.fixed_data.ValidationSet`}.
+      val_sets: optional {name: `runtime.fixed_data.ValidationSet`}; the name is the metric
+        prefix ``val_<name>`` (e.g. 'rigid', or 'rigid_g' for the set with a global transform),
+        the set's ``task`` selects the model head.
+      controls: optional {task: `runtime.curriculum.TaskControl`} with writers attached
+        (curriculum / global transform). Each step first writes every task's control values of
+        that step; batches then carry G_dali and control_version, which are logged and dropped
+        before the step function. None (default): no control file is touched.
     """
 
-    def __init__(self, model, optimizer, sources, S, cfg, logger=None, checkpoint=None, val_sets=None):
+    def __init__(self, model, optimizer, sources, S, cfg, logger=None, checkpoint=None, val_sets=None,
+                 controls=None):
         self.model = model
         self.optimizer = optimizer
         self.sources = dict(sources)
@@ -190,6 +204,7 @@ class Trainer:
         self.logger = logger
         self.checkpoint = checkpoint
         self.val_sets = dict(val_sets or {})
+        self.controls = dict(controls or {})
         self.level = P.check_level(cfg.level)
         self.S_np = np.asarray(S, np.float64)
         self.S = tf.constant(self.S_np, tf.float32)
@@ -290,8 +305,32 @@ class Trainer:
                                input_signature=signature)
         return tf.function(lambda images, t_dali: body(images, t_dali), input_signature=signature)
 
+    @staticmethod
+    def split_batch(task, batch_tuple):
+        """(step inputs, control extras): the first 3 (rigid) / 2 (affine) DALI outputs, and the
+        trailing (G_dali, control_version) of a control-file pipeline (empty tuple otherwise)."""
+        k = dali_loader.base_output_count(task)
+        batch_tuple = tuple(batch_tuple)
+        return batch_tuple[:k], batch_tuple[k:]
+
+    def control_metrics(self, task, extras, values):
+        """Per-step control logs: g_mixed_batch (1 if the batch's G_dali differ across samples),
+        the current control values and the version lag (writer version - batch version)."""
+        out = {"control_rot_deg": float(values["rotation_deg"]),
+               "control_trans_mm": float(values["translation_mm"]),
+               "control_g_angle_deg": float(values["g_angle_deg"])}
+        if len(extras) >= 2:
+            g = np.asarray(extras[0], np.float64)
+            ver = np.asarray(extras[1], np.float64).reshape(-1)
+            out["g_mixed_batch"] = float(np.abs(g - g[:1]).max() > 1e-6 or np.ptp(ver) > 0)
+            writer = self.controls[task].writer
+            out["control_version_lag"] = float(writer.version - ver.min()) if writer is not None else 0.0
+        return out
+
     def train_step(self, task, batch_tuple):
-        """Run one step of `task` on a DALI-format tuple. Returns Python scalars."""
+        """Run one step of `task` on a DALI-format tuple (control extras are ignored). Returns
+        Python scalars."""
+        batch_tuple, _ = self.split_batch(task, batch_tuple)
         out = self._steps[task](*batch_tuple)
         res = {k: float(v.numpy()) for k, v in out.items() if k not in ("finite", "n_vars_updated")}
         res["finite"] = bool(out["finite"].numpy())
@@ -348,7 +387,9 @@ class Trainer:
         return M.concat_errors(errs), mats
 
     def _write_val_png(self, task, grp, A, metrics, step):
-        """One validation PNG (runtime.val_png). Never raises: failures are logged and skipped."""
+        """One validation PNG (runtime.val_png). ``task`` is the validation-set name ('rigid',
+        'rigid_g', ...): file ``<name>_step<step>.png``. Never raises: failures are logged and
+        skipped."""
         cfg = self.cfg
         try:
             from runtime import val_png as V
@@ -380,7 +421,8 @@ class Trainer:
         training-mode BN (no statistics update, dropout off), to expose any train/eval gap.
         """
         out = {}
-        for task, vs in self.val_sets.items():
+        for name, vs in self.val_sets.items():
+            task = vs.task
             if task not in ("rigid", "affine"):
                 continue
             groups = vs.groups if max_groups is None else vs.groups[:int(max_groups)]
@@ -388,16 +430,16 @@ class Trainer:
                 continue
             t0 = time.perf_counter()
             errs, mats = self._val_errors(task, vs, groups, False)
-            out.update(M.summarize(errs, "val_%s" % task))
-            out["val_%s/groups" % task] = len(groups)
-            out["val_%s/time_s" % task] = time.perf_counter() - t0
-            pre = "val_%s_trainmode" % task
+            out.update(M.summarize(errs, "val_%s" % name))
+            out["val_%s/groups" % name] = len(groups)
+            out["val_%s/time_s" % name] = time.perf_counter() - t0
+            pre = "val_%s_trainmode" % name
             tm = M.summarize(self._val_errors(task, vs, groups, True)[0], pre)
             for k in ("center_rms_mm", "pair_rms_mm"):
                 out["%s/%s" % (pre, k)] = tm["%s/%s" % (pre, k)]
             g = int(self.cfg.val_png_group)
             if self.cfg.val_png_dir and 0 <= g < len(groups):
-                self._write_val_png(task, groups[g], mats[g], out, int(self.step.numpy()))
+                self._write_val_png(name, groups[g], mats[g], out, int(self.step.numpy()))
         return out
 
     # ------------------------------------------------------------------ loop
@@ -457,8 +499,12 @@ class Trainer:
             task = self.schedule.draw(s)
             lr = lr_at(s, cfg.schedule)
             O.set_learning_rate(self.optimizer, lr)
+            # Control files first (curriculum / G of this step), then the batch. With the DALI
+            # prefetch the batch may still come from an earlier state (~1 batch); its emitted
+            # matrices are the truth, so the targets stay correct either way.
+            ctl_values = {t: c.update(s)[0] for t, c in self.controls.items()}
             t0 = time.perf_counter()
-            batch = next(self.sources[task])
+            batch, extras = self.split_batch(task, next(self.sources[task]))
             t1 = time.perf_counter()
             res = self.train_step(task, batch)
             t2 = time.perf_counter()
@@ -466,6 +512,10 @@ class Trainer:
             rec = {"step": done, "task": task, "lr": lr, "data_ms": 1e3 * (t1 - t0),
                    "compute_ms": 1e3 * (t2 - t1)}
             rec.update(res)
+            if task in ctl_values:
+                cm = self.control_metrics(task, extras, ctl_values[task])
+                rec.update(cm)
+                acc.update({"train_%s/%s" % (task, k): v for k, v in cm.items()})
             self.history.append(rec)
             timing.update({"time/data_ms": rec["data_ms"], "time/compute_ms": rec["compute_ms"]})
             if not res["finite"]:

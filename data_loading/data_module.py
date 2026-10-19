@@ -15,6 +15,9 @@ Usage::
     it = data.iterator("rigid")               # yields (images, T_dali, Rt_dali)
     it_aff = data.iterator("affine")          # yields (images, T_dali)
 
+With ``control_dir`` (curriculum / global transform) every tuple also ends with G_dali [N, 3, 4]
+and control_version [N] (`dali_loader.linear_output_signature(..., control=True)`).
+
 Device placement: the DALIDatasets are created and iterated under ``tf.device('/gpu:0')`` with
 DALI ``device_id=0``, i.e. the single GPU the process sees (set CUDA_VISIBLE_DEVICES outside).
 """
@@ -124,13 +127,21 @@ class LinearDataModule:
         for milestone 6 (the deformable pipeline is not implemented yet).
       num_threads, prefetch_queue_depth (default 1), device_id (default 0): DALI settings.
       contrast: optional manifest contrast filter.
+      control_dir: folder of the per-task control files (curriculum / global transform, design
+        3.2 v3.5), e.g. ``<run_dir>/control``; None (default) = constant ranges, no control file.
+        When given, ``<control_dir>/<task>.npy`` is written here (version 1) for every task of
+        `control_init` (default: both linear tasks), so the pipelines can start before the
+        trainer's first update; `control_writers[task]` is the `runtime.curriculum.ControlWriter`
+        the trainer keeps writing through.
+      control_init: {task: `params.control_vector` keyword dict} initial values (None -> the
+        task's ranges with G = identity).
     """
 
     def __init__(self, export_root, level, batch_size, seed=0, split="train", shuffle=True,
                  rigid_ranges=None, affine_ranges=None, intensity_aug=None,
                  deform_residual_affine=P.DEFAULT_DEFORM_RESIDUAL_AFFINE, num_threads=4,
                  prefetch_queue_depth=1, device_id=0, contrast=None, manifest_path=None,
-                 shuffle_mode="epoch"):
+                 shuffle_mode="epoch", control_dir=None, control_init=None):
         self.export_root = export_root
         self.level = P.check_level(level)
         self.batch_size = int(batch_size)
@@ -153,6 +164,20 @@ class LinearDataModule:
             raise ValueError("split %r has %d images at level %d, fewer than the group size %d"
                              % (split, len(self.files), self.level, self.batch_size))
         self._datasets = {}
+        self.control_dir = control_dir
+        self.control_writers = {}
+        if control_dir:
+            from runtime.curriculum import ControlWriter, identity_global
+            init = dict(control_init) if control_init is not None else {t: None for t in P.TASKS}
+            for task, vals in init.items():
+                if task not in P.TASKS:
+                    raise ValueError("control_init task must be one of {}, got {!r}".format(P.TASKS, task))
+                if vals is None:
+                    r = P.linear_ranges(task, self.level, **self.ranges[task])
+                    vals = dict({k: getattr(r, k) for k in P.CONTROL_RANGE_KEYS}, **identity_global())
+                w = ControlWriter(os.path.join(control_dir, "%s.npy" % task))
+                w.write(vals)
+                self.control_writers[task] = w
 
     @property
     def template_dir(self):
@@ -164,7 +189,12 @@ class LinearDataModule:
             file_root=self.export_root, shuffle=self.shuffle, intensity_aug=self.intensity_aug,
             num_threads=self.num_threads, device_id=self.device_id,
             prefetch_queue_depth=self.prefetch_queue_depth, shuffle_mode=self.shuffle_mode,
-            **self.ranges[task])
+            control_file=self.control_file(task), **self.ranges[task])
+
+    def control_file(self, task):
+        """Path of the task's control file, or None without one."""
+        w = self.control_writers.get(task)
+        return None if w is None else w.path
 
     def dataset(self, task):
         """The task's DALIDataset (built once, cached)."""

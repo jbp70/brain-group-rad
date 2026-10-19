@@ -25,7 +25,19 @@ Checks (each prints PASS / FAIL / INFO; the exit code is 1 if any check FAILs):
   (e) throughput and GPU memory at level 4, N = 48 (rigid, affine, both concurrently).
   (f) determinism: same seed -> identical first batches (both reader shuffle modes).
   (g) INFO: float16 input to warp_affine.
-All temporary files go to a fresh folder under --scratch (never /tmp), removed at the end.
+Control file (curriculum / global transform G, design 3.2 v3.5; real level-4 data, aug OFF):
+  (h) re-read: version v1 with rot 5 deg, 3 batches, rewrite v2 with rot 40 deg; within <= 3
+      batches the emitted version changes and the sampled max rotation follows it (lag reported).
+  (i) G shared: identical G_dali over the batch, matching the written axis / angle / translation
+      (and the numpy mirror up to the DALI angle sign); T_i = G Rt_i S_i with Rt_i rigid within the
+      per-image ranges and S_i the nuisance (rigid), or Rt_i S_i within the ranges (affine).
+  (j) targets with G: barycentric targets from G Rt_i (rigid) / T_i (affine) central and
+      pair-consistent; DALI render == TF render of the emitted T_i (single interpolation) and the
+      round trip matches the TF-only one (criteria of (b)).
+  (k) curriculum start values written: sampled rotation / translation / log-scale / shear
+      magnitudes stay within them (and are not collapsed to 0).
+Select checks with --checks (e.g. h,i,j,k). All temporary files go to a fresh folder under
+--scratch (never /tmp), removed at the end.
 """
 import argparse
 import gc
@@ -55,6 +67,8 @@ from data_loading import params as P  # noqa: E402
 from data_loading import postprocess as pp  # noqa: E402
 from models import layers  # noqa: E402
 from models import transforms as tfm  # noqa: E402
+from runtime import args as A  # noqa: E402
+from runtime.curriculum import ControlWriter  # noqa: E402
 
 LEVEL = 4
 SHAPE = P.LEVEL_SHAPE[LEVEL]
@@ -507,13 +521,284 @@ def check_g(tmp, args):
         record("g_float16_warp_affine", None, "float16 input NOT supported: %r" % (e,), supported=False)
 
 
+# ---------------------------------------------------------------------------- (h)-(k) control file
+G_AXIS = tuple(np.asarray([0.3, -0.5, 0.8]) / np.linalg.norm([0.3, -0.5, 0.8]))
+G_ANGLE = 30.0
+G_T_MM = (4.0, -6.0, 8.0)
+
+
+def ctl_values(rot, trans, log_scale=0.0, shear=0.0, axis=P.DEFAULT_G_AXIS, angle=0.0,
+               t_mm=(0.0, 0.0, 0.0)):
+    return {"rotation_deg": rot, "translation_mm": trans, "log_scale": log_scale, "shear": shear,
+            "g_axis": axis, "g_angle_deg": angle, "g_translation_mm": t_mm}
+
+
+def control_pipeline(task, files, args, control_file, seed):
+    return dl.LinearPipeline(task, LEVEL, files, len(files), seed=seed, file_root=args.data,
+                             shuffle=False, intensity_aug=P.IntensityAugConfig.off(),
+                             num_threads=args.num_threads, control_file=control_file)
+
+
+def run_next(pipe):
+    """One more batch of a built pipeline as numpy arrays."""
+    arrays = []
+    for o in pipe.run():
+        o = o.as_cpu() if hasattr(o, "as_cpu") else o
+        arrays.append(np.array(o.as_array()))
+    return arrays
+
+
+def rotation_axis(m):
+    r = np.asarray(m, np.float64)[:3, :3]
+    v = np.array([r[2, 1] - r[1, 2], r[0, 2] - r[2, 0], r[1, 0] - r[0, 1]])
+    return v / max(np.linalg.norm(v), 1e-12)
+
+
+def qr_scale_shear(lin):
+    """L = Q K with K upper triangular, positive diagonal -> (log diag (3,), shears (a, b, c))."""
+    q, k = np.linalg.qr(np.asarray(lin, np.float64))
+    sgn = np.sign(np.diag(k))
+    k = sgn[:, None] * k
+    d = np.diag(k)
+    return np.log(d), np.array([k[0, 1] / d[1], k[0, 2] / d[2], k[1, 2] / d[2]])
+
+
+def check_h(files, tmp, args):
+    """Control file re-read: version and range change within <= 3 batches of a rewrite."""
+    path = os.path.join(tmp, "control_h", "rigid.npy")
+    w = ControlWriter(path)
+    w.write(ctl_values(5.0, 2.0))
+    v1 = w.version
+    pipe = control_pipeline("rigid", files, args, path, args.seed + 21)
+    pipe.build()
+    rec = []
+
+    def one(phase):
+        o = run_next(pipe)
+        ver = o[-1].reshape(-1)
+        rot = [rotation_angle_deg(m) for m in pp.dali_to_mm(o[2], LEVEL).numpy()]
+        rec.append({"phase": phase, "versions": sorted(set(float(v) for v in ver)),
+                    "max_rot_deg": max(rot)})
+
+    for _ in range(3):
+        one("before")
+    w.write(ctl_values(40.0, 2.0))
+    v2 = w.version
+    for _ in range(6):
+        one("after")
+    del pipe
+    gc.collect()
+    single = all(len(r["versions"]) == 1 for r in rec)
+    after = [r for r in rec if r["phase"] == "after"]
+    lag = next((k + 1 for k, r in enumerate(after) if r["versions"] == [float(v2)]), None)
+    v1_ok = all(r["max_rot_deg"] <= 5.0 + 0.01 for r in rec if r["versions"] == [float(v1)])
+    v2_rot = [r["max_rot_deg"] for r in rec if r["versions"] == [float(v2)]]
+    v2_ok = bool(v2_rot) and max(v2_rot) > 10.0 and max(v2_rot) <= 40.0 + 0.01
+    before_ok = all(r["versions"] == [float(v1)] for r in rec if r["phase"] == "before")
+    ok = single and before_ok and lag is not None and lag <= 3 and v1_ok and v2_ok
+    record("h_control_reread", ok,
+           "rewrite v%d -> v%d seen after %s batch(es) (<= 3); max rot v1 batches <= 5.01: %s, v2 "
+           "batches max %.1f deg (> 10, <= 40.01); one version per batch: %s"
+           % (v1, v2, lag, v1_ok, max(v2_rot) if v2_rot else float("nan"), single),
+           lag_batches=lag, batches=rec)
+
+
+def check_i(files, tmp, args):
+    """G shared within a batch and T_i = G Rt_i S_i with G as written."""
+    info, ok = {}, True
+    rng = P.DEFAULT_LINEAR_RANGES
+    axis_d, t_d = P.control_global_dali(G_AXIS, G_T_MM, LEVEL)
+    for task in P.TASKS:
+        path = os.path.join(tmp, "control_i", "%s.npy" % task)
+        w = ControlWriter(path)
+        w.write(ctl_values(20.0, 5.0, rng[task]["log_scale"], rng[task]["shear"], G_AXIS, G_ANGLE, G_T_MM))
+        pipe = control_pipeline(task, files, args, path, args.seed + 31)
+        pipe.build()
+        o = run_next(pipe)
+        del pipe
+        gc.collect()
+        g_d = o[-2].astype(np.float64)
+        shared = float(np.abs(g_d - g_d[:1]).max())
+        g_mm = pp.dali_to_mm(g_d[:1], LEVEL).numpy()[0].astype(np.float64)
+        ang = rotation_angle_deg(g_mm)
+        axis_dot = abs(float(np.dot(rotation_axis(g_mm), G_AXIS)))
+        t_err = float(np.abs(g_mm[:3, 3] - np.asarray(G_T_MM)).max())
+        # numpy mirror (sign of the DALI angle not assumed: both signs tried)
+        mirror = {}
+        for sgn in (1.0, -1.0):
+            m = P.linear_matrices_np(0.0, (0.0, 0.0, 1.0), (0, 0, 0), (0, 0, 0), (0, 0, 0), SHAPE,
+                                     g_angle_deg=sgn * G_ANGLE, g_axis_dali=axis_d, g_t_vox_dali=t_d)
+            mirror["%+d" % sgn] = float(np.abs(m["G"][:3] - g_d[0]).max())
+        t_mm = pp.dali_to_mm(o[1], LEVEL).numpy().astype(np.float64)
+        g_inv = np.linalg.inv(g_mm)
+        d = {"G_shared_max_abs": shared, "G_angle_deg": ang, "G_axis_abs_dot": axis_dot,
+             "G_translation_err_mm": t_err, "G_vs_numpy_mirror_max_abs": mirror,
+             "version": sorted(set(o[-1].reshape(-1).tolist()))}
+        task_ok = (shared < 1e-6 and abs(ang - G_ANGLE) < 0.01 and axis_dot > 1 - 1e-5
+                   and t_err < 1e-3 and min(mirror.values()) < 1e-3)
+        ls, sh = rng[task]["log_scale"], rng[task]["shear"]
+        if task == "rigid":
+            tgt = pp.dali_to_mm(o[2], LEVEL).numpy().astype(np.float64)
+            rt = g_inv @ tgt                                 # Rt_i
+            s_i = np.linalg.inv(tgt) @ t_mm                  # S_i
+            lin = rt[:, :3, :3]
+            rigid_err = float(np.abs(lin @ np.transpose(lin, (0, 2, 1)) - np.eye(3)).max())
+            rot = [rotation_angle_deg(m) for m in rt]
+            diag = np.diagonal(s_i[:, :3, :3], axis1=1, axis2=2)
+            lower = np.array([s_i[:, 1, 0], s_i[:, 2, 0], s_i[:, 2, 1]])
+            recompose = float(np.abs(g_mm[None] @ rt @ s_i - t_mm).max())
+            d.update({"Rt_rigidity_err": rigid_err, "Rt_max_rot_deg": max(rot),
+                      "Rt_max_translation_mm": float(np.abs(rt[:, :3, 3]).max()),
+                      "S_translation_max_mm": float(np.abs(s_i[:, :3, 3]).max()),
+                      "S_lower_max": float(np.abs(lower).max()),
+                      "S_diag_range": [float(diag.min()), float(diag.max())],
+                      "recompose_max_abs": recompose})
+            task_ok &= (rigid_err < 1e-4 and max(rot) <= 20.0 + 0.01
+                        and d["Rt_max_translation_mm"] <= 5.0 + 1e-3
+                        and d["S_translation_max_mm"] < 1e-3 and d["S_lower_max"] < 1e-5
+                        and np.exp(-ls) - 1e-5 <= diag.min() and diag.max() <= np.exp(ls) + 1e-5
+                        and recompose < 1e-4)
+        else:
+            m = g_inv @ t_mm                                 # Rt_i S_i
+            rot = [rotation_angle_deg(x) for x in m]
+            q = [qr_scale_shear(x[:3, :3]) for x in m]
+            bound = 20.0 + np.degrees(np.sqrt(3.0) * sh) + 0.01
+            d.update({"max_rot_deg": max(rot), "rot_bound_deg": bound,
+                      "max_translation_mm": float(np.abs(m[:, :3, 3]).max()),
+                      "max_abs_log_scale": float(max(np.abs(a).max() for a, _ in q)),
+                      "max_abs_shear": float(max(np.abs(b).max() for _, b in q))})
+            task_ok &= (max(rot) <= bound and d["max_translation_mm"] <= 5.0 + 1e-3
+                        and d["max_abs_log_scale"] <= ls + 1e-5 and d["max_abs_shear"] <= sh + 1e-5)
+        d["passed"] = bool(task_ok)
+        info[task] = d
+        ok &= task_ok
+    record("i_global_shared", ok,
+           "G identical over the batch (max diff rigid %.1e / affine %.1e), angle %.3f deg (written %g), "
+           "|t - written| %.1e mm, T = G Rt S with Rt within 20 deg / 5 mm"
+           % (info["rigid"]["G_shared_max_abs"], info["affine"]["G_shared_max_abs"],
+              info["rigid"]["G_angle_deg"], G_ANGLE, info["rigid"]["G_translation_err_mm"]), **info)
+
+
+def check_j(files, src, brain, s_mom, tmp, args):
+    """Targets with G (central, pair-consistent) and the single-interpolation / round-trip criteria
+    of check (b) for the G-composed T_i."""
+    info, ok = {}, True
+    eye = np.eye(4)
+    rng = P.DEFAULT_LINEAR_RANGES
+    for task in P.TASKS:
+        path = os.path.join(tmp, "control_j", "%s.npy" % task)
+        w = ControlWriter(path)
+        w.write(ctl_values(20.0, 5.0, rng[task]["log_scale"], rng[task]["shear"], G_AXIS, G_ANGLE, G_T_MM))
+        pipe = control_pipeline(task, files, args, path, args.seed + 41)
+        pipe.build()
+        o = run_next(pipe)
+        del pipe
+        gc.collect()
+        k = dl.base_output_count(task)
+        base = o[:k]
+        imgs = base[0]
+        g_mm = pp.dali_to_mm(o[k][:1], LEVEL).numpy()[0].astype(np.float64)
+        post = pp.LinearPostprocess(task, LEVEL, flip_prob=0.5, seed=5)
+        out = post(*base)
+        a = tf.cast(out["A_star"], tf.float64)
+        tgt = tf.cast(out["T_target"], tf.float64)
+        n = int(a.shape[0])
+        mu = tfm.barycenter(a, iters=10)
+        rms_center = float(np.sqrt(tfm.point_loss(mu - eye, s_mom).numpy()))
+        ii, jj = np.where(~np.eye(n, dtype=bool))
+        rms_pair = float(np.sqrt(np.mean(tfm.point_loss(
+            tfm.pair_predictions(a, ii, jj) - tfm.pair_targets(tgt, ii, jj), s_mom).numpy())))
+        # Barycenter of the unflipped targets moves with G: mu*(G) ~ mu*(G = I) G^-1.
+        tgt0 = pp.dali_to_mm(base[2] if task == "rigid" else base[1], LEVEL).numpy().astype(np.float64)
+        mu_g = tfm.barycenter(tf.constant(np.linalg.inv(tgt0)), iters=10).numpy()
+        mu_0 = tfm.barycenter(tf.constant(np.linalg.inv(np.linalg.inv(g_mm)[None] @ tgt0)), iters=10).numpy()
+        bary_equiv = float(np.abs(mu_g - mu_0 @ np.linalg.inv(g_mm)).max())
+        # Re-warp (as check b): DALI render == TF render of the same T; round trip vs TF-only.
+        t_mm = pp.dali_to_mm(base[1], LEVEL).numpy()
+        t_inv = np.linalg.inv(t_mm.astype(np.float64)).astype(np.float32)
+        undo = layers.transform_image(imgs, t_mm, SPACING).numpy()[..., 0]
+        render_tf = layers.transform_image(src[..., None], t_inv, SPACING).numpy()
+        undo_tf = layers.transform_image(render_tf, t_mm, SPACING).numpy()[..., 0]
+        max_direct = float(np.abs(render_tf - imgs).max())
+        gaps, nccs = [], []
+        for i in range(len(src)):
+            valid = valid_mask(t_mm[i], SHAPE, SPACING) & brain
+            n_dali, n_tf = ncc(undo[i], src[i], valid), ncc(undo_tf[i], src[i], valid)
+            gaps.append(n_tf - n_dali)
+            nccs.append(n_dali)
+        d = {"rms_center_mm": rms_center, "rms_pair_mm": rms_pair,
+             "barycenter_rot_deg": rotation_angle_deg(mu_g), "barycenter_equivariance_max_abs": bary_equiv,
+             "direct_max_abs": max_direct, "worst_ncc_gap": max(gaps), "min_ncc": min(nccs),
+             "flip_axes": out["flip_axes"].numpy()}
+        task_ok = (rms_center < 1e-3 and rms_pair < 1e-3 and max_direct < args.tol_direct
+                   and max(gaps) < args.tol_ncc_gap)
+        d["passed"] = bool(task_ok)
+        info[task] = d
+        ok &= task_ok
+    r = info["rigid"]
+    record("j_targets_with_global", ok,
+           "rigid center %.1e / pairs %.1e mm, barycenter rot %.1f deg; single-interp max |diff| "
+           "rigid %.1e / affine %.1e; worst NCC gap rigid %.1e / affine %.1e"
+           % (r["rms_center_mm"], r["rms_pair_mm"], r["barycenter_rot_deg"], r["direct_max_abs"],
+              info["affine"]["direct_max_abs"], r["worst_ncc_gap"], info["affine"]["worst_ncc_gap"]),
+           **info)
+
+
+def check_k(files, tmp, args):
+    """Curriculum start values: sampled per-image magnitudes respect the written ranges."""
+    start = {t: {k: (v if v is not None else P.DEFAULT_LINEAR_RANGES[t][k]) for k, v in d.items()}
+             for t, d in A.CURRICULUM_START_DEFAULTS.items()}
+    info, ok = {}, True
+    for task in P.TASKS:
+        s = start[task]
+        path = os.path.join(tmp, "control_k", "%s.npy" % task)
+        w = ControlWriter(path)
+        w.write(ctl_values(s["rotation_deg"], s["translation_mm"], s["log_scale"], s["shear"]))
+        pipe = control_pipeline(task, files, args, path, args.seed + 51)
+        pipe.build()
+        outs = [run_next(pipe) for _ in range(4)]
+        del pipe
+        gc.collect()
+        t_mm = np.concatenate([pp.dali_to_mm(o[1], LEVEL).numpy() for o in outs]).astype(np.float64)
+        if task == "rigid":
+            rt = np.concatenate([pp.dali_to_mm(o[2], LEVEL).numpy() for o in outs]).astype(np.float64)
+            lin = (np.linalg.inv(rt) @ t_mm)[:, :3, :3]
+            rot = [rotation_angle_deg(m) for m in rt]
+            rot_bound = s["rotation_deg"] + 0.01
+        else:
+            lin = t_mm[:, :3, :3]
+            rot = [rotation_angle_deg(m) for m in t_mm]
+            rot_bound = s["rotation_deg"] + np.degrees(np.sqrt(3.0) * s["shear"]) + 0.01
+        q = [qr_scale_shear(x) for x in lin]
+        max_t = float(np.abs(t_mm[:, :3, 3]).max())
+        d = {"n_samples": len(rot), "start": s, "max_rot_deg": max(rot), "rot_bound_deg": rot_bound,
+             "max_translation_mm": max_t,
+             "max_abs_log_scale": float(max(np.abs(a).max() for a, _ in q)),
+             "max_abs_shear": float(max(np.abs(b).max() for _, b in q))}
+        task_ok = (max(rot) <= rot_bound and max_t <= s["translation_mm"] + 1e-3
+                   and d["max_abs_log_scale"] <= s["log_scale"] + 1e-5
+                   and d["max_abs_shear"] <= s["shear"] + 1e-5
+                   # the ranges are active, not collapsed to 0 (32 samples)
+                   and max(rot) >= 0.5 * s["rotation_deg"] and max_t >= 0.5 * s["translation_mm"])
+        d["passed"] = bool(task_ok)
+        info[task] = d
+        ok &= task_ok
+    record("k_curriculum_magnitudes", ok,
+           "rigid max rot %.2f (<= %.2f) deg, max |t| %.2f mm; affine max rot %.2f (<= %.2f) deg, max "
+           "|t| %.2f mm, |log s| %.4f, |shear| %.4f"
+           % (info["rigid"]["max_rot_deg"], info["rigid"]["rot_bound_deg"],
+              info["rigid"]["max_translation_mm"], info["affine"]["max_rot_deg"],
+              info["affine"]["rot_bound_deg"], info["affine"]["max_translation_mm"],
+              info["affine"]["max_abs_log_scale"], info["affine"]["max_abs_shear"]), **info)
+
+
 # ---------------------------------------------------------------------------- main
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--data", required=True, help="npy_v2 export root (export_manifest.csv, template/)")
     ap.add_argument("--scratch", required=True, help="writable folder for temporary files")
     ap.add_argument("--out", required=True, help="JSON summary path")
-    ap.add_argument("--checks", default="a,b,c,d,e,f,g")
+    ap.add_argument("--checks", default="a,b,c,d,e,f,g,h,i,j,k")
     ap.add_argument("--num-threads", type=int, default=4)
     ap.add_argument("--n-real", type=int, default=8)
     ap.add_argument("--n-throughput", type=int, default=48)
@@ -580,6 +865,18 @@ def main():
             guarded("g_float16_warp_affine", check_g, tmp, args)
         if "e" in checks:
             guarded("e_throughput_memory", check_e, args)
+        # (h)-(k): control file (curriculum / global transform). Control files go to tmp.
+        if "h" in checks:
+            guarded("h_control_reread", check_h, files, tmp, args)
+        if "i" in checks:
+            guarded("i_global_shared", check_i, files, tmp, args)
+        if "j" in checks:
+            src = np.stack([np.load(os.path.join(args.data, f)) for f in files]).astype(np.float32)
+            brain = np.load(os.path.join(args.data, dm.TEMPLATE_DIR, "template_mask_4.npy")) > 0
+            s_mom = pp.brain_S_matrix(LEVEL, os.path.join(args.data, dm.TEMPLATE_DIR))
+            guarded("j_targets_with_global", check_j, files, src, brain, s_mom, tmp, args)
+        if "k" in checks:
+            guarded("k_curriculum_magnitudes", check_k, files, tmp, args)
     finally:
         if not args.keep_tmp:
             shutil.rmtree(tmp, ignore_errors=True)

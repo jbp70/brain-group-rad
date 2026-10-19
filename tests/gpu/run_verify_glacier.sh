@@ -3,22 +3,25 @@
 # on ONE GPU.
 #
 # Usage (on glacier, after `git pull` in the clone; pick a free GPU with nvidia-smi first):
-#   bash /autofs/space/crater_001/users/jn85/BrainRegProjects/GroupwiseReg/brain-group-rad/tests/gpu/run_verify_glacier.sh <gpu_index> [timeout_seconds] [verify|unittest]
+#   bash /autofs/space/crater_001/users/jn85/BrainRegProjects/GroupwiseReg/brain-group-rad/tests/gpu/run_verify_glacier.sh <gpu_index> [timeout_seconds] [verify|unittest] [checks]
 #
 # Modes:
 #   verify   (default) tests/gpu/verify_dali_pipeline.py -> summary.json, verify.log
+#            [checks]: comma-separated subset of a-k (default: all; e.g. h,i,j,k for the
+#            curriculum / global-transform checks)
 #   unittest python -m unittest discover -s tests -t . -v -> unittest.log (the DALI test runs
 #            here instead of skipping; the tests' tempfile folders go to TMPDIR = scratch)
 #
 # Writes only inside $PROJ/scratch/m2: summary.json, verify.log / unittest.log, the CUDA JIT
-# cache, the Keras config folder and temporary folders (removed at the end). Bytecode writing
-# is disabled, so the repo clone stays clean. Exit code: that of the Python command (1 = a
-# check / test failed, 124 = timeout).
+# cache, the Keras config folder and temporary folders (removed at the end; the control files
+# of checks h-k live there too). Bytecode writing is disabled, so the repo clone stays clean.
+# Exit code: that of the Python command (1 = a check / test failed, 124 = timeout).
 set -euo pipefail
 
-GPU="${1:?usage: run_verify_glacier.sh <gpu_index> [timeout_seconds] [verify|unittest]}"
+GPU="${1:?usage: run_verify_glacier.sh <gpu_index> [timeout_seconds] [verify|unittest] [checks]}"
 TIMEOUT_S="${2:-1800}"
 MODE="${3:-verify}"
+CHECKS="${4:-}"
 if ! [[ "$GPU" =~ ^[0-9]+$ ]]; then
     echo "gpu_index must be a single integer, got '$GPU'" >&2
     exit 2
@@ -29,6 +32,10 @@ if ! [[ "$TIMEOUT_S" =~ ^[0-9]+$ ]]; then
 fi
 if [[ "$MODE" != "verify" && "$MODE" != "unittest" ]]; then
     echo "mode must be 'verify' or 'unittest', got '$MODE'" >&2
+    exit 2
+fi
+if [[ -n "$CHECKS" ]] && ! [[ "$CHECKS" =~ ^[a-k](,[a-k])*$ ]]; then
+    echo "checks must be a comma-separated list of letters a-k, got '$CHECKS'" >&2
     exit 2
 fi
 
@@ -54,12 +61,15 @@ export SINGULARITYENV_PYTHONDONTWRITEBYTECODE=1
 export SINGULARITYENV_CUDA_CACHE_PATH="$SCRATCH/cuda_cache"
 export SINGULARITYENV_KERAS_HOME="$SCRATCH/keras"
 
-echo "host $(hostname) | GPU $GPU | mode $MODE | timeout ${TIMEOUT_S}s | repo $(git rev-parse --short HEAD 2>/dev/null || echo '?')"
+echo "host $(hostname) | GPU $GPU | mode $MODE | checks ${CHECKS:-default} | timeout ${TIMEOUT_S}s | repo $(git rev-parse --short HEAD 2>/dev/null || echo '?')"
 nvidia-smi -i "$GPU" --query-gpu=index,name,memory.used,memory.total --format=csv,noheader || true
 
 if [[ "$MODE" == "verify" ]]; then
     CMD=(python tests/gpu/verify_dali_pipeline.py --data "$DATA" --scratch "$SCRATCH"
          --out "$SCRATCH/summary.json")
+    if [[ -n "$CHECKS" ]]; then
+        CMD+=(--checks "$CHECKS")
+    fi
     LOG="$SCRATCH/verify.log"
 else
     CMD=(python -m unittest discover -s tests -t . -v)

@@ -409,5 +409,78 @@ class TestHeadActivation(TrainerCase):
             narrow_config(head_activation="gelu")
 
 
+class TestControls(TrainerCase):
+    """Curriculum / global transform hooks (runtime.curriculum, design 3.2 v3.5)."""
+
+    def extras(self, mixed=False, version=1.0):
+        g = np.tile(np.eye(4)[:3][None], (N, 1, 1)).astype(np.float32)
+        if mixed:
+            g[1, 0, 3] = 2.0
+        return (tf.constant(g), tf.constant(np.full([N], version, np.float32)))
+
+    def test_off_is_unchanged(self):
+        batch = self.groups["rigid"]["batch"]
+        runs = []
+        for b in (batch, tuple(batch) + self.extras()):
+            tf.random.set_seed(0)
+            tr = self.make(sources={"rigid": fd.FixedGroupSource(b)})
+            tr.fit(3)
+            runs.append([h["loss"] for h in tr.history])
+            self.assertEqual(tr.controls, {})
+            self.assertFalse(any(k.startswith("control") or k == "g_mixed_batch" for k in tr.history[-1]))
+            free_memory()
+        np.testing.assert_allclose(runs[0], runs[1], rtol=1e-4)   # trailing extras are dropped
+        self.assertEqual(os.listdir(self.tmp), [])         # no control file anywhere
+
+    def test_controls_written_each_step_and_logged(self):
+        from runtime import curriculum as CU
+        start = {"rotation_deg": 10.0, "translation_mm": 2.0, "log_scale": 0.0, "shear": 0.0}
+        end = {"rotation_deg": 50.0, "translation_mm": 10.0, "log_scale": 0.0, "shear": 0.0}
+        path = os.path.join(self.tmp, "control", "rigid.npy")
+        ctl = CU.TaskControl(end, CU.LinearCurriculum(start, end, 4),
+                             CU.GlobalTransformSampler(45.0, 10.0, resample_every=2, seed=1),
+                             writer=CU.ControlWriter(path))
+        batch = tuple(self.groups["rigid"]["batch"]) + self.extras(mixed=True, version=1.0)
+        logger = RunLogger(make_run_dir(self.tmp, "ctl"), backend="jsonl", tensorboard=False, quiet=True)
+        model = GroupRegLevelModel(4, narrow_config(dropout=0.0, seed=1)).build_model(N)
+        tr = Trainer(model, O.make_optimizer("adam", lr=1e-3), {"rigid": fd.FixedGroupSource(batch)},
+                     self.groups["rigid"]["S"], config(), logger=logger, controls={"rigid": ctl})
+        tr.fit(4)
+        logger.close()
+        self.assertEqual(ctl.writer.version, 4)            # values changed at steps 0..3
+        on_disk = ctl.writer.read()
+        self.assertEqual(on_disk["version"], 4)
+        self.assertAlmostEqual(on_disk["rotation_deg"], 40.0, places=4)   # step 3: 10 + 3/4 * 40
+        self.assertAlmostEqual(on_disk["g_angle_deg"], ctl.sampler.params(3)["angle_deg"], places=4)
+        h = tr.history[-1]
+        self.assertEqual(h["g_mixed_batch"], 1.0)
+        self.assertEqual(h["control_version_lag"], 3.0)
+        self.assertAlmostEqual(h["control_rot_deg"], 40.0)
+        self.assertAlmostEqual(h["control_trans_mm"], 8.0)
+        self.assertEqual(h["control_g_angle_deg"], ctl.sampler.params(3)["angle_deg"])
+        self.assertEqual([x["control_rot_deg"] for x in tr.history], [10.0, 20.0, 30.0, 40.0])
+        self.assertTrue(all(x["finite"] for x in tr.history))
+        with open(logger.metrics_path) as f:
+            keys = set().union(*[json.loads(line)["data"].keys() for line in f])
+        for k in ("g_mixed_batch", "control_version_lag", "control_rot_deg", "control_trans_mm",
+                  "control_g_angle_deg"):
+            self.assertIn("train_rigid/" + k, keys)
+        # The values are a pure function of the step (resume reproduces them).
+        fresh = CU.TaskControl(end, CU.LinearCurriculum(start, end, 4),
+                               CU.GlobalTransformSampler(45.0, 10.0, resample_every=2, seed=1))
+        self.assertEqual(fresh.values_at(3), ctl.values_at(3))
+
+    def test_named_val_sets_and_pngs(self):
+        g = self.groups["rigid"]
+        vs = fd.ValidationSet.from_group(g["images"], g["T"], g["T_target"], "rigid", 4)
+        png = os.path.join(self.tmp, "png")
+        tr = self.make(config(val_png_dir=png, val_png_k=2), val_sets={"rigid": vs, "rigid_g": vs})
+        val = tr.validate()
+        for name in ("val_rigid", "val_rigid_g", "val_rigid_trainmode", "val_rigid_g_trainmode"):
+            self.assertIn(name + "/center_rms_mm", val)
+        self.assertAlmostEqual(val["val_rigid/center_rms_mm"], val["val_rigid_g/center_rms_mm"], places=5)
+        self.assertEqual(sorted(os.listdir(png)), ["rigid_g_step0000000.png", "rigid_step0000000.png"])
+
+
 if __name__ == "__main__":
     unittest.main()
