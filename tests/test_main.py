@@ -228,6 +228,7 @@ class TestDeformMain(MainCase):
         self.assertEqual(sorted(controls), ["rigid"])
         self.assertEqual(sorted(sources), ["deform", "rigid"])
         self.assertEqual(list(calls["linear_val"][0][1]), ["rigid"])
+        self.assertEqual(calls["linear_val"][0][3], 6)                    # linear nv = min(8, 6 val cases)
         a, k = calls["deform_val"]
         self.assertEqual((a[2], a[3], a[4], k["seed"]), (4, 4, 3, 7))     # level, nv = min(4, 6), groups
         self.assertEqual(val_sets["deform"], "deform_set")
@@ -240,6 +241,41 @@ class TestDeformMain(MainCase):
         self.assertEqual((sorted(sources), sorted(val_sets), controls), (["deform"], ["deform"], {}))
         self.assertEqual(sorted(calls), ["deform_val", "images_labels"])  # no linear val loading
         self.assertEqual(calls["deform_val"][0][3], 6)                      # nv = min(8, 6 val cases)
+
+    def test_three_task_validation_group_sizes(self):
+        # Milestone 7 recipe on 39 val cases (the real T1 val split): linear N 32 -> 2 groups of
+        # 32 per linear set, deform N 16 -> 3 groups of 16; no --val-group-size.
+        from data_loading import params as P
+        from runtime import args as A
+        from runtime import fixed_data as real_fd
+        shape = (39,) + P.LEVEL_SHAPE[4] + (1,)
+        rng = np.random.default_rng(0)
+        images = rng.random(shape).astype(np.float32)
+        labels = rng.integers(0, 3, shape).astype(np.uint8)
+
+        class FakeDM:
+            def __init__(self, *a, **kw):
+                self.kw = kw
+                self.control_writers, self.files, self.template_dir = {}, ["f"], "t"
+
+            def iterator(self, task):
+                return iter((task,))
+
+        fd = _Stub(load_level_images=lambda *a, **k: (images, []),
+                   load_level_images_and_labels=lambda *a, **k: (images, labels, [], []),
+                   build_validation_sets=real_fd.build_validation_sets,
+                   DeformValidationSet=real_fd.DeformValidationSet)
+        mods = (fd, P, None, _Stub(brain_S_matrix=lambda *a, **k: np.eye(4)), _Stub(LinearDataModule=FakeDM))
+        args = A.parse_args(["--data", self.tmp, "--results", self.tmp, "--run-name", "r",
+                             "--task-ratio", "rigid:1,affine:1,deform:2", "--group-size", "32",
+                             "--deform-group-size", "16"])
+        _, val_sets, _, _, _ = M._build_dali_data(args, 4, mods)
+        self.assertEqual(sorted(val_sets), ["affine", "deform", "rigid"])
+        for t in ("rigid", "affine"):
+            self.assertEqual((val_sets[t].group_size, len(val_sets[t].groups)), (32, 2), t)
+        self.assertEqual((val_sets["deform"].group_size, len(val_sets["deform"].groups)), (16, 3))
+        self.assertEqual(val_sets["deform"].groups[0]["images"].shape[0], 16)
+        self.assertEqual(args.val_deform_max_pairs, 64)                    # 16 * 15 = 240 pairs -> 64
 
 
 class _Stub:
@@ -296,6 +332,23 @@ class TestResumeControlsAndWarmStart(MainCase):
         self.assertEqual(lines[0]["data"]["resumed_step"], 0)           # fresh step / optimizer
         self.assertFalse(lines[0]["data"]["resumed"])
         self.assertTrue(os.path.exists(os.path.join(self.run_dir("warm"), "ckpt", "last", "last-2.index")))
+        self.assertEqual(cfg["init_weights"]["mode"], "full")
+        free_memory()
+        # Milestone 7: the linear-only source warm-starts a rigid + deform run (partial restore).
+        self.assertEqual(M.main(base + ["--run-name", "warm_deform", "--init-weights", src_ckpt,
+                                        "--task-ratio", "rigid:1,deform:1", "--deform-group-size", "2"]), 0)
+        with open(os.path.join(self.run_dir("warm_deform"), "config.json")) as f:
+            iw = json.load(f)["init_weights"]
+        self.assertEqual(iw["mode"], "partial")
+        self.assertEqual(sorted(iw["fresh_parts"]), ["deform_decoder"])
+        self.assertEqual(sorted(iw["restored_parts"]), ["centering", "encoder", "linear_decoder"])
+        self.assertEqual(iw["config_diff"], {"deform_decoder": [False, True]})
+        with open(os.path.join(self.run_dir("warm_deform"), "logs", "metrics.jsonl")) as f:
+            lines = [json.loads(line) for line in f]
+        self.assertEqual(lines[0]["step"], "PARAMETER")
+        ev = [r["data"] for r in lines if r["data"].get("event") == "init_weights"]
+        self.assertEqual(len(ev), 1)
+        self.assertEqual((ev[0]["mode"], ev[0]["fresh_parts"]), ("partial", iw["fresh_parts"]))
         free_memory()
         # Mutually exclusive with resuming a run dir that has a checkpoint.
         with self.assertRaises(SystemExit) as cm:
@@ -306,6 +359,42 @@ class TestResumeControlsAndWarmStart(MainCase):
         with self.assertRaises(ValueError) as cm:
             M.main(base + ["--run-name", "warm_bad", "--init-weights", src_ckpt, "--translation-scale", "7"])
         self.assertIn("translation_scale", str(cm.exception))
+
+    def test_three_task_warm_start_smoke(self):
+        # Milestone 7 end to end: a tiny linear-only run warm-starts a rigid:affine:deform 1:1:2
+        # run with different group sizes (linear 4, deform 2) and --loss-scale-mm2 100; the run
+        # completes, logs the encoder grad-norm diagnostics and writes both best checkpoints.
+        from runtime.run import TaskSchedule
+        res = os.path.join(self.tmp, "results")
+        common = ["--overfit-one-group", "--overfit-synthetic", "--group-size", "4", "--log-every", "1",
+                  "--schedule", "constant", "--warmup-steps", "0", "--results", res] + NARROW_ARGS + COMMON
+        rc = M.main(common + ["--run-name", "lin_src", "--task-ratio", "rigid:1,affine:1", "--overfit-max-steps", "6",
+                              "--val-every", "3", "--val-png", "false"])
+        self.assertIn(rc, (0, 1))
+        free_memory()
+        ratio = {"rigid": 1.0, "affine": 1.0, "deform": 2.0}
+        seed = next(s for s in range(1000) if {TaskSchedule(ratio, s).draw(i) for i in range(12)} == set(ratio))
+        rc = M.main(common + ["--run-name", "m7", "--task-ratio", "rigid:1,affine:1,deform:2", "--deform-group-size",
+                              "2", "--init-weights", os.path.join(self.run_dir("lin_src"), "ckpt", "last"),
+                              "--overfit-max-steps", "12", "--val-every", "6", "--loss-scale-mm2", "100",
+                              "--seed", str(seed)])
+        self.assertIn(rc, (0, 1))
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "gpu"))
+        try:
+            import check_mixed_run
+        finally:
+            sys.path.pop(0)
+        d = self.run_dir("m7")
+        ok, results = check_mixed_run.check(d, ["rigid", "affine", "deform"], 12, expect_best=True,
+                                            expect_init_weights="partial", expect_enc_grad=True)
+        sys.stderr.write("\n[m7 smoke] seed %d\n  %s\n" % (seed, "\n  ".join(
+            "%s %-22s %s" % ("PASS" if p else "FAIL", n, x) for n, p, x in results)))
+        self.assertTrue(ok, [r for r in results if not r[1]])
+        with open(os.path.join(d, "overfit_summary.json")) as f:
+            s = json.load(f)
+        self.assertEqual(s["trace_counts"], {"rigid": 1, "affine": 1, "deform": 1})
+        self.assertEqual(s["deform_group_size"], 2)
+        self.assertEqual(s["group_size"], 4)
 
 
 class TestOverfit(MainCase):

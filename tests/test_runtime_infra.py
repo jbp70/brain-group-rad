@@ -167,6 +167,23 @@ class TestArgs(unittest.TestCase):
                 with self.assertRaises(SystemExit, msg=str(bad)):
                     A.parse_args(["--data", "x"] + bad)
 
+    def test_task_loss_weights_flag(self):
+        # Milestone 7: default all 1 (linear-only runs unchanged), missing tasks = 1.
+        a = A.parse_args(["--data", "x"])
+        self.assertIsNone(a.task_loss_weights)
+        self.assertEqual(a.task_loss_weights_parsed, {"rigid": 1.0, "affine": 1.0, "deform": 1.0})
+        self.assertEqual(A.train_config_from_args(a).task_loss_weights, {"rigid": 1.0, "affine": 1.0, "deform": 1.0})
+        a = A.parse_args(["--data", "x", "--task-ratio", "rigid:1,affine:1,deform:2", "--task-loss-weights",
+                          "deform:4, affine:0.5"])
+        self.assertEqual(A.train_config_from_args(a).task_loss_weights, {"rigid": 1.0, "affine": 0.5, "deform": 4.0})
+        json.dumps(A.args_to_dict(a))
+        self.assertEqual(A.parse_task_loss_weights(""), {"rigid": 1.0, "affine": 1.0, "deform": 1.0})
+        import contextlib
+        with open(os.devnull, "w") as devnull, contextlib.redirect_stderr(devnull):
+            for bad in ("deform:0", "foo:1", "rigid:nan", "rigid:-1", "rigid:inf", "deform"):
+                with self.assertRaises(SystemExit, msg=bad):
+                    A.parse_args(["--data", "x", "--task-loss-weights", bad])
+
     def test_best_metric_with_deform(self):
         from runtime.run import DEFORM_BEST_METRIC, MEAN_PAIR_METRIC, resolve_best_metric
         self.assertEqual(A.DEFORM_BEST_METRIC, DEFORM_BEST_METRIC)
@@ -346,6 +363,96 @@ class TestCheckpoint(TempDirCase):
             C.load_model_weights(m3, narrow_config(dropout=0.0), os.path.join(self.tmp, "missing"))
         with self.assertRaises(ValueError):
             C.load_model_weights(m3, narrow_config(dropout=0.0), paths["ckpt_best"])   # empty dir
+
+    def save_source(self, name, cfg):
+        """A narrow model of `cfg` trained 2 rigid steps, saved as <tmp>/<name> with config.json.
+        Returns (ckpt/last dir, source model)."""
+        paths = make_run_dir(self.tmp, name)
+        model = GroupRegLevelModel(4, cfg).build_model(3)
+        opt = O.make_optimizer("adam", lr=1e-3)
+        O.build_optimizer(opt, model.trainable_variables)
+        step = tf.Variable(0, dtype=tf.int64)
+        ck = C.RunCheckpoint(paths["ckpt_last"], paths["ckpt_best"], model, opt, step)
+        self.train_two_steps(model, opt, step)
+        ck.save_last()
+        C.write_config(paths["config"], cfg, {})
+        return paths["ckpt_last"], model
+
+    @staticmethod
+    def part_values(model, part):
+        return [v.numpy().copy() for v in getattr(model, part).weights]
+
+    def assert_parts_equal(self, src, dst, parts=C.SHARED_PARTS):
+        for part in parts:
+            a, b = self.part_values(src, part), self.part_values(dst, part)
+            self.assertEqual(len(a), len(b), part)
+            for x, y, v in zip(a, b, getattr(dst, part).weights):
+                self.assertTrue(np.array_equal(x, y), v.name)
+
+    def test_warm_start_linear_into_deform(self):
+        # Milestone 7: a linear-only checkpoint warm-starts a deform model (encoder + linear heads
+        # restored, deform decoder fresh); the optimizer is never read.
+        src_dir, src = self.save_source("lin", narrow_config(dropout=0.0))
+        bn = [v for v in src.encoder.weights if "moving_" in v.name]
+        self.assertTrue(bn)
+        self.assertTrue(any(np.any(v.numpy() != (0.0 if "moving_mean" in v.name else 1.0)) for v in bn))
+        cases = {"default": dict(deform_decoder=True),
+                 "widths_steps": dict(deform_decoder=True, decoder_widths=(8, 8, 8, 4, 4), integration_steps=5)}
+        for label, kw in cases.items():
+            with self.subTest(label):
+                cfg = narrow_config(dropout=0.0, seed=99, **kw)
+                m = GroupRegLevelModel(4, cfg).build_model(3)
+                fresh0 = self.part_values(m, "deform_decoder")
+                enc0 = self.part_values(m, "encoder")
+                info = C.warm_start_model(m, cfg, src_dir)
+                self.assertEqual(info["mode"], "partial")
+                self.assertEqual(info["fresh_parts"], {"deform_decoder": len(m.deform_decoder.weights)})
+                self.assertEqual(info["ignored_source_parts"], [])
+                self.assertEqual(sorted(info["restored_parts"]), sorted(C.SHARED_PARTS))
+                self.assertEqual(info["n_restored_vars"] + info["n_fresh_vars"], len(m.weights))
+                self.assertIn("deform_decoder", info["config_diff"])
+                self.assertEqual(info["config_diff"]["deform_decoder"], [False, True])
+                if label == "widths_steps":
+                    self.assertEqual(sorted(info["config_diff"]),
+                                     ["decoder_widths", "deform_decoder", "integration_steps"])
+                self.assertTrue(info["checkpoint"].endswith("last-2"))
+                self.assert_parts_equal(src, m)
+                self.assertFalse(all(np.array_equal(a, v.numpy()) for a, v in zip(enc0, m.encoder.weights)))
+                for a, v in zip(fresh0, m.deform_decoder.weights):          # untouched
+                    self.assertTrue(np.array_equal(a, v.numpy()), v.name)
+                opt = O.make_optimizer("adam", lr=1e-3)                    # built afterwards: fresh
+                O.build_optimizer(opt, m.trainable_variables)
+                self.assertEqual(int(opt.iterations.numpy()), 0)
+                self.assertTrue(all(not np.any(v.numpy()) for v in opt.variables()))
+                # The deform forward runs on the warm-started model.
+                out = m(tf.zeros((2,) + P.LEVEL_SHAPE[4] + (1,)), task="deform", training=False)
+                self.assertTrue(np.all(np.isfinite(out["u"].numpy())))
+        # Any non-decoder field still raises, naming the field.
+        for kw, field in ((dict(translation_scale=10.0), "translation_scale"),
+                          (dict(filters=(16, 32, 32, 48, 64, 128)), "filters")):
+            cfg = narrow_config(dropout=0.0, deform_decoder=True, **kw)
+            m = GroupRegLevelModel(4, cfg).build_model(3)
+            with self.assertRaises(ValueError) as cm:
+                C.warm_start_model(m, cfg, src_dir)
+            self.assertIn("in ['%s']" % field, str(cm.exception))
+
+    def test_warm_start_deform_into_linear_and_full(self):
+        cfg_d = narrow_config(dropout=0.0, deform_decoder=True)
+        src_dir, src = self.save_source("dfm", cfg_d)
+        cfg = narrow_config(dropout=0.0, seed=7)
+        m = GroupRegLevelModel(4, cfg).build_model(3)
+        info = C.warm_start_model(m, cfg, src_dir)
+        self.assertEqual((info["mode"], info["fresh_parts"], info["ignored_source_parts"]),
+                         ("partial", {}, ["deform_decoder"]))
+        self.assertEqual(info["n_restored_vars"], len(m.weights))
+        self.assert_parts_equal(src, m)
+        # Identical configs (seed aside): the strict whole-model restore, deform decoder included.
+        m2 = GroupRegLevelModel(4, cfg_d.replace(seed=3)).build_model(3)
+        info = C.warm_start_model(m2, cfg_d.replace(seed=3), src_dir)
+        self.assertEqual((info["mode"], info["config_diff"], info["fresh_parts"]), ("full", {}, {}))
+        self.assertEqual(info["n_restored_vars"], len(m2.weights))
+        self.assert_parts_equal(src, m2, C.SHARED_PARTS + ("deform_decoder",))
+        self.assertEqual(C.load_model_weights(m2, cfg_d, src_dir)[0], info["checkpoint"])
 
     def test_peek_last_step(self):
         # Review-curriculum issue 5: main.py reads the resumed step before building the pipelines.

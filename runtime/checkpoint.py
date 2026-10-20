@@ -13,6 +13,11 @@ the same flip / pair sequence). Two `tf.train.CheckpointManager`s write it:
 
 Build the model and the optimizer (on all trainable variables) before restoring, so every
 variable exists and restores eagerly (`assert_existing_objects_matched`).
+
+Warm start (--init-weights, `warm_start_model`; milestone 7): model variables only. Same
+ModelConfig: strict whole-model restore. Configs differing only in the deform-decoder fields
+(`DECODER_ONLY_FIELDS`): the encoder, linear decoder + heads and centering are restored through
+a temporary model built with the source config, the deform decoder stays freshly initialised.
 """
 import json
 import os
@@ -126,30 +131,109 @@ def source_config_path(ckpt_prefix):
     return path if os.path.exists(path) else None
 
 
-def load_model_weights(model, model_config, path):
-    """Warm start: restore ONLY the model variables of another run's checkpoint into `model`
-    (built, same ModelConfig). Optimizer, step, best value and RNG states are not read.
+# ModelConfig fields that change nothing outside the deform decoder / SVF integrator
+# (models/group_net.py: DeformDecoder and GroupRegLevelModel._call_deform). A warm start whose
+# configs differ only in these restores the shared parts and keeps the deform decoder fresh.
+DECODER_ONLY_FIELDS = ("deform_decoder", "decoder_widths", "integration_steps")
+# Model parts restored by a partial warm start (GroupRegLevelModel attributes).
+SHARED_PARTS = ("encoder", "linear_decoder", "centering")
+DEFORM_PART = "deform_decoder"
 
-    The source run's config.json (if present) must have the same ModelConfig except the init
-    seed, as in `GroupRegLevelModel.copy_weights_from`; otherwise ValueError names the fields.
-    Every model variable must be matched in the checkpoint. Returns (checkpoint prefix,
-    source config path or None)."""
-    prefix = resolve_checkpoint(path)
-    cfg_path = source_config_path(prefix)
-    if cfg_path is not None:
-        with open(cfg_path) as f:
-            saved = json.load(f)
-        theirs = {k: v for k, v in ModelConfig.from_dict(saved["model_config"]).to_dict().items()
-                  if k != "seed"}
-        mine = {k: v for k, v in model_config.to_dict().items() if k != "seed"}
-        diff = sorted(k for k in set(mine) | set(theirs) if mine.get(k) != theirs.get(k))
-        if diff:
-            raise ValueError("--init-weights: model config differs from the source run %s in %s; "
-                             "build the model with the same flags" % (cfg_path, diff))
+
+def _strict_restore(model, prefix):
     status = tf.train.Checkpoint(model=model).restore(prefix)
     status.expect_partial()                       # the optimizer, step, ... are not loaded
     status.assert_existing_objects_matched()
-    return prefix, cfg_path
+
+
+def warm_start_model(model, model_config, path):
+    """Warm start: restore ONLY model variables of another run's checkpoint into `model` (built).
+    Optimizer, step, best value and RNG states are never read (the caller builds a fresh
+    optimizer).
+
+    * No source config.json next to the checkpoint, or the same ModelConfig (init seed excluded):
+      strict restore of the whole model (every model variable must be in the checkpoint),
+      ``mode='full'``.
+    * Configs differing only in `DECODER_ONLY_FIELDS` (e.g. a linear-only source into a model
+      with the deform decoder, or the reverse): ``mode='partial'``. A model with the source
+      config is built and restored strictly, then the `SHARED_PARTS` (encoder, linear decoder +
+      heads, centering; trainable variables and BN / LayerNorm state) are copied after checking
+      count, shape and scope-local name of every variable. The target's deform decoder keeps
+      its fresh initialisation; a source deform decoder is ignored.
+    * Any other difference: ValueError naming the fields.
+
+    Returns an info dict: checkpoint, source_config, mode, config_diff {field: [source, target]},
+    restored_parts {part: n_vars}, fresh_parts {part: n_vars}, ignored_source_parts [part],
+    n_restored_vars, n_fresh_vars."""
+    prefix = resolve_checkpoint(path)
+    cfg_path = source_config_path(prefix)
+    info = {"checkpoint": prefix, "source_config": cfg_path, "mode": "full", "config_diff": {},
+            "restored_parts": {}, "fresh_parts": {}, "ignored_source_parts": [],
+            "n_restored_vars": 0, "n_fresh_vars": 0}
+    src_cfg = None
+    diff = []
+    if cfg_path is not None:
+        with open(cfg_path) as f:
+            saved = json.load(f)
+        src_cfg = ModelConfig.from_dict(saved["model_config"])
+        theirs = {k: v for k, v in src_cfg.to_dict().items() if k != "seed"}
+        mine = {k: v for k, v in model_config.to_dict().items() if k != "seed"}
+        diff = sorted(k for k in set(mine) | set(theirs) if mine.get(k) != theirs.get(k))
+        info["config_diff"] = {k: [theirs.get(k), mine.get(k)] for k in diff}
+        other = [k for k in diff if k not in DECODER_ONLY_FIELDS]
+        if other:
+            raise ValueError("--init-weights: model config differs from the source run %s in %s "
+                             "(only %s may differ); build the model with the same flags"
+                             % (cfg_path, other, list(DECODER_ONLY_FIELDS)))
+    if not diff:
+        _strict_restore(model, prefix)
+        parts = SHARED_PARTS + ((DEFORM_PART,) if getattr(model, DEFORM_PART, None) is not None else ())
+        info["restored_parts"] = {p: len(getattr(model, p).weights) for p in parts}
+        info["n_restored_vars"] = len(model.weights)
+        return info
+
+    from models.group_net import GroupRegLevelModel   # local import: no module-level cycle
+    info["mode"] = "partial"
+    src = GroupRegLevelModel(model.level, src_cfg).build_model(2)
+    try:
+        _strict_restore(src, prefix)
+        pairs = []
+        for part in SHARED_PARTS:
+            s_w, d_w = getattr(src, part).weights, getattr(model, part).weights
+            if len(s_w) != len(d_w):
+                raise ValueError("--init-weights: %s variable count differs: %d (source) vs %d"
+                                 % (part, len(s_w), len(d_w)))
+            for s, d in zip(s_w, d_w):
+                sn, dn = GroupRegLevelModel._local_name(s), GroupRegLevelModel._local_name(d)
+                if tuple(s.shape) != tuple(d.shape) or sn != dn:
+                    raise ValueError("--init-weights: %s variable mismatch: %s %s vs %s %s"
+                                     % (part, sn, tuple(s.shape), dn, tuple(d.shape)))
+                pairs.append((s, d))
+            info["restored_parts"][part] = len(d_w)
+        # Coverage: every target variable is either restored or in the (fresh) deform decoder.
+        dfm = getattr(model, DEFORM_PART, None)
+        fresh = list(dfm.weights) if dfm is not None else []
+        covered = {d.ref() for _, d in pairs} | {v.ref() for v in fresh}
+        unhandled = [v.name for v in model.weights if v.ref() not in covered]
+        if unhandled or len(covered) != len(model.weights):
+            raise RuntimeError("--init-weights: unhandled model part variables %s" % unhandled[:5])
+        for s, d in pairs:
+            d.assign(s)
+        if dfm is not None:
+            info["fresh_parts"][DEFORM_PART] = len(fresh)
+        if getattr(src, DEFORM_PART, None) is not None:
+            info["ignored_source_parts"].append(DEFORM_PART)
+        info["n_restored_vars"] = len(pairs)
+        info["n_fresh_vars"] = len(fresh)
+    finally:
+        del src
+    return info
+
+
+def load_model_weights(model, model_config, path):
+    """`warm_start_model` returning (checkpoint prefix, source config path or None)."""
+    info = warm_start_model(model, model_config, path)
+    return info["checkpoint"], info["source_config"]
 
 
 def _git_commit():

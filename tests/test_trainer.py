@@ -31,8 +31,8 @@ from runtime import fixed_data as fd
 from runtime import metrics as M
 from runtime import optimizers as O
 from runtime.logging import RunLogger, make_run_dir
-from runtime.run import (DEFORM_BEST_METRIC, DEFORM_DIAG_KEYS, DEFORM_LOSS_KEYS, DIAG_KEYS, TaskSchedule,
-                         Trainer, TrainConfig, collapse_diagnostics)
+from runtime.run import (DEFORM_BEST_METRIC, DEFORM_DIAG_KEYS, DEFORM_LOSS_KEYS, DIAG_KEYS, ENC_GRAD_KEYS,
+                         TaskSchedule, Trainer, TrainConfig, collapse_diagnostics)
 from runtime.schedulers import ScheduleConfig
 
 N = 4
@@ -437,6 +437,104 @@ class TestLossScale(TrainerCase):
         with self.assertRaises(ValueError):
             self.make(config(loss_scale_mm2=0.0))
 
+    def make_clip(self, cfg, clipnorm, weights_from=None):
+        model = GroupRegLevelModel(4, narrow_config(dropout=0.0, seed=1)).build_model(N)
+        if weights_from is None:
+            _random_head_kernel(model)
+        else:
+            model.set_weights(weights_from.get_weights())
+        sources = {t: fd.FixedGroupSource(g["batch"]) for t, g in self.groups.items()}
+        return Trainer(model, O.make_optimizer("adam", lr=1e-3, clipnorm=clipnorm), sources,
+                       self.groups["rigid"]["S"], cfg)
+
+    def test_task_loss_weight_and_enc_grad_norms(self):
+        # Milestone 7: the task weight multiplies the applied gradient; logged terms and the raw
+        # encoder norm (unscaled loss) do not change; _eff follows the applied encoder gradient.
+        batch = self.groups["rigid"]["batch"]
+        tr1 = self.make_clip(config(), clipnorm=None)
+        tr4 = self.make_clip(config(task_loss_weights={"rigid": 4.0}), None, weights_from=tr1.model)
+        trs = self.make_clip(config(task_loss_weights={"rigid": 4.0}, loss_scale_mm2=100.0), None,
+                             weights_from=tr1.model)
+        trc = self.make_clip(config(), clipnorm=1e-3, weights_from=tr1.model)    # global clip 1e-3
+        r1, r4, rs, rc = (t.train_step("rigid", batch) for t in (tr1, tr4, trs, trc))
+        self.assertGreater(r1["diag_enc_grad_norm_raw"], 0.0)
+        np.testing.assert_allclose(r4["grad_norm"], 4.0 * r1["grad_norm"], rtol=1e-4)
+        np.testing.assert_allclose(rs["grad_norm"], 0.04 * r1["grad_norm"], rtol=1e-4)
+        for r in (r4, rs):
+            for k in ("loss", "center", "pair"):
+                np.testing.assert_allclose(r[k], r1[k], rtol=1e-5, err_msg=k)
+            np.testing.assert_allclose(r["diag_enc_grad_norm_raw"], r1["diag_enc_grad_norm_raw"], rtol=1e-4)
+        # Unclipped: _eff is the applied encoder norm = raw * w / loss_scale.
+        np.testing.assert_allclose(r1["diag_enc_grad_norm_eff"], r1["diag_enc_grad_norm_raw"], rtol=1e-6)
+        np.testing.assert_allclose(r4["diag_enc_grad_norm_eff"], 4.0 * r1["diag_enc_grad_norm_eff"], rtol=1e-4)
+        np.testing.assert_allclose(rs["diag_enc_grad_norm_eff"], 0.04 * r1["diag_enc_grad_norm_eff"], rtol=1e-4)
+        self.assertLess(r1["diag_enc_grad_norm_raw"], r1["grad_norm"] * (1 + 1e-6))
+        # Clipped (global clip 1e-3): _eff = encoder norm * clip / total norm.
+        self.assertGreater(rc["grad_norm"], 1e-3)
+        np.testing.assert_allclose(rc["diag_enc_grad_norm_eff"],
+                                   rc["diag_enc_grad_norm_raw"] * 1e-3 / rc["grad_norm"], rtol=1e-4)
+        np.testing.assert_allclose(rc["diag_enc_grad_norm_raw"], r1["diag_enc_grad_norm_raw"], rtol=1e-4)
+        for bad in ({"rigid": 0.0}, {"deform": float("nan")}, {"warp": 1.0}):
+            with self.assertRaises(ValueError, msg=str(bad)):
+                self.make(config(task_loss_weights=bad))
+
+
+GOLDEN_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", "m7_linear_golden.json")
+GOLDEN_STEPS = 6
+
+
+def _linear_golden_run():
+    """6 mixed rigid/affine steps of a seeded narrow model (dropout 0, flips on): per-step losses
+    and per-variable (float64 sum, max |v|) keyed by the scope-local name."""
+    ratio = {"rigid": 1.0, "affine": 1.0}
+    seed = _seed_with_all_tasks(ratio, GOLDEN_STEPS)
+    groups = {t: synthetic_group(4, N, t, seed=i) for i, t in enumerate(("rigid", "affine"))}
+    model = GroupRegLevelModel(4, narrow_config(dropout=0.0, seed=0)).build_model(N)
+    tr = Trainer(model, O.make_optimizer("adam", lr=1e-3),
+                 {t: fd.FixedGroupSource(g["batch"]) for t, g in groups.items()},
+                 groups["rigid"]["S"], config(task_ratio=ratio, seed=seed))
+    tr.fit(GOLDEN_STEPS)
+    out = {"seed": seed, "tasks": [h["task"] for h in tr.history],
+           "loss": [float(h["loss"]) for h in tr.history],
+           "variables": {GroupRegLevelModel._local_name(v): [float(np.sum(v.numpy().astype(np.float64))),
+                                                             float(np.max(np.abs(v.numpy())))]
+                         for v in model.variables}}
+    return out
+
+
+class TestLinearOnlyUnchanged(unittest.TestCase):
+    """Milestone 7 guard: linear-only training is unchanged by the three-task additions (task loss
+    weights, encoder grad-norm diagnostics). The fixture was written on the milestone-6 code
+    (commit 0fb998b) with BGR_WRITE_GOLDEN=1."""
+
+    def tearDown(self):
+        free_memory()
+
+    def test_matches_golden(self):
+        got = _linear_golden_run()
+        if os.environ.get("BGR_WRITE_GOLDEN") == "1":
+            os.makedirs(os.path.dirname(GOLDEN_PATH), exist_ok=True)
+            with open(GOLDEN_PATH, "w") as f:
+                json.dump(dict(got, tolerance=0.0), f, indent=1, sort_keys=True)
+            sys.stderr.write("\n[golden] wrote %s\n" % GOLDEN_PATH)
+        with open(GOLDEN_PATH) as f:
+            want = json.load(f)
+        tol = float(want.get("tolerance", 0.0))
+        self.assertEqual(got["seed"], want["seed"])
+        self.assertEqual(got["tasks"], want["tasks"])
+        self.assertEqual(set(got["tasks"]), {"rigid", "affine"})
+        self.assertEqual(sorted(got["variables"]), sorted(want["variables"]))
+        diffs = [abs(a - b) for a, b in zip(got["loss"], want["loss"])]
+        for name, (s, m) in want["variables"].items():
+            gs, gm = got["variables"][name]
+            diffs += [abs(gs - s), abs(gm - m)]
+        sys.stderr.write("\n[golden] max |diff| %.3g (tolerance %.3g)\n" % (max(diffs), tol))
+        if tol == 0.0:
+            self.assertEqual(got["loss"], want["loss"])
+            self.assertEqual(got["variables"], want["variables"])
+        else:
+            self.assertLessEqual(max(diffs), tol)
+
 
 class TestCollapseDiagnostics(TrainerCase):
     def identical_group_source(self):
@@ -770,6 +868,92 @@ class TestThreeTasks(DeformCase):
             self.assertEqual(h["n_vars_updated"], want[h["task"]], h["task"])
         # Flips are on: the deform postprocess draws a flip state from its own generator.
         self.assertEqual(sorted(tr.postprocess), ["affine", "deform", "rigid"])
+
+    def test_enc_grad_diagnostics_logged(self):
+        # Milestone 7: per-task encoder grad norms and per-task grad_norm in the window logs.
+        ratio = {"rigid": 1.0, "affine": 1.0, "deform": 2.0}
+        seed = _seed_with_all_tasks(ratio, 8)
+        paths = make_run_dir(self.tmp, "encgrad")
+        logger = RunLogger(paths, backend="jsonl", tensorboard=False, quiet=True)
+        tr = self.make_deform(config(task_ratio=ratio, seed=seed, log_every=1), logger=logger)
+        tr.fit(8)
+        logger.close()
+        with open(logger.metrics_path) as f:
+            recs = [json.loads(line)["data"] for line in f]
+        for t in ratio:
+            keys = ["train_%s/%s" % (t, k) for k in ENC_GRAD_KEYS] + ["train_%s/grad_norm" % t]
+            got = [r for r in recs if keys[0] in r]
+            self.assertTrue(got, t)
+            for r in got:
+                for k in keys:
+                    self.assertTrue(np.isfinite(r[k]), k)
+                    self.assertGreaterEqual(r[k], 0.0, k)
+                self.assertEqual(r["train_%s/grad_norm" % t], r["train/grad_norm"])   # one task per step
+        for h in tr.history:
+            for k in ENC_GRAD_KEYS:
+                self.assertIn(k, h)
+
+    def test_deform_group_size_differs(self):
+        # Linear N = 4, deform N = 2: each task's step has its own signature, validation uses each
+        # set's own group size, both best files are written.
+        ratio = {"rigid": 1.0, "affine": 1.0, "deform": 2.0}
+        n_steps = 8
+        seed = _seed_with_all_tasks(ratio, n_steps)
+        imgs, labs = self.dgroup["images"][:2], self.dgroup["labels"][:2]
+        sources = {t: fd.FixedGroupSource(g["batch"]) for t, g in self.groups.items()}
+        sources["deform"] = fd.FixedGroupSource(fd.to_deform_batch(imgs, labs, level=4))
+        val_sets = {t: fd.ValidationSet.from_group(g["images"], g["T"], g["T_target"], t, 4)
+                    for t, g in self.groups.items()}
+        val_sets["deform"] = fd.DeformValidationSet.from_group(imgs, labs, 4)
+        cfg = config(task_ratio=ratio, seed=seed, deform_group_size=2, val_every=n_steps)
+        tr = self.make_deform(cfg, sources=sources, val_sets=val_sets)
+        self.assertEqual(tr.extra_best, {"deform": DEFORM_BEST_METRIC})
+        self.assertEqual(tr._steps["deform"].input_signature[0].shape[0], 2)
+        self.assertEqual(tr._steps["rigid"].input_signature[0].shape[0], N)
+        paths = make_run_dir(self.tmp, "dn2")
+        tr.checkpoint = C.RunCheckpoint(paths["ckpt_last"], paths["ckpt_best"], tr.model, tr.optimizer, tr.step,
+                                        extra=tr.checkpoint_variables(),
+                                        extra_best={"deform": os.path.join(paths["root"], "ckpt", "best_deform")})
+        tr.fit(n_steps)
+        self.assertEqual(tr.trace_counts, {"rigid": 1, "affine": 1, "deform": 1})
+        self.assertTrue(all(h["finite"] for h in tr.history))
+        v = tr.val_history[-1]
+        for k in ("val_deform/pair_dice", "val/mean_pair_rms_mm", "val_rigid/pair_rms_mm", "val_affine/pair_rms_mm"):
+            self.assertTrue(np.isfinite(v[k]), k)
+        self.assertEqual(sorted(tr.val_trace_counts),
+                         sorted([("rigid", N, False), ("rigid", N, True), ("affine", N, False),
+                                 ("affine", N, True), ("deform", 2, False), ("deform", 2, True)]))
+        self.assertTrue(tr.checkpoint.latest_best.endswith("best-%d" % n_steps))
+        self.assertTrue(tr.checkpoint.latest_best_named("deform").endswith("best_deform-%d" % n_steps))
+
+
+class TestTaskLossWeightDeform(DeformCase):
+    def test_deform_weight(self):
+        def make(w, clipnorm=None, like=None):
+            model = GroupRegLevelModel(4, narrow_config(dropout=0.0, seed=1, deform_decoder=True)).build_model(N)
+            if like is None:
+                head = model.deform_decoder.svf_head
+                head.kernel.assign(np.random.default_rng(0).normal(0, 1e-3, head.kernel.shape).astype(np.float32))
+            else:
+                model.set_weights(like.get_weights())
+            cfg = config(task_ratio={"deform": 1.0}, task_loss_weights={"deform": w})
+            return Trainer(model, O.make_optimizer("adam", lr=1e-3, clipnorm=clipnorm),
+                           {"deform": fd.FixedGroupSource(self.dgroup["batch"])}, self.groups["rigid"]["S"], cfg)
+        batch = self.dgroup["batch"]
+        tr1 = make(1.0)
+        tr3 = make(3.0, like=tr1.model)
+        trc = make(1.0, clipnorm=1e-4, like=tr1.model)
+        r1, r3, rc = (t.train_step("deform", batch) for t in (tr1, tr3, trc))
+        self.assertGreater(r1["diag_enc_grad_norm_raw"], 0.0)
+        for k in DEFORM_LOSS_KEYS:
+            np.testing.assert_allclose(r3[k], r1[k], rtol=1e-5, err_msg=k)
+        np.testing.assert_allclose(r3["grad_norm"], 3.0 * r1["grad_norm"], rtol=1e-4)
+        np.testing.assert_allclose(r3["diag_enc_grad_norm_raw"], r1["diag_enc_grad_norm_raw"], rtol=1e-4)
+        np.testing.assert_allclose(r1["diag_enc_grad_norm_eff"], r1["diag_enc_grad_norm_raw"], rtol=1e-6)
+        np.testing.assert_allclose(r3["diag_enc_grad_norm_eff"], 3.0 * r1["diag_enc_grad_norm_eff"], rtol=1e-4)
+        self.assertGreater(rc["grad_norm"], 1e-4)
+        np.testing.assert_allclose(rc["diag_enc_grad_norm_eff"],
+                                   rc["diag_enc_grad_norm_raw"] * 1e-4 / rc["grad_norm"], rtol=1e-4)
 
 
 class TestDeformValidation(DeformCase):

@@ -1,0 +1,302 @@
+{
+ "loss": [
+  1198.8590087890625,
+  2216.780517578125,
+  1076.7615966796875,
+  1329.556396484375,
+  2202.386962890625,
+  1651.8251953125
+ ],
+ "seed": 0,
+ "tasks": [
+  "affine",
+  "rigid",
+  "affine",
+  "rigid",
+  "rigid",
+  "affine"
+ ],
+ "tolerance": 0.0,
+ "variables": {
+  "encoder/l2/conv/bias:0": [
+   0.0003269329540671606,
+   0.00026478312793187797
+  ],
+  "encoder/l2/conv/kernel:0": [
+   13.096852027891146,
+   0.21594619750976562
+  ],
+  "encoder/l2/norm/affine/beta:0": [
+   -0.008926638663979247,
+   0.003368252655491233
+  ],
+  "encoder/l2/norm/affine/gamma:0": [
+   16.000985085964203,
+   1.0029383897781372
+  ],
+  "encoder/l2/norm/bn/moving_mean:0": [
+   0.01691514857520815,
+   0.009184497408568859
+  ],
+  "encoder/l2/norm/bn/moving_variance:0": [
+   15.083724200725555,
+   0.9471659660339355
+  ],
+  "encoder/l3/conv/bias:0": [
+   7.705915982114675e-05,
+   8.355138561455533e-05
+  ],
+  "encoder/l3/conv/kernel:0": [
+   17.152925506042266,
+   0.15326444804668427
+  ],
+  "encoder/l3/norm/affine/beta:0": [
+   -3.9668448152951896e-05,
+   0.003965761978179216
+  ],
+  "encoder/l3/norm/affine/gamma:0": [
+   31.998479664325714,
+   1.0040124654769897
+  ],
+  "encoder/l3/norm/bn/moving_mean:0": [
+   0.23101708153262734,
+   0.05238617956638336
+  ],
+  "encoder/l3/norm/bn/moving_variance:0": [
+   31.697368681430817,
+   1.138586401939392
+  ],
+  "encoder/l4/conv/bias:0": [
+   -6.365089916471334e-05,
+   3.096434738836251e-05
+  ],
+  "encoder/l4/conv/kernel:0": [
+   -9.512573302613418,
+   0.1552307903766632
+  ],
+  "encoder/l4/norm/affine/beta:0": [
+   -0.003541298305208329,
+   0.00391312874853611
+  ],
+  "encoder/l4/norm/affine/gamma:0": [
+   31.997001707553864,
+   1.0039860010147095
+  ],
+  "encoder/l4/norm/bn/moving_mean:0": [
+   0.17765486845746636,
+   0.06565288454294205
+  ],
+  "encoder/l4/norm/bn/moving_variance:0": [
+   32.252231657505035,
+   1.1316114664077759
+  ],
+  "encoder/l5/conv/bias:0": [
+   -2.3353639164724882e-05,
+   1.401758345309645e-05
+  ],
+  "encoder/l5/conv/kernel:0": [
+   -19.83790567117012,
+   0.12816379964351654
+  ],
+  "encoder/l5/norm/affine/beta:0": [
+   -0.015676110939239152,
+   0.003706863848492503
+  ],
+  "encoder/l5/norm/affine/gamma:0": [
+   47.99660974740982,
+   1.0038833618164062
+  ],
+  "encoder/l5/norm/bn/moving_mean:0": [
+   0.023604075529874535,
+   0.08185766637325287
+  ],
+  "encoder/l5/norm/bn/moving_variance:0": [
+   49.05179554224014,
+   1.1602245569229126
+  ],
+  "encoder/l6/conv/bias:0": [
+   1.3517386932448971e-05,
+   5.787912414234597e-06
+  ],
+  "encoder/l6/conv/kernel:0": [
+   14.646464052229476,
+   0.12587717175483704
+  ],
+  "encoder/l6/norm/affine/beta:0": [
+   0.0050616935768630356,
+   0.004163448233157396
+  ],
+  "encoder/l6/norm/affine/gamma:0": [
+   63.98269879817963,
+   1.0034453868865967
+  ],
+  "encoder/l6/norm/bn/moving_mean:0": [
+   -0.07797504126210697,
+   0.06484618037939072
+  ],
+  "encoder/l6/norm/bn/moving_variance:0": [
+   65.5144447684288,
+   1.1998695135116577
+  ],
+  "encoder/stem/conv/bias:0": [
+   -0.0011353011832397897,
+   0.0016136780614033341
+  ],
+  "encoder/stem/conv/kernel:0": [
+   3.5539823609869927,
+   0.6082730293273926
+  ],
+  "linear_decoder/dense_0/dense/bias:0": [
+   0.1137234155285114,
+   0.004176908638328314
+  ],
+  "linear_decoder/dense_0/dense/kernel:0": [
+   450.18341471135864,
+   0.10620522499084473
+  ],
+  "linear_decoder/dense_0/norm/affine/beta:0": [
+   -0.04415218253416242,
+   0.004379516467452049
+  ],
+  "linear_decoder/dense_0/norm/affine/gamma:0": [
+   5039.885345041752,
+   1.0042674541473389
+  ],
+  "linear_decoder/dense_1/dense/bias:0": [
+   -0.7110091160575394,
+   0.0042205736972391605
+  ],
+  "linear_decoder/dense_1/dense/kernel:0": [
+   -229.01134153579733,
+   0.22775550186634064
+  ],
+  "linear_decoder/dense_1/norm/affine/beta:0": [
+   -0.1787853830610402,
+   0.004153678193688393
+  ],
+  "linear_decoder/dense_1/norm/affine/gamma:0": [
+   511.879567027092,
+   1.0041741132736206
+  ],
+  "linear_decoder/head_norm_act/norm/affine/beta:0": [
+   0.013341024335204565,
+   0.0030827545560896397
+  ],
+  "linear_decoder/head_norm_act/norm/affine/gamma:0": [
+   256.0032089948654,
+   1.0037355422973633
+  ],
+  "linear_decoder/reduction_0/conv/bias:0": [
+   3.343294883961789e-05,
+   7.975532753334846e-06
+  ],
+  "linear_decoder/reduction_0/conv/kernel:0": [
+   5.151270100333932,
+   0.4135582447052002
+  ],
+  "linear_decoder/reduction_0/norm/affine/beta:0": [
+   0.05462048471963499,
+   0.003967097029089928
+  ],
+  "linear_decoder/reduction_0/norm/affine/gamma:0": [
+   96.00192606449127,
+   1.0040355920791626
+  ],
+  "linear_decoder/reduction_0/norm/bn/moving_mean:0": [
+   0.22131800942588598,
+   0.07753409445285797
+  ],
+  "linear_decoder/reduction_0/norm/bn/moving_variance:0": [
+   96.01863205432892,
+   1.1338719129562378
+  ],
+  "linear_decoder/reduction_1/conv/bias:0": [
+   -8.310909237252417e-06,
+   9.179144399240613e-06
+  ],
+  "linear_decoder/reduction_1/conv/kernel:0": [
+   -2.046815336550935,
+   0.5019893646240234
+  ],
+  "linear_decoder/reduction_1/norm/affine/beta:0": [
+   -0.020010214968351647,
+   0.00411211745813489
+  ],
+  "linear_decoder/reduction_1/norm/affine/gamma:0": [
+   63.991238713264465,
+   1.0043271780014038
+  ],
+  "linear_decoder/reduction_1/norm/bn/moving_mean:0": [
+   0.08885460934834555,
+   0.09300420433282852
+  ],
+  "linear_decoder/reduction_1/norm/bn/moving_variance:0": [
+   64.0622348189354,
+   1.1277996301651
+  ],
+  "linear_decoder/reduction_2/conv/bias:0": [
+   -1.641312928768457e-05,
+   1.4284329154179431e-05
+  ],
+  "linear_decoder/reduction_2/conv/kernel:0": [
+   -6.906704885826912,
+   0.523944079875946
+  ],
+  "linear_decoder/reduction_2/norm/affine/beta:0": [
+   -0.014086558163398877,
+   0.004218976944684982
+  ],
+  "linear_decoder/reduction_2/norm/affine/gamma:0": [
+   47.99154245853424,
+   1.0039052963256836
+  ],
+  "linear_decoder/reduction_2/norm/bn/moving_mean:0": [
+   -0.03293426058371551,
+   0.052792634814977646
+  ],
+  "linear_decoder/reduction_2/norm/bn/moving_variance:0": [
+   47.23674237728119,
+   1.0403001308441162
+  ],
+  "linear_decoder/reduction_3/conv/bias:0": [
+   0.0005116668326081708,
+   0.004129445180296898
+  ],
+  "linear_decoder/reduction_3/conv/kernel:0": [
+   6.775303656817414,
+   0.6453458666801453
+  ],
+  "linear_decoder/reduction_3/norm/affine/beta:0": [
+   0.014397757222468499,
+   0.0042509171180427074
+  ],
+  "linear_decoder/reduction_3/norm/affine/gamma:0": [
+   23.99838662147522,
+   1.0040044784545898
+  ],
+  "linear_decoder/reduction_3/norm/bn/moving_mean:0": [
+   -0.13242968590930104,
+   0.06972678750753403
+  ],
+  "linear_decoder/reduction_3/norm/bn/moving_variance:0": [
+   23.856847047805786,
+   1.0705633163452148
+  ],
+  "linear_decoder/rigid_head/bias:0": [
+   3.0018863812026666,
+   1.0015934705734253
+  ],
+  "linear_decoder/rigid_head/kernel:0": [
+   0.059757820446066034,
+   0.005645973142236471
+  ],
+  "linear_decoder/scale_shear_head/bias:0": [
+   0.0013176313950680196,
+   0.0012898986460641026
+  ],
+  "linear_decoder/scale_shear_head/kernel:0": [
+   -0.02071244463149924,
+   0.0026752036064863205
+  ]
+ }
+}

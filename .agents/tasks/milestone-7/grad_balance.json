@@ -1,0 +1,277 @@
+{
+ "runs": [
+  {
+   "clipnorm": 12.0,
+   "eff_ratio_linear_over_deform": {
+    "affine": 3.9466219612630167,
+    "rigid": 2.968390685426589
+   },
+   "init_weights": "/mnt/d/Research/Brain_Registration_Projects/brain-group-rad/.agents/tasks/milestone-7/probe_results/lin_src/ckpt/last",
+   "loss_scale_mm2": 100.0,
+   "lr": 0.0003,
+   "min_step": 0,
+   "run": "warm3",
+   "task_loss_weights": null,
+   "tasks": {
+    "affine": {
+     "center_rms_mm": 4.710794880038233,
+     "clipped_frac": 1.0,
+     "enc_eff": 0.5516263544559479,
+     "enc_raw": 784.4933471679688,
+     "grad_norm": 182.60595703125,
+     "n": 30
+    },
+    "deform": {
+     "clipped_frac": 0.0,
+     "enc_eff": 0.13977177441120148,
+     "enc_raw": 0.13977177441120148,
+     "grad_norm": 0.6392197608947754,
+     "n": 42,
+     "soft_dice_tmpl": 0.8521904945373535
+    },
+    "rigid": {
+     "center_rms_mm": 6.64931875769287,
+     "clipped_frac": 1.0,
+     "enc_eff": 0.41489723324775696,
+     "enc_raw": 747.5110473632812,
+     "grad_norm": 171.93016052246094,
+     "n": 28
+    }
+   }
+  },
+  {
+   "clipnorm": 12.0,
+   "eff_ratio_linear_over_deform": {
+    "affine": 1.4034165335496347,
+    "rigid": 1.6612885452517818
+   },
+   "init_weights": "/mnt/d/Research/Brain_Registration_Projects/brain-group-rad/.agents/tasks/milestone-7/probe_results/warm3/ckpt/last",
+   "loss_scale_mm2": 1.0,
+   "lr": 1e-12,
+   "min_step": 0,
+   "run": "probe_S1",
+   "task_loss_weights": null,
+   "tasks": {
+    "affine": {
+     "center_rms_mm": 4.297069975157366,
+     "clipped_frac": 1.0,
+     "enc_eff": 0.2019244208931923,
+     "enc_raw": 256.7294464111328,
+     "grad_norm": 12819.8330078125,
+     "n": 8
+    },
+    "deform": {
+     "clipped_frac": 0.0,
+     "enc_eff": 0.14388060569763184,
+     "enc_raw": 0.14388060569763184,
+     "grad_norm": 0.49670737981796265,
+     "n": 21,
+     "soft_dice_tmpl": 0.8787676095962524
+    },
+    "rigid": {
+     "center_rms_mm": 5.973374098457017,
+     "clipped_frac": 1.0,
+     "enc_eff": 0.239027202129364,
+     "enc_raw": 306.2138977050781,
+     "grad_norm": 14778.552734375,
+     "n": 11
+    }
+   }
+  },
+  {
+   "clipnorm": 12.0,
+   "eff_ratio_linear_over_deform": {
+    "affine": 1.4034166888988682,
+    "rigid": 1.661288752384093
+   },
+   "init_weights": "/mnt/d/Research/Brain_Registration_Projects/brain-group-rad/.agents/tasks/milestone-7/probe_results/warm3/ckpt/last",
+   "loss_scale_mm2": 10.0,
+   "lr": 1e-12,
+   "min_step": 0,
+   "run": "probe_S10",
+   "task_loss_weights": null,
+   "tasks": {
+    "affine": {
+     "center_rms_mm": 4.297069975157366,
+     "clipped_frac": 1.0,
+     "enc_eff": 0.20192444324493408,
+     "enc_raw": 256.7294006347656,
+     "grad_norm": 1281.9833068847656,
+     "n": 8
+    },
+    "deform": {
+     "clipped_frac": 0.0,
+     "enc_eff": 0.14388060569763184,
+     "enc_raw": 0.14388060569763184,
+     "grad_norm": 0.49670737981796265,
+     "n": 21,
+     "soft_dice_tmpl": 0.8787676095962524
+    },
+    "rigid": {
+     "center_rms_mm": 5.973374098457017,
+     "clipped_frac": 1.0,
+     "enc_eff": 0.2390272319316864,
+     "enc_raw": 306.2138977050781,
+     "grad_norm": 1477.85546875,
+     "n": 11
+    }
+   }
+  },
+  {
+   "clipnorm": 12.0,
+   "eff_ratio_linear_over_deform": {
+    "affine": 1.4034166888988682,
+    "rigid": 1.6612888559502486
+   },
+   "init_weights": "/mnt/d/Research/Brain_Registration_Projects/brain-group-rad/.agents/tasks/milestone-7/probe_results/warm3/ckpt/last",
+   "loss_scale_mm2": 100.0,
+   "lr": 1e-12,
+   "min_step": 0,
+   "run": "probe_S100",
+   "task_loss_weights": null,
+   "tasks": {
+    "affine": {
+     "center_rms_mm": 4.297069975157366,
+     "clipped_frac": 1.0,
+     "enc_eff": 0.20192444324493408,
+     "enc_raw": 256.7294387817383,
+     "grad_norm": 128.19833374023438,
+     "n": 8
+    },
+    "deform": {
+     "clipped_frac": 0.0,
+     "enc_eff": 0.14388060569763184,
+     "enc_raw": 0.14388060569763184,
+     "grad_norm": 0.49670735001564026,
+     "n": 21,
+     "soft_dice_tmpl": 0.8787676095962524
+    },
+    "rigid": {
+     "center_rms_mm": 5.973374098457017,
+     "clipped_frac": 1.0,
+     "enc_eff": 0.2390272468328476,
+     "enc_raw": 306.2137451171875,
+     "grad_norm": 147.7855224609375,
+     "n": 11
+    }
+   }
+  },
+  {
+   "clipnorm": 12.0,
+   "eff_ratio_linear_over_deform": {
+    "affine": 1.24660194265252,
+    "rigid": 1.6612879238548484
+   },
+   "init_weights": "/mnt/d/Research/Brain_Registration_Projects/brain-group-rad/.agents/tasks/milestone-7/probe_results/warm3/ckpt/last",
+   "loss_scale_mm2": 1000.0,
+   "lr": 1e-12,
+   "min_step": 0,
+   "run": "probe_S1000",
+   "task_loss_weights": null,
+   "tasks": {
+    "affine": {
+     "center_rms_mm": 4.297068865477462,
+     "clipped_frac": 0.5,
+     "enc_eff": 0.17936184257268906,
+     "enc_raw": 256.7291793823242,
+     "grad_norm": 12.819824695587158,
+     "n": 8
+    },
+    "deform": {
+     "clipped_frac": 0.0,
+     "enc_eff": 0.14388060569763184,
+     "enc_raw": 0.14388060569763184,
+     "grad_norm": 0.49670735001564026,
+     "n": 21,
+     "soft_dice_tmpl": 0.8787676095962524
+    },
+    "rigid": {
+     "center_rms_mm": 5.973374098457017,
+     "clipped_frac": 0.9090909090909091,
+     "enc_eff": 0.23902711272239685,
+     "enc_raw": 306.2135314941406,
+     "grad_norm": 14.778553009033203,
+     "n": 11
+    }
+   }
+  },
+  {
+   "clipnorm": 12.0,
+   "eff_ratio_linear_over_deform": {
+    "affine": 1100059831.6520178,
+    "rigid": 1076271649.1590354
+   },
+   "init_weights": "/mnt/d/Research/Brain_Registration_Projects/brain-group-rad/.agents/tasks/milestone-7/probe_results/lin_src/ckpt/last",
+   "loss_scale_mm2": 1.0,
+   "lr": 1e-12,
+   "min_step": 0,
+   "run": "probe_fresh_dec_S1",
+   "task_loss_weights": null,
+   "tasks": {
+    "affine": {
+     "center_rms_mm": 4.69371861270818,
+     "clipped_frac": 1.0,
+     "enc_eff": 0.41388875246047974,
+     "enc_raw": 523.4356842041016,
+     "grad_norm": 15262.25390625,
+     "n": 8
+    },
+    "deform": {
+     "clipped_frac": 0.0,
+     "enc_eff": 3.762420375252873e-10,
+     "enc_raw": 3.762420375252873e-10,
+     "grad_norm": 0.28819993138313293,
+     "n": 21,
+     "soft_dice_tmpl": 0.8471968173980713
+    },
+    "rigid": {
+     "center_rms_mm": 7.327561216485854,
+     "clipped_frac": 1.0,
+     "enc_eff": 0.40493863821029663,
+     "enc_raw": 791.049072265625,
+     "grad_norm": 25439.521484375,
+     "n": 11
+    }
+   }
+  },
+  {
+   "clipnorm": 12.0,
+   "eff_ratio_linear_over_deform": {
+    "affine": 95.53514145961712,
+    "rigid": 151.20658282554163
+   },
+   "init_weights": null,
+   "loss_scale_mm2": 1.0,
+   "lr": 1e-12,
+   "min_step": 0,
+   "run": "probe_scratch_S1",
+   "task_loss_weights": null,
+   "tasks": {
+    "affine": {
+     "center_rms_mm": 26.68787507054936,
+     "clipped_frac": 1.0,
+     "enc_eff": 3.466073650315593e-08,
+     "enc_raw": 2.3798071197234094e-05,
+     "grad_norm": 8198.169677734375,
+     "n": 8
+    },
+    "deform": {
+     "clipped_frac": 0.0,
+     "enc_eff": 3.6280614623684926e-10,
+     "enc_raw": 3.6280614623684926e-10,
+     "grad_norm": 0.23840992152690887,
+     "n": 21,
+     "soft_dice_tmpl": 0.8471968173980713
+    },
+    "rigid": {
+     "center_rms_mm": 22.291485119612165,
+     "clipped_frac": 1.0,
+     "enc_eff": 5.485867760057772e-08,
+     "enc_raw": 1.9277416868135333e-05,
+     "grad_norm": 8196.63671875,
+     "n": 11
+    }
+   }
+  }
+ ]
+}

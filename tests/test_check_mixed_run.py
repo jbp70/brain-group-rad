@@ -29,13 +29,25 @@ def deform_val():
             "val_deform/pair_dice_loss": 0.3}
 
 
-def make_run(root, tasks, val_overrides=None, drop_pngs=(), best_dirs=None, trace=None):
-    """Fabricated run dir: metrics.jsonl with train/val records, fit_summary.json, PNGs, ckpts."""
+def make_run(root, tasks, val_overrides=None, drop_pngs=(), best_dirs=None, trace=None, init_weights=None,
+             enc_grad=False, enc_grad_bad=None):
+    """Fabricated run dir: metrics.jsonl with train/val records, fit_summary.json, PNGs, ckpts;
+    optional config.json init_weights record and train_<task>/diag_enc_grad_norm_* keys
+    (``enc_grad_bad``: a task whose _eff values are NaN)."""
     os.makedirs(os.path.join(root, "logs"))
     os.makedirs(os.path.join(root, "val_png"))
     recs = []
     for step in range(5, STEPS + 1, 5):
-        recs.append({"step": step, "data": {"train_%s/loss" % t: 1.0 / step for t in tasks}})
+        data = {"train_%s/loss" % t: 1.0 / step for t in tasks}
+        if enc_grad:
+            for t in tasks:
+                eff = float("nan") if t == enc_grad_bad else (2.0 if t == "deform" else 1.0)
+                data.update({"train_%s/diag_enc_grad_norm_raw" % t: 10.0, "train_%s/diag_enc_grad_norm_eff" % t: eff,
+                             "train_%s/grad_norm" % t: 5.0})
+        recs.append({"step": step, "data": data})
+    if init_weights is not None:
+        with open(os.path.join(root, "config.json"), "w") as f:
+            json.dump({"init_weights": init_weights}, f)
     val = {}
     pairs = []
     for t in tasks:
@@ -142,6 +154,38 @@ class TestDeform(CheckMixedRunCase):
         self.assertTrue(ok, self.failed(res))
         detail = dict((n, d) for n, _, d in res)["val_mean_pair_rms_mm"]
         self.assertIn("skipped", detail)
+
+    def test_init_weights_and_enc_grad(self):
+        # Milestone 7: optional warm-start and encoder grad-norm checks (default off = old behaviour).
+        tasks = ["rigid", "affine", "deform"]
+        partial = {"mode": "partial", "restored_parts": {"encoder": 30, "linear_decoder": 20, "centering": 0},
+                   "fresh_parts": {"deform_decoder": 40}, "config_diff": {"deform_decoder": [False, True]}}
+        d = self.run_dir("m7", tasks, init_weights=partial, enc_grad=True)
+        ok, res = cmr.check(d, tasks, STEPS, expect_init_weights="partial", expect_enc_grad=True)
+        self.assertTrue(ok, self.failed(res))
+        names = [n for n, _, _ in res]
+        self.assertEqual(names[-5:], ["init_weights", "enc_grad_rigid", "enc_grad_affine", "enc_grad_deform",
+                                      "enc_grad_ratio"])
+        self.assertIn("rigid 0.5", dict((n, x) for n, _, x in res)["enc_grad_ratio"])
+        self.assertEqual(cmr.main([d, "--tasks", ",".join(tasks), "--expect-init-weights", "partial",
+                                   "--expect-enc-grad", "true"]), 0)
+        self.assertEqual(cmr.main([d, "--tasks", ",".join(tasks), "--expect-init-weights", "full"]), 1)
+        # defaults: neither check runs
+        self.assertNotIn("init_weights", [n for n, _, _ in cmr.check(d, tasks, STEPS)[1]])
+        # no record / wrong fresh parts / missing or NaN diagnostics fail
+        d2 = self.run_dir("m7_none", tasks)
+        ok, res = cmr.check(d2, tasks, STEPS, expect_init_weights="partial", expect_enc_grad=True)
+        self.assertEqual(self.failed(res), ["init_weights", "enc_grad_rigid", "enc_grad_affine", "enc_grad_deform"])
+        d3 = self.run_dir("m7_bad", tasks, init_weights=dict(partial, fresh_parts={}), enc_grad=True,
+                          enc_grad_bad="affine")
+        ok, res = cmr.check(d3, tasks, STEPS, expect_init_weights="partial", expect_enc_grad=True)
+        self.assertEqual(self.failed(res), ["init_weights", "enc_grad_affine"])
+        # linear-only partial warm start (deform source): fresh parts must be empty
+        lin = ["rigid", "affine"]
+        d4 = self.run_dir("lin", lin, init_weights=dict(partial, fresh_parts={}), enc_grad=True)
+        ok, res = cmr.check(d4, lin, STEPS, expect_init_weights="partial", expect_enc_grad=True)
+        self.assertTrue(ok, self.failed(res))
+        self.assertNotIn("enc_grad_ratio", [n for n, _, _ in res])
 
     def test_retrace_fails(self):
         tasks = ["rigid", "affine", "deform"]

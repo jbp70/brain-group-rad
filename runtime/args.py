@@ -10,7 +10,8 @@ Pattern from the rigid project's ``runtime/args.py`` (argparse + ``str2bool``). 
   --lr 3e-3;
 * schedule: 1000 warmup steps, then cosine to lr * 1e-3 at ``--steps``;
 * losses: lambda_pair 1, p_pair 0.1, flip probability 0.5 per axis, 10 target iterations
-  (design 6.1, 3.3); objective divided by --loss-scale-mm2 (default 1, unscaled);
+  (design 6.1, 3.3); objective divided by --loss-scale-mm2 (default 1, unscaled) and multiplied
+  by the task's --task-loss-weights entry (default 1 for every task; milestone 7);
 * augmentation ranges: `data_loading.params.DEFAULT_LINEAR_RANGES` (design 3.2);
 * curriculum (--curriculum) and global transform (--global-transform): both OFF (design 3.2
   v3.5). With --curriculum the --<task>-* range flags are the END values and --<task>-*-start
@@ -90,6 +91,29 @@ def parse_task_ratio(text):
             out[name] = out.get(name, 0.0) + weight
     if not out:
         raise ValueError("task ratio {!r} has no task with a positive weight".format(text))
+    return out
+
+
+def parse_task_loss_weights(text):
+    """'rigid:1,affine:1,deform:4' -> {task: weight} (finite, > 0) for every task in ALL_TASKS;
+    tasks not named get 1.0. None or '' -> all 1.0."""
+    out = {t: 1.0 for t in ALL_TASKS}
+    if text is None:
+        return out
+    for part in str(text).split(","):
+        part = part.strip()
+        if not part:
+            continue
+        name, sep, w = part.partition(":")
+        name = name.strip()
+        if name not in ALL_TASKS:
+            raise ValueError("unknown task {!r} in task loss weights {!r} (tasks: {})".format(name, text, ALL_TASKS))
+        if not sep or not w.strip():
+            raise ValueError("task loss weight needs task:weight, got {!r}".format(part))
+        weight = float(w)
+        if not (math.isfinite(weight) and weight > 0):
+            raise ValueError("task loss weight must be finite and > 0, got {!r}".format(part))
+        out[name] = weight
     return out
 
 
@@ -173,6 +197,12 @@ def build_parser():
                    "(> 0). 1 = unscaled. E.g. 100 makes the objective O(1-20) at init, so the "
                    "gradients are not permanently clipped by --clipnorm. Logged losses and RMS "
                    "stay in unscaled mm^2 / mm")
+    g.add_argument("--task-loss-weights", default=None,
+                   help="per-task objective multipliers, e.g. 'deform:4' or 'rigid:1,affine:1,deform:2' "
+                   "(finite, > 0; tasks not named = 1; default all 1 = unchanged). Applied after "
+                   "--loss-scale-mm2 (linear: objective = w * loss / loss_scale_mm2; deform: w * "
+                   "loss). Balances the tasks' gradients on the shared encoder through the one Adam "
+                   "(train_<task>/diag_enc_grad_norm_{raw,eff}). Logged losses stay unweighted")
     g.add_argument("--p-pair", type=float, default=0.1)
     g.add_argument("--flip-prob", type=float, default=0.5, help="per-axis group flip probability")
     g.add_argument("--target-iters", type=int, default=10)
@@ -243,8 +273,11 @@ def build_parser():
                    help="warm start: load ONLY the model weights from another run (a checkpoint "
                    "prefix, or a run's ckpt/best or ckpt/last directory = its latest checkpoint). "
                    "Same ModelConfig required (checked against the source run's config.json if "
-                   "present). Fresh optimizer, step 0; not allowed when this run dir already has a "
-                   "checkpoint and --resume is on")
+                   "present), except the deform-decoder fields (deform_decoder, decoder_widths, "
+                   "integration_steps): then only the encoder + linear heads are restored and the "
+                   "deform decoder stays freshly initialised (e.g. a linear-only run into a "
+                   "three-task run). Fresh optimizer, step 0; not allowed when this run dir "
+                   "already has a checkpoint and --resume is on")
     g = p.add_argument_group("DALI")
     g.add_argument("--num-threads", type=int, default=4)
     g.add_argument("--prefetch", type=int, default=1)
@@ -295,6 +328,7 @@ def parse_args(argv=None):
     args = parser.parse_args(argv)
     try:
         args.task_ratio_parsed = parse_task_ratio(args.task_ratio)
+        args.task_loss_weights_parsed = parse_task_loss_weights(args.task_loss_weights)
     except ValueError as e:
         parser.error(str(e))
     lin = linear_tasks(args)
@@ -454,6 +488,7 @@ def train_config_from_args(args):
                        val_every=args.val_every, log_every=args.log_every,
                        ckpt_every=args.ckpt_every, task_ratio=dict(args.task_ratio_parsed),
                        lambda_pair=args.lambda_pair, loss_scale_mm2=args.loss_scale_mm2,
+                       task_loss_weights=dict(args.task_loss_weights_parsed),
                        p_pair=args.p_pair,
                        flip_prob=0.0 if args.overfit_one_group else args.flip_prob,
                        target_iters=args.target_iters, amp=args.amp, seed=args.seed,

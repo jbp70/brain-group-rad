@@ -1,0 +1,10 @@
+{
+  "verdict": "APPROVED",
+  "findings": [
+    {"severity": "minor", "blocking": false, "label": "Ratio INFO line biased by zero-init SVF head", "detail": "check_mixed_run._check_enc_grad takes medians over all windows, so the early near-zero deform _eff inflates the linear/deform ratio in a 200-step smoke. Add a min-step/tail option or make P2 explicitly read windows after step ~100."},
+    {"severity": "minor", "blocking": false, "label": "warm3 row not reproducible from grad_balance.json", "detail": "Report gives warm3 ratio 1.27/1.72 (steps > 50) but the JSON stores warm3 with min_step 0 and ratio 2.97/3.95. Add the filtered entry or label the row."},
+    {"severity": "minor", "blocking": false, "label": "Golden fixture untracked", "detail": "tests/fixtures/m7_linear_golden.json is untracked; TestLinearOnlyUnchanged fails without it. Stage it explicitly with the milestone commit."},
+    {"severity": "minor", "blocking": false, "label": "Unrelated .gitignore change", "detail": ".kiro/skills/ and .agents/tmp/ ignore lines predate this milestone; commit separately or leave out of the milestone-7 commit."}
+  ],
+  "reviewDoc": "d:\\Research\\Brain_Registration_Projects\\brain-group-rad\\.agents\\tasks\\milestone-7\\review.md"
+}

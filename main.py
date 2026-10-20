@@ -10,6 +10,8 @@ Examples (inside tf10_nv.sif; see slurm/train_debug.sh and tests/gpu/run_overfit
     python main.py --data <export_root> --init-weights <other run>/ckpt/best   # warm start
     python main.py --data <export_root> --task-ratio deform:1 --group-size 16   # deformable
     python main.py --data <export_root> --task-ratio rigid:1,affine:1,deform:2  # three tasks
+    python main.py --data <export_root> --task-ratio rigid:1,affine:1,deform:2 \
+        --group-size 32 --deform-group-size 16 --init-weights <linear run>/ckpt/best  # m7
     python main.py --overfit-one-group --overfit-synthetic --task-ratio deform:1 --group-size 4
 
 Deformable runs (milestone 6): the deform decoder is built when 'deform' is in --task-ratio;
@@ -207,9 +209,12 @@ def main(argv=None):
     init_info = None
     if args.init_weights:
         # Warm start (model variables only; fresh optimizer, step 0). Resume was excluded above.
-        prefix, src_cfg = C.load_model_weights(model, model_cfg, args.init_weights)
-        init_info = {"checkpoint": os.path.abspath(prefix),
-                     "source_config": os.path.abspath(src_cfg) if src_cfg else None}
+        # A linear-only source into a deform model restores the encoder + linear heads and keeps
+        # the deform decoder fresh (C.warm_start_model, mode 'partial').
+        init_info = C.warm_start_model(model, model_cfg, args.init_weights)
+        init_info["checkpoint"] = os.path.abspath(init_info["checkpoint"])
+        if init_info["source_config"]:
+            init_info["source_config"] = os.path.abspath(init_info["source_config"])
     optimizer = O.make_optimizer(args.optimizer, lr=args.lr, weight_decay=args.weight_decay,
                                  momentum=args.momentum, dampening=args.dampening,
                                  nesterov=args.nesterov, decoupled=args.decoupled,
@@ -235,8 +240,7 @@ def main(argv=None):
     resumed = False
     if init_info is not None:
         if not args.quiet:
-            print("init weights from %s (source config %s)" % (init_info["checkpoint"],
-                                                               init_info["source_config"]))
+            print(_init_weights_lines(init_info))
     elif args.resume and trainer.checkpoint.latest_last:
         C.check_config_compatible(paths["config"], model_cfg)
         resumed = trainer.checkpoint.restore_last()
@@ -247,6 +251,9 @@ def main(argv=None):
                            trainable_params=counts["trainable"],
                            non_trainable_params=counts["non_trainable"],
                            tf32=bool(tf.config.experimental.tensor_float_32_execution_enabled())))
+    if init_info is not None:
+        # After the PARAMETER record (the first line of metrics.jsonl stays the run parameters).
+        logger.log_event(0, dict(init_info, event="init_weights"))
     if not args.quiet:
         print("run dir: %s | resumed: %s at step %d | data: %s" % (
             paths["root"], resumed, int(trainer.step.numpy()), data_desc[:200]))
@@ -376,6 +383,21 @@ def _deform_overfit_summary(args, trainer, summary, final_val, initial_val):
             "deform_curve": deform_curve,
             "deform_val_curve_columns": ["step", "template_dice", "pair_dice", "neg_jac_pct"],
             "deform_val_curve": val_curve, "initial_val": initial_val}
+
+
+def _init_weights_lines(info):
+    """Human-readable warm-start summary (printed unless --quiet; the same dict is logged as the
+    'init_weights' event and stored in config.json)."""
+    restored = ", ".join("%s (%d vars)" % kv for kv in info["restored_parts"].items())
+    fresh = ", ".join("%s (%d vars)" % kv for kv in info["fresh_parts"].items()) or "none"
+    lines = ["init weights (%s) from %s (source config %s)" % (info["mode"], info["checkpoint"],
+                                                               info["source_config"]),
+             "  restored: %s" % restored,
+             "  freshly initialised: %s" % fresh,
+             "  config diff (source, this run): %s" % (info["config_diff"] or "none")]
+    if info["ignored_source_parts"]:
+        lines.append("  ignored source parts: %s" % ", ".join(info["ignored_source_parts"]))
+    return "\n".join(lines)
 
 
 def _peak_mb(tf):

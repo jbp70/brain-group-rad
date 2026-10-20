@@ -34,7 +34,7 @@ python tests/np_reference.py || status=1
 python -c "import data_loading.params, data_loading.dali_loader as d; print('data_loading imports without TF/DALI; DALI_AVAILABLE =', d.DALI_AVAILABLE)" || status=1
 python -c "import runtime.args, runtime.schedulers, sys; assert 'tensorflow' not in sys.modules; print('runtime.args / runtime.schedulers import without TF')" || status=1
 python main.py --help >/dev/null && echo "main.py --help OK (no TF)" || status=1
-for s in tests/gpu/run_verify_glacier.sh tests/gpu/run_overfit_glacier.sh slurm/train_debug.sh; do
+for s in tests/gpu/run_verify_glacier.sh tests/gpu/run_overfit_glacier.sh slurm/train_debug.sh slurm/m7_three_task.sh; do
     bash -n "$s" && echo "bash -n $s OK" || status=1
 done
 conda deactivate

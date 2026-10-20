@@ -16,7 +16,12 @@ Tasks: rigid, affine (linear) and deform. Passes (exit 0) when:
   ``trace_counts``) and no step was non-finite;
 * ``val_png/<task>_step<final>.png`` exists for every task, and a 'best' checkpoint was written
   in ``ckpt/best`` (only checked when --expect-best, the default); with deform AND a linear task
-  also ``ckpt/best_deform`` (the deform best file; ``ckpt/best`` keeps the linear criterion).
+  also ``ckpt/best_deform`` (the deform best file; ``ckpt/best`` keeps the linear criterion);
+* milestone 7, optional: ``--expect-init-weights full|partial``: config.json ``init_weights``
+  has that mode; partial: encoder + linear_decoder restored and ``fresh_parts`` exactly
+  [deform_decoder] when deform is trained (else none). ``--expect-enc-grad true``: every task
+  logged finite ``train_<task>/diag_enc_grad_norm_{raw,eff}``; prints the medians and the
+  linear / deform median _eff ratio as an INFO line (never a failure).
 Prints one line per criterion and writes nothing.
 """
 import argparse
@@ -44,8 +49,62 @@ def _has_checkpoint(run_dir, sub, prefix):
     return os.path.isdir(d) and any(n.startswith(prefix + "-") for n in os.listdir(d))
 
 
-def check(run_dir, tasks, steps, expect_best=True):
-    """Returns (ok, [(name, passed, detail)])."""
+def _median(values):
+    v = sorted(float(x) for x in values)
+    if not v:
+        return float("nan")
+    m = len(v) // 2
+    return v[m] if len(v) % 2 else 0.5 * (v[m - 1] + v[m])
+
+
+def _check_init_weights(run_dir, tasks, expect):
+    """config.json init_weights record of a warm-started run (milestone 7)."""
+    path = os.path.join(run_dir, "config.json")
+    iw = None
+    if os.path.exists(path):
+        with open(path) as f:
+            iw = json.load(f).get("init_weights")
+    if not iw:
+        return [("init_weights", False, "config.json has no init_weights record (expected %s)" % expect)]
+    ok = iw.get("mode") == expect
+    detail = "mode %s (expected %s)" % (iw.get("mode"), expect)
+    if expect == "partial":
+        restored = sorted(iw.get("restored_parts") or {})
+        fresh = sorted(iw.get("fresh_parts") or {})
+        want_fresh = [DEFORM_TASK + "_decoder"] if DEFORM_TASK in tasks else []
+        ok = ok and "encoder" in restored and "linear_decoder" in restored and fresh == want_fresh
+        detail += ", restored %s, fresh %s (expected %s), config diff %s" % (
+            restored, fresh, want_fresh, iw.get("config_diff"))
+    return [("init_weights", ok, detail)]
+
+
+def _check_enc_grad(recs, tasks):
+    """train_<task>/diag_enc_grad_norm_{raw,eff} logged and finite for every task; the median
+    _eff ratio linear / deform is an info line (never a failure)."""
+    res, med = [], {}
+    for t in tasks:
+        keys = ["train_%s/diag_enc_grad_norm_%s" % (t, k) for k in ("raw", "eff")]
+        vals = {k: [r["data"][k] for r in recs if k in r["data"]] for k in keys}
+        ok = all(vals[k] and all(_finite(v) for v in vals[k]) for k in keys)
+        med[t] = {k.rsplit("_", 1)[1]: _median(vals[k]) for k in keys}
+        gn = [r["data"]["train_%s/grad_norm" % t] for r in recs if "train_%s/grad_norm" % t in r["data"]]
+        med[t]["grad_norm"] = _median(gn)
+        res.append(("enc_grad_%s" % t, ok, "%d/%d logged values, median raw %.4g, eff %.4g, task grad_norm %.4g" % (
+            len(vals[keys[0]]), len(vals[keys[1]]), med[t]["raw"], med[t]["eff"], med[t]["grad_norm"])))
+    if DEFORM_TASK in tasks:
+        d = med[DEFORM_TASK]["eff"]
+        ratios = {t: (med[t]["eff"] / d if d and math.isfinite(d) and d > 0 else float("nan"))
+                  for t in tasks if t in LINEAR_TASKS}
+        if ratios:
+            res.append(("enc_grad_ratio", True, "INFO median eff ratio linear/deform %s (target [0.1, 10])"
+                        % ", ".join("%s %.3g" % kv for kv in ratios.items())))
+    return res
+
+
+def check(run_dir, tasks, steps, expect_best=True, expect_init_weights=None, expect_enc_grad=False):
+    """Returns (ok, [(name, passed, detail)]). ``expect_init_weights`` None (not checked) |
+    'none' (not checked) | 'full' | 'partial'; ``expect_enc_grad``: check the milestone-7
+    encoder grad-norm diagnostics."""
     res = []
     with open(os.path.join(run_dir, "logs", "metrics.jsonl")) as f:
         recs = [json.loads(line) for line in f if line.strip()]
@@ -102,6 +161,10 @@ def check(run_dir, tasks, steps, expect_best=True):
         if DEFORM_TASK in tasks and linear:
             ok_bd = _has_checkpoint(run_dir, "best_deform", "best_deform")
             res.append(("best_deform_checkpoint", ok_bd, "ckpt/best_deform has a checkpoint: %s" % ok_bd))
+    if expect_init_weights not in (None, "none"):
+        res += _check_init_weights(run_dir, tasks, expect_init_weights)
+    if expect_enc_grad:
+        res += _check_enc_grad(recs, tasks)
     return all(p for _, p, _ in res), res
 
 
@@ -111,12 +174,17 @@ def main(argv=None):
     ap.add_argument("--tasks", default="rigid,affine")
     ap.add_argument("--steps", type=int, default=20)
     ap.add_argument("--expect-best", default="true", choices=["true", "false"])
+    ap.add_argument("--expect-init-weights", default="none", choices=["none", "full", "partial"],
+                    help="check config.json init_weights (warm start mode); none = not checked")
+    ap.add_argument("--expect-enc-grad", default="false", choices=["true", "false"],
+                    help="check train_<task>/diag_enc_grad_norm_{raw,eff} (milestone 7)")
     a = ap.parse_args(argv)
     tasks = [t for t in a.tasks.split(",") if t]
     unknown = [t for t in tasks if t not in LINEAR_TASKS + (DEFORM_TASK,)]
     if unknown:
         ap.error("unknown task(s) %s" % unknown)
-    ok, res = check(a.run_dir, tasks, a.steps, a.expect_best == "true")
+    ok, res = check(a.run_dir, tasks, a.steps, a.expect_best == "true",
+                    expect_init_weights=a.expect_init_weights, expect_enc_grad=a.expect_enc_grad == "true")
     for name, passed, detail in res:
         print("%s %-22s %s" % ("PASS" if passed else "FAIL", name, detail))
     print("check_mixed_run: %s" % ("PASS" if ok else "FAIL"))
