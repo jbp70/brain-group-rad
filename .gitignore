@@ -58,6 +58,9 @@ results/
 # ---- Kiro steering (local-only: internal cluster access rules, not for the public repo) ----
 .kiro/steering/
 
+# ---- Kiro skills (local-only: host names and cluster paths) and agent scratch scripts ----
+.kiro/skills/
+.agents/tmp/
 # ---- Prior-project reference code (local-only, read for design; not part of this repo) ----
 reference/
 # Review of that code quotes it in detail, so it stays local too
