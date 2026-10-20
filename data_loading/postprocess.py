@@ -23,6 +23,11 @@ Matrix flow for one linear batch (group of N images):
    for G: the formulas take whatever DALI emitted. The trainer passes only the first 3 (rigid)
    / 2 (affine) DALI outputs here; G_dali and control_version are for logging.
 
+Deformable batches (milestone 6, `DeformPostprocess`): DALI emits (images, labels[, T_dali]);
+images and labels are flipped with the same F, labels are one-hot encoded (train18 + background),
+and ordered pairs are sampled for the pairwise Dice loss. No targets: the deformable losses are
+unsupervised (Dice of warped labels, `runtime.losses.deform_loss`).
+
 Everything is batched over the group axis and works inside tf.function. Randomness comes from
 a seeded `tf.random.Generator` (deterministic for a given seed and call sequence).
 """
@@ -163,6 +168,70 @@ class LinearPostprocess:
                 "pair_i": pair_i, "pair_j": pair_j,
                 "P_star": tf.cast(p_star, tf.float32),
                 "flip_axes": flip_axes}
+
+
+class DeformPostprocess:
+    """Post-DALI processing of one deformable batch (milestone 6), outside the GradientTape.
+
+    One flip state F per group, applied identically (tf.reverse on the same axes) to the images
+    and the label maps; train18 is left/right merged, so a flip needs no label swap. Labels
+    become int32 [N, X, Y, Z] and a float32 one-hot [N, X, Y, Z, C]. Pairs (i, j), i != j, for the
+    pairwise Dice loss come from `sample_pairs` (p_pdice). With the residual affine the DALI T is
+    converted to mm and conjugated: T_render = F T F (I_i(y) = I(T_render_i^-1 y)); it is for
+    logging / checks only (the deformable task has no linear target).
+
+    Args:
+      level: 4, 2 or 1.
+      flip_prob: per-axis flip probability (scalar or 3 values); 0 disables flips.
+      p_pdice: fraction of ordered pairs sampled for the pairwise Dice loss (at least 1).
+      seed: seed of the internal tf.random.Generator (flips, then pairs).
+      n_classes: one-hot depth (train18 + background = `params.N_TRAIN_LABELS`).
+      residual_affine: the pipeline emits T_dali (third output); then ``t_dali`` is required.
+      pixel_center: DALI pixel-center convention.
+
+    Call with ``(images, labels[, t_dali])``; ``flip_axes`` overrides the random flip state.
+    Returns dict: images float32 [N, X, Y, Z, C], labels int32 [N, X, Y, Z], onehot float32
+    [N, X, Y, Z, n_classes], pair_i / pair_j int32 [P], flip_axes bool [3] (+ T_render float32
+    [N, 4, 4] mm with the residual affine).
+    """
+
+    def __init__(self, level, flip_prob=0.5, p_pdice=0.1, seed=0, n_classes=P.N_TRAIN_LABELS,
+                 residual_affine=False, pixel_center=P.DALI_PIXEL_CENTER):
+        self.task = P.DEFORM_TASK
+        self.level = P.check_level(level)
+        self.flip_prob = np.broadcast_to(np.asarray(flip_prob, np.float32), (3,)).copy()
+        self.p_pdice = float(p_pdice)
+        self.n_classes = int(n_classes)
+        self.residual_affine = bool(residual_affine)
+        self.pixel_center = float(pixel_center)
+        self.generator = tf.random.Generator.from_seed(int(seed))
+
+    def __call__(self, images, labels, t_dali=None, flip_axes=None):
+        if self.residual_affine and t_dali is None:
+            raise ValueError("residual_affine=True needs t_dali")
+        if not self.residual_affine and t_dali is not None:
+            raise ValueError("t_dali given but residual_affine=False")
+        images = tf.convert_to_tensor(images)
+        if images.dtype != tf.float32:
+            images = tf.cast(images, tf.float32)
+        labels = tf.cast(tf.convert_to_tensor(labels), tf.int32)
+        if labels.shape.rank == 5:
+            labels = labels[..., 0]
+        if flip_axes is None:
+            flip_axes = sample_flip_axes(self.generator, self.flip_prob)
+        else:
+            flip_axes = tf.convert_to_tensor(flip_axes, tf.bool)
+        mats = [dali_to_mm(t_dali, self.level, self.pixel_center)] if self.residual_affine else []
+        images, mats = apply_flip(images, mats, flip_axes)
+        labels, _ = apply_flip(labels, [], flip_axes)
+        n = tf.shape(images)[0]
+        pair_i, pair_j = sample_pairs(self.generator, n, self.p_pdice)
+        out = {"images": images, "labels": labels,
+               "onehot": tf.one_hot(labels, self.n_classes, dtype=tf.float32),
+               "pair_i": pair_i, "pair_j": pair_j, "flip_axes": flip_axes}
+        if self.residual_affine:
+            out["T_render"] = tf.cast(mats[0], tf.float32)
+        return out
 
 
 def brain_S_matrix(level, template_dir):

@@ -4,6 +4,8 @@ Conventions follow `models.transforms` (design section 2): arrays ``[N, X, Y, Z,
 channel-last, batch axis = group axis; voxel index p sits at centered mm coordinate
 ``(p - c) * s`` with ``c = (n - 1) / 2``; matrices act on centered mm coordinates.
 Sampling grids are float32 (float64 if the matrices are float64), never float16.
+`sample_voxel_coords` is the shared sampler (zero or border boundary) of `transform_image` and
+`models.diffeo`; `upsample_trilinear2x` / `TrilinearUpsample2x` is the half-pixel x2 upsampling.
 
 Group blocks (design 4.1, milestone 3): ``norm -> act -> [concat(x, group mean of x)] -> conv``
 (or ``-> Dense`` for vectors). The group is the batch axis: the mean is over axis 0 (one group
@@ -80,7 +82,6 @@ def transform_image(images, matrices, spacing, displacement=None, interpolation=
     """
     images = tf.convert_to_tensor(images)
     spatial = _static_spatial_shape(images)
-    in_dtype = images.dtype
     if interpolation not in ("linear", "nearest"):
         raise ValueError("interpolation must be 'linear' or 'nearest', got {!r}".format(interpolation))
 
@@ -98,6 +99,48 @@ def transform_image(images, matrices, spacing, displacement=None, interpolation=
     coords = tf.einsum("nij,xyzj->nxyzi", m_vox[:, :3, :3], grid) + m_vox[:, None, None, None, :3, 3]
     if displacement is not None:
         coords = coords + tf.cast(displacement, cdt)
+    return sample_voxel_coords(images, coords, interpolation=interpolation, fill_value=fill_value,
+                               boundary="zero")
+
+
+BOUNDARIES = ("zero", "border")
+
+
+def sample_voxel_coords(images, coords, interpolation="linear", fill_value=0.0, boundary="zero"):
+    """Sample images at per-voxel input coordinates (the shared core of every pull warp).
+
+    out_i[y] = images_i(coords_i[y]) for every output voxel y.
+
+    Args:
+      images: [N, X, Y, Z, C] input volumes (static spatial dims; N may be dynamic). Any float
+        dtype or integer labels (nearest).
+      coords: [N, X', Y', Z', 3] sampling positions in input voxel indices ('ij' order), float32
+        or float64 (the compute dtype). The output has the spatial shape of ``coords``.
+      interpolation: "linear" (trilinear) or "nearest" (no gradient).
+      fill_value: Python number used outside the volume with ``boundary="zero"``.
+      boundary: "zero" = the `transform_image` semantics (each out-of-range corner gets weight 0
+        and the missing weight is filled with ``fill_value``: soft fall-off over the last voxel).
+        "border" = coordinates clipped to [0, n - 1] per axis before interpolation (edge
+        replication; a constant volume stays exactly constant). Used for displacement fields.
+
+    Output dtype: floating inputs keep their dtype (blending in the coords dtype); integer and
+    bool inputs come back in their dtype in nearest mode. See `transform_image` for memory.
+    """
+    images = tf.convert_to_tensor(images)
+    spatial = _static_spatial_shape(images)
+    in_dtype = images.dtype
+    if interpolation not in ("linear", "nearest"):
+        raise ValueError("interpolation must be 'linear' or 'nearest', got {!r}".format(interpolation))
+    if boundary not in BOUNDARIES:
+        raise ValueError("boundary must be one of {}, got {!r}".format(BOUNDARIES, boundary))
+    coords = tf.convert_to_tensor(coords)
+    cdt = coords.dtype
+    if cdt not in (tf.float32, tf.float64):
+        raise ValueError("coords must be float32 or float64, got {}".format(cdt))
+    border = boundary == "border"
+    if border:
+        upper = tf.constant([float(n - 1) for n in spatial], cdt)
+        coords = tf.clip_by_value(coords, tf.zeros_like(upper), upper)
 
     n_img = tf.shape(images)[0]
     channels = images.shape[-1] if images.shape[-1] is not None else tf.shape(images)[-1]
@@ -120,7 +163,7 @@ def transform_image(images, matrices, spacing, displacement=None, interpolation=
             valid = va if valid is None else tf.logical_and(valid, va)
             idx = idx + tf.clip_by_value(ia, 0, spatial[a] - 1) * strides[a]
         sampled = tf.gather(flat, idx)                               # [N, X, Y, Z, C]
-        out = tf.where(valid[..., None], sampled, fill)
+        out = sampled if border else tf.where(valid[..., None], sampled, fill)
         if in_dtype.is_floating or in_dtype.is_integer or in_dtype == tf.bool:
             out = tf.cast(out, in_dtype)
         return out
@@ -134,10 +177,15 @@ def transform_image(images, matrices, spacing, displacement=None, interpolation=
         i0 = lo_i[..., a]
         i1 = i0 + 1
         f = frac[..., a]
-        v0 = tf.cast(tf.logical_and(i0 >= 0, i0 <= spatial[a] - 1), cdt)
-        v1 = tf.cast(tf.logical_and(i1 >= 0, i1 <= spatial[a] - 1), cdt)
-        corners.append(((tf.clip_by_value(i0, 0, spatial[a] - 1) * strides[a], (1.0 - f) * v0),
-                        (tf.clip_by_value(i1, 0, spatial[a] - 1) * strides[a], f * v1)))
+        if border:
+            # coords are in [0, n - 1]: i0 is valid; i1 = n only when f == 0 (clipped index).
+            w0, w1 = 1.0 - f, f
+        else:
+            v0 = tf.cast(tf.logical_and(i0 >= 0, i0 <= spatial[a] - 1), cdt)
+            v1 = tf.cast(tf.logical_and(i1 >= 0, i1 <= spatial[a] - 1), cdt)
+            w0, w1 = (1.0 - f) * v0, f * v1
+        corners.append(((tf.clip_by_value(i0, 0, spatial[a] - 1) * strides[a], w0),
+                        (tf.clip_by_value(i1, 0, spatial[a] - 1) * strides[a], w1)))
 
     out = None
     wsum = None
@@ -150,11 +198,63 @@ def transform_image(images, matrices, spacing, displacement=None, interpolation=
                 term = w[..., None] * tf.gather(flat, oxy + oz)
                 out = term if out is None else out + term
                 wsum = w if wsum is None else wsum + w
-    if fill_value != 0:
+    if fill_value != 0 and not border:
         out = out + fill * (1.0 - wsum)[..., None]
     if in_dtype.is_floating:
         out = tf.cast(out, in_dtype)
     return out
+
+
+# ============================================================================ trilinear x2
+def _upsample_axis2x(x, axis):
+    """x2 linear upsampling along one spatial axis (half-pixel, edge replicated)."""
+    n = int(x.shape[axis])
+
+    def sl(start, stop):
+        return x[(slice(None),) * axis + (slice(start, stop),)]
+
+    prev = tf.concat([sl(0, 1), sl(0, n - 1)], axis=axis)          # x[k-1], x[-1] := x[0]
+    nxt = tf.concat([sl(1, n), sl(n - 1, n)], axis=axis)            # x[k+1], x[n] := x[n-1]
+    even = 0.75 * x + 0.25 * prev                                   # fine 2k:   coarse k - 1/4
+    odd = 0.75 * x + 0.25 * nxt                                     # fine 2k+1: coarse k + 1/4
+    y = tf.stack([even, odd], axis=axis + 1)                        # [..., n, 2, ...]
+    dims = [tf.shape(x)[0]] + [int(v) for v in x.shape[1:]]
+    dims[axis] = 2 * n
+    return tf.reshape(y, dims)
+
+
+def upsample_trilinear2x(x):
+    """Separable trilinear x2 upsampling of [N, X, Y, Z, C] -> [N, 2X, 2Y, 2Z, C].
+
+    World-consistent "half-pixel" semantics (milestone-6 plan section 0): coarse voxel q sits at
+    fine coordinate 2q + 0.5, so fine voxel p samples coarse coordinate (p - 0.5) / 2. Per axis
+    out[2k] = 0.75 x[k] + 0.25 x[k-1] and out[2k+1] = 0.75 x[k] + 0.25 x[k+1], with edge
+    replication (x[-1] := x[0], x[n] := x[n-1]). This equals
+    ``scipy.ndimage.map_coordinates(x, (p - 0.5) / 2, order=1, mode='nearest')`` and
+    ``scipy.ndimage.zoom(x, 2, order=1, mode='nearest', grid_mode=True)`` (scipy >= 1.6); it is
+    NOT align_corners. Same as tf.image bilinear with half_pixel_centers=True.
+
+    Reshape/stack interleave per axis (no tf.image). Spatial and channel dims must be static; N
+    may be dynamic. Computes in the input dtype (float16 features stay float16).
+    """
+    x = tf.convert_to_tensor(x)
+    if x.shape.rank != 5 or any(v is None for v in x.shape[1:].as_list()):
+        raise ValueError("upsample_trilinear2x needs [N, X, Y, Z, C] with static X, Y, Z, C, "
+                         "got {}".format(x.shape))
+    for axis in (1, 2, 3):
+        x = _upsample_axis2x(x, axis)
+    return x
+
+
+class TrilinearUpsample2x(tf.keras.layers.Layer):
+    """Parameter-free Keras layer wrapping `upsample_trilinear2x` (half-pixel semantics)."""
+
+    def call(self, x):
+        return upsample_trilinear2x(x)
+
+    def compute_output_shape(self, input_shape):
+        s = tf.TensorShape(input_shape).as_list()
+        return tf.TensorShape([s[0]] + [None if v is None else 2 * v for v in s[1:4]] + [s[4]])
 
 
 # ============================================================================ group blocks

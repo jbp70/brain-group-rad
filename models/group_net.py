@@ -22,6 +22,15 @@ Linear decoder (group blocks in both configs; all of it is after the bottleneck)
 ``head_activation='none'``):
 rotation+translation Dense(13) (zero kernel, identity bias) and scale/shear Dense(6) (zeros).
 Rigid: A_raw = [R | t]; affine: A_raw = [R K | t]. A = GroupCentering(A_raw).
+
+Deformable decoder (design 4.5-4.6, milestone 6; built only with ``deform_decoder=True``):
+U-Net stages D5..D1, each [trilinear x2 up] -> concat(skip) -> one group block (both configs),
+upsamples parameter-free (D5-D3 always, D2 at levels 2/1, D1 at level 1), so the decoder has the
+same variables at every level. SVF head: norm -> act -> Conv3D(3, 3) zero-init, float32 ->
+v_raw (level voxels, central space). Task 'deform': v = center_velocities(v_raw) and
+(u, u_inv) = exp_and_inverse(v, integration_steps) (`models.diffeo`). The inputs are assumed to be
+in central space already (A = I). Milestone-8 cascade hook: `models.diffeo.compose_cascade` with
+the previous level's fields upsampled by `diffeo.upsample_displacement`.
 """
 import collections
 
@@ -29,12 +38,17 @@ import numpy as np
 import tensorflow as tf
 
 from data_loading import params as P
+from models import diffeo
 from models import layers as L
 from models import transforms as tfm
 from models.config import ModelConfig
 
 TASKS = ("rigid", "affine")
+DEFORM_TASK = "deform"
+ALL_TASKS = TASKS + (DEFORM_TASK,)
 ENCODER_LAYERS = ("stem", "l2", "l3", "l4", "l5", "l6")
+DECODER_STAGES = ("d5", "d4", "d3", "d2", "d1")
+GRADIENT_CHECKPOINTING = ("none", "integrator", "decoder", "both")
 BOTTLENECK_SHAPE = (5, 7, 6)
 
 
@@ -172,6 +186,54 @@ class LinearDecoder(tf.keras.layers.Layer):
         return a_raw, params, {"dense": feat, "pre_head": feat, "head_input": h}
 
 
+class DeformDecoder(tf.keras.layers.Layer):
+    """U-Net decoder + SVF head (design 4.5). call(skips, training) -> (v_raw, dec_feat).
+
+    Input L6 (skips[5]); stage d5..d1 = [TrilinearUpsample2x] -> concat(skip) -> group block
+    (pre-activation norm -> act -> concat(group mean) -> conv, in both configs A and B), skips
+    L5, L4, L3, L2, stem. Upsamples: d5, d4, d3 at every level; d2 at levels 2 and 1 (mirrors
+    the encoder's pool3); d1 at level 1 (mirrors pool2). All upsamples are parameter-free, so the
+    variables are identical at every level. The SVF head is NormAct -> Conv3D(3, 3, 'same') with
+    zero kernel and bias in float32: v_raw = 0 at init (identity map). dec_feat = d1 output.
+    """
+
+    def __init__(self, level, config=None, **kwargs):
+        super().__init__(**kwargs)
+        self.level = P.check_level(level)
+        self.config = config or ModelConfig()
+        cfg = self.config
+        widths = cfg.resolved_decoder_widths()
+        has_up = {"d5": True, "d4": True, "d3": True, "d2": self.level in (2, 1),
+                  "d1": self.level == 1}
+        for name, width in zip(DECODER_STAGES, widths):
+            setattr(self, "up_" + name,
+                    L.TrilinearUpsample2x(name="up_" + name) if has_up[name] else None)
+            setattr(self, name, _conv_block(cfg, width, 1, True, name, residual_ok=False))
+        self.svf_norm_act = L.NormAct(cfg.norm, cfg.negative_slope, cfg.bn_momentum,
+                                      cfg.bn_epsilon, name="svf_norm_act")
+        self.svf_head = tf.keras.layers.Conv3D(
+            3, 3, padding="same", use_bias=True, kernel_initializer="zeros",
+            bias_initializer="zeros", dtype="float32", name="svf_head")
+
+    def call(self, skips, training=None):
+        skips = list(skips)
+        if len(skips) != len(ENCODER_LAYERS):
+            raise ValueError("expected {} encoder skips, got {}".format(len(ENCODER_LAYERS),
+                                                                        len(skips)))
+        x = skips[5]
+        for name, skip in zip(DECODER_STAGES, (skips[4], skips[3], skips[2], skips[1], skips[0])):
+            up, block = getattr(self, "up_" + name), getattr(self, name)
+            if up is not None:
+                x = up(x)
+            x = block(tf.concat([x, tf.cast(skip, x.dtype)], axis=-1), training=training)
+        dec_feat = x
+        v_raw = self.svf_head(self.svf_norm_act(x, training=training))
+        return tf.cast(v_raw, tf.float32), dec_feat
+
+    def blocks(self):
+        return [getattr(self, n) for n in DECODER_STAGES]
+
+
 class GroupRegLevelModel(tf.keras.Model):
     """Encoder + linear decoder + in-graph group centering for one pyramid level.
 
@@ -183,25 +245,42 @@ class GroupRegLevelModel(tf.keras.Model):
       (post-dropout).
     Images are cast to the compute dtype first (float16 under mixed_float16).
 
-    Hooks: the deformable decoder (milestone 6) is ``self.deform_decoder`` (None for now) and
-    reads ``skips``; the linear cascade (design 4.7, milestone 8) warps the inputs by the previous
-    level's A^-1 and composes Center(R A_prev) outside this single-level model.
+    call(images, task='deform', training, return_warped=False) (needs ``deform_decoder=True``)
+    -> dict with v_raw (SVF head output), v (group-centered), u = exp(v), u_inv = exp(-v), all
+    float32 [N, X, Y, Z, 3] in level voxels; dec_feat (d1 output), bottleneck, skips; plus
+    warped = diffeo.warp(float32 images, u) with ``return_warped``. The images must already be
+    in central space (A = I). The linear decoder does not run for 'deform' (its variables get
+    no gradient), and the deform decoder does not run for the linear tasks.
+
+    gradient_checkpointing ('none' | 'integrator' | 'decoder' | 'both'; a Python attribute read
+    at call time, not part of ModelConfig) wraps `diffeo.exp_and_inverse` and/or the deform
+    decoder in tf.recompute_grad. Recomputing the decoder in training mode runs its BatchNorm
+    layers twice per step, so their moving statistics are updated twice (gradients unaffected).
+
+    Hooks: the linear cascade (design 4.7, milestone 8) warps the inputs by the previous level's
+    A^-1 and composes Center(R A_prev) outside this single-level model; the deformable cascade
+    composes fields with `models.diffeo.compose_cascade`.
     """
 
-    def __init__(self, level, config=None, **kwargs):
+    def __init__(self, level, config=None, gradient_checkpointing="none", **kwargs):
         super().__init__(**kwargs)
         self.level = P.check_level(level)
         self.config = config or ModelConfig()
+        if gradient_checkpointing not in GRADIENT_CHECKPOINTING:
+            raise ValueError("gradient_checkpointing must be one of {}, got {!r}".format(
+                GRADIENT_CHECKPOINTING, gradient_checkpointing))
+        self.gradient_checkpointing = gradient_checkpointing
         self.input_shape_level = tuple(P.LEVEL_SHAPE[self.level])
         self.spacing = P.LEVEL_SPACING[self.level]
         self.encoder = GroupEncoder(self.level, self.config, name="encoder")
         self.linear_decoder = LinearDecoder(self.config, name="linear_decoder")
         self.centering = tfm.GroupCentering(iters=self.config.centering_iters, name="centering")
-        self.deform_decoder = None  # milestone 6
+        self.deform_decoder = (DeformDecoder(self.level, self.config, name="deform_decoder")
+                               if self.config.deform_decoder else None)
 
-    def call(self, images, task="rigid", training=None):
-        if task == "deform":
-            raise NotImplementedError("deformable decoder arrives in milestone 6")
+    def call(self, images, task="rigid", training=None, return_warped=False):
+        if task == DEFORM_TASK:
+            return self._call_deform(images, training, return_warped)
         x = tf.cast(images, self.compute_dtype)
         bottleneck, skips = self.encoder(x, training=training)
         a_raw, params, feats = self.linear_decoder(bottleneck, task=task, training=training)
@@ -210,11 +289,48 @@ class GroupRegLevelModel(tf.keras.Model):
         out.update(feats)
         return out
 
+    def _call_deform(self, images, training, return_warped):
+        if self.deform_decoder is None:
+            raise ValueError("task 'deform' needs ModelConfig(deform_decoder=True)")
+        mode = self.gradient_checkpointing
+        if mode not in GRADIENT_CHECKPOINTING:
+            raise ValueError("gradient_checkpointing must be one of {}, got {!r}".format(
+                GRADIENT_CHECKPOINTING, mode))
+        x = tf.cast(images, self.compute_dtype)
+        bottleneck, skips = self.encoder(x, training=training)
+        decoder = self.deform_decoder
+        # Variables must exist before tf.recompute_grad (first call runs the decoder directly).
+        if mode in ("decoder", "both") and decoder.built:
+            def run_decoder(*s):
+                return decoder(list(s), training=training)
+            v_raw, dec_feat = tf.recompute_grad(run_decoder)(*skips)
+        else:
+            v_raw, dec_feat = decoder(skips, training=training)
+        v = diffeo.center_velocities(v_raw)
+        steps = self.config.integration_steps
+        if mode in ("integrator", "both"):
+            def run_integrator(vel):
+                return diffeo.exp_and_inverse(vel, steps)
+            u, u_inv = tf.recompute_grad(run_integrator)(v)
+        else:
+            u, u_inv = diffeo.exp_and_inverse(v, steps)
+        out = {"v_raw": v_raw, "v": v, "u": u, "u_inv": u_inv, "dec_feat": dec_feat,
+               "bottleneck": bottleneck, "skips": skips}
+        if return_warped:
+            out["warped"] = diffeo.warp(tf.cast(images, tf.float32), u)
+        return out
+
     # ------------------------------------------------------------------ utilities
     def build_model(self, n=1):
-        """Create every variable with one inference pass on zeros [n, X, Y, Z, 1]. Returns self."""
-        self(tf.zeros((n,) + self.input_shape_level + (1,), tf.float32), task="rigid",
-             training=False)
+        """Create every variable with one inference pass on zeros [n, X, Y, Z, 1]. Returns self.
+
+        Runs the rigid task (encoder, both linear heads) and, when the deform decoder exists, one
+        deform forward too.
+        """
+        x = tf.zeros((n,) + self.input_shape_level + (1,), tf.float32)
+        self(x, task="rigid", training=False)
+        if self.deform_decoder is not None:
+            self(x, task=DEFORM_TASK, training=False)
         return self
 
     def set_bn_stats_frozen(self, frozen=True):
@@ -271,6 +387,15 @@ class GroupRegLevelModel(tf.keras.Model):
         out["group_overhead/encoder"] = int(sum(b.group_overhead_params() for b in enc.blocks()))
         out["group_overhead/linear_decoder"] = int(
             sum(b.group_overhead_params() for b in list(dec.reductions) + list(dec.dense_blocks)))
+        ddec = self.deform_decoder
+        if ddec is not None:
+            for name, block in zip(DECODER_STAGES, ddec.blocks()):
+                out["deform_decoder/" + name] = _n_params(block.trainable_weights)
+            out["deform_decoder/svf_head"] = _n_params(ddec.svf_norm_act.trainable_weights
+                                                       + ddec.svf_head.trainable_weights)
+            out["deform_decoder"] = _n_params(ddec.trainable_weights)
+            out["group_overhead/deform_decoder"] = int(
+                sum(b.group_overhead_params() for b in ddec.blocks()))
         out["trainable"] = _n_params(self.trainable_weights)
         out["non_trainable"] = _n_params(self.non_trainable_weights)
         return out

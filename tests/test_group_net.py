@@ -7,6 +7,7 @@ import unittest
 
 from tests import tf_setup  # noqa: F401  (log level, TF32 off, GPU memory growth)
 from tests import np_reference as npr
+from tests.runtime_helpers import NARROW
 import numpy as np
 import tensorflow as tf
 from scipy.linalg import expm as sp_expm
@@ -234,11 +235,16 @@ class TestGradients(NetTestCase):
         t = np.stack([random_rigid(rng) for _ in range(n)])
         target = tfm.barycentric_targets(tf.constant(t, tf.float32))
         s = tfm.brain_second_moment(np.ones(P.LEVEL_SHAPE[4]), P.LEVEL_SPACING[4])
-        with tf.GradientTape() as tape:
-            out = m(x, task=task, training=True)
-            loss = tf.reduce_mean(tfm.point_loss(out["A"] - target, s))
         variables = m.trainable_variables
-        grads = tape.gradient(loss, variables)
+        # Two passes, the second one checked: on the local GTX 1080 the first backward pass of a
+        # new conv shape can return 512 NaN entries in the encoder l3 kernel gradient even with
+        # cuDNN autotune off (CPU finite; milestone-4 report, milestone-6 report). The routing
+        # checks below are unaffected by the extra pass (BN statistics only move slightly).
+        for _ in range(2):
+            with tf.GradientTape() as tape:
+                out = m(x, task=task, training=True)
+                loss = tf.reduce_mean(tfm.point_loss(out["A"] - target, s))
+            grads = tape.gradient(loss, variables)
         self.assertTrue(np.isfinite(float(loss)))
         unused = set()
         if task == "rigid":
@@ -404,6 +410,23 @@ class TestModelConfig(unittest.TestCase):
         with self.assertRaises(ValueError):
             ModelConfig.from_dict({"nope": 1})
 
+    def test_deform_fields(self):
+        c = ModelConfig()
+        self.assertEqual((c.deform_decoder, c.decoder_widths, c.integration_steps), (False, None, 7))
+        self.assertEqual(c.resolved_decoder_widths(), (128, 96, 64, 32, 16))
+        d = ModelConfig(deform_decoder=True, decoder_widths=[8, 8, 8, 8, 4], integration_steps=0)
+        self.assertEqual(d.decoder_widths, (8, 8, 8, 8, 4))
+        self.assertEqual(d.resolved_decoder_widths(), (8, 8, 8, 8, 4))
+        self.assertEqual(ModelConfig.from_dict(d.to_dict()), d)
+        old = c.to_dict()
+        for k in ("deform_decoder", "decoder_widths", "integration_steps"):
+            old.pop(k)
+        self.assertEqual(ModelConfig.from_dict(old), c)               # pre-milestone-6 config.json
+        for bad in (dict(decoder_widths=(8, 8)), dict(decoder_widths=(8, 8, 0, 8, 8)),
+                    dict(integration_steps=-1)):
+            with self.assertRaises(ValueError):
+                ModelConfig(**bad)
+
     def test_translation_scale(self):
         x = images(4, 2)
         m = G.GroupRegLevelModel(4, ModelConfig(translation_scale=10.0)).build_model()
@@ -416,6 +439,212 @@ class TestModelConfig(unittest.TestCase):
         np.testing.assert_allclose(o["params"].numpy()[:, :10], raw[:, :10], atol=1e-6)
         np.testing.assert_allclose(o["A_raw"].numpy()[:, :3, 3], o["params"].numpy()[:, 10:],
                                    rtol=1e-6)
+
+
+def deform_config(**kw):
+    d = dict(NARROW, deform_decoder=True)
+    d.update(kw)
+    return ModelConfig(**d)
+
+
+def deform_model(level=4, n=1, **kw):
+    return G.GroupRegLevelModel(level, deform_config(**kw)).build_model(n)
+
+
+def randomize_svf_head(model, rng, std=0.05):
+    """Nonzero SVF head kernel: v of roughly one voxel with the narrow decoder."""
+    k = model.deform_decoder.svf_head.kernel
+    k.assign((rng.normal(size=k.shape) * std).astype(np.float32))
+
+
+def part_ids(layer):
+    return {id(v) for v in layer.trainable_variables}
+
+
+class TestDeformShapes(NetTestCase):
+    # Tiny widths: at level 1 a narrow D1 group block alone needs > 6 GB (64 float32 channels at
+    # 160x224x192); shapes and identity do not depend on the widths.
+    TINY = dict(filters=(4, 8, 8, 8, 8, 8), reductions=(8, 8, 8, 8), dense=(32, 16),
+                decoder_widths=(8, 8, 8, 4, 4))
+
+    def test_shapes_and_identity_at_init(self):
+        for level, n in ((1, 1), (2, 2), (4, 3)):
+            with self.subTest(level=level):
+                m = G.GroupRegLevelModel(level, ModelConfig(deform_decoder=True, **self.TINY))
+                m.build_model(n)
+                x = images(level, n, seed=level)
+                out = m(x, task="deform", training=False, return_warped=True)
+                shape = (n,) + tuple(P.LEVEL_SHAPE[level])
+                for k in ("v_raw", "v", "u", "u_inv"):
+                    self.assertEqual(tuple(out[k].shape), shape + (3,), k)
+                    self.assertEqual(out[k].dtype, tf.float32, k)
+                    np.testing.assert_array_equal(out[k].numpy(), 0.0)
+                self.assertEqual(tuple(out["dec_feat"].shape),
+                                 shape + (m.config.resolved_decoder_widths()[-1],))
+                np.testing.assert_array_equal(out["warped"].numpy(), x.numpy())
+                self.assertEqual(tuple(m(x, task="rigid", training=False)["A"].shape), (n, 4, 4))
+                del m, out
+                free_memory()
+
+    def test_off_by_default(self):
+        m = G.GroupRegLevelModel(4, ModelConfig(**NARROW)).build_model()
+        self.assertIsNone(m.deform_decoder)
+        self.assertFalse(any("deform" in v.name for v in m.weights))
+        self.assertNotIn("deform_decoder", m.count_params_by_part())
+        with self.assertRaises(ValueError):
+            m(images(4, 2), task="deform", training=False)
+        with self.assertRaises(ValueError):
+            G.GroupRegLevelModel(4, gradient_checkpointing="all")
+        self.assertEqual(G.ALL_TASKS, ("rigid", "affine", "deform"))
+        self.assertEqual(G.TASKS, ("rigid", "affine"))
+
+
+class TestDeformCopyWeights(NetTestCase):
+    def test_copy_4_to_2(self):
+        m4, m2 = deform_model(4, 2), deform_model(2, 2)
+        sig = [[(m._local_name(v), tuple(v.shape)) for v in m.weights] for m in (m4, m2)]
+        self.assertEqual(sig[0], sig[1])
+        c4, c2 = m4.count_params_by_part(), m2.count_params_by_part()
+        self.assertEqual(c4, c2)
+        self.assertEqual(c4["trainable"], c4["encoder"] + c4["linear_decoder"] + c4["deform_decoder"])
+        self.assertEqual(c4["deform_decoder"], sum(c4["deform_decoder/" + s] for s in
+                                                   G.DECODER_STAGES + ("svf_head",)))
+        self.assertGreater(c4["group_overhead/deform_decoder"], 0)
+        randomize_svf_head(m4, np.random.default_rng(3))
+        self.assertEqual(m2.copy_weights_from(m4), len(m4.weights))
+        for a, b in zip(m4.weights, m2.weights):
+            np.testing.assert_array_equal(a.numpy(), b.numpy())
+        out = m2(images(2, 2, seed=4), task="deform", training=False)
+        self.assertTrue(np.all(np.isfinite(out["u"].numpy())))
+        self.assertGreater(np.abs(out["u"].numpy()).max(), 1e-3)
+
+
+class TestDeformGradients(NetTestCase):
+    def test_gradient_routing(self):
+        tf.random.set_seed(0)
+        m = deform_model(4, 3)
+        x = images(4, 3, seed=6)
+        randomize_svf_head(m, np.random.default_rng(6))
+        variables = m.trainable_variables
+        linear = part_ids(m.linear_decoder)
+        deform = part_ids(m.deform_decoder)
+        with tf.GradientTape() as tape:
+            out = m(x, task="deform", training=True, return_warped=True)
+            w = out["warped"]
+            loss = (tf.reduce_mean(tf.square(w - tf.reduce_mean(w, axis=0, keepdims=True)))
+                    + 1e-3 * tf.reduce_mean(tf.square(out["u_inv"])))
+        grads = tape.gradient(loss, variables)
+        self.assertTrue(np.isfinite(float(loss)))
+        for v, g in zip(variables, grads):
+            if id(v) in linear:
+                self.assertIsNone(g, v.name)
+            else:
+                self.assertIsNotNone(g, v.name)
+                self.assertTrue(np.all(np.isfinite(tf.convert_to_tensor(g).numpy())), v.name)
+        self.assertGreater(len(deform), 10)
+        g_head = grads[[id(v) for v in variables].index(id(m.deform_decoder.svf_head.kernel))]
+        self.assertGreater(float(tf.reduce_max(tf.abs(g_head))), 0.0)
+
+        # Rigid step: the deform decoder does not run, so its variables get no gradient.
+        with tf.GradientTape() as tape:
+            out = m(x, task="rigid", training=True)
+            loss = tf.reduce_mean(tf.square(out["A_raw"] - tf.eye(4)))
+        grads = tape.gradient(loss, variables)
+        for v, g in zip(variables, grads):
+            if id(v) in deform:
+                self.assertIsNone(g, v.name)
+
+
+class TestDeformCentering(NetTestCase):
+    def test_mean_zero(self):
+        m = deform_model(4, 4)
+        randomize_svf_head(m, np.random.default_rng(8))
+        out = m(images(4, 4, seed=8), task="deform", training=False)
+        v, v_raw = out["v"].numpy(), out["v_raw"].numpy()
+        self.assertLess(np.abs(v.mean(axis=0)).max(), 1e-5)
+        self.assertGreater(np.abs(v_raw.mean(axis=0)).max(), 1e-3)
+        np.testing.assert_allclose(v - v[:1], v_raw - v_raw[:1], atol=1e-5)
+
+
+class TestDeformPermutation(NetTestCase):
+    def test_permutation_equivariance(self):
+        perm = np.array([2, 0, 3, 1])
+        for cfg in ("A", "B"):
+            with self.subTest(cfg=cfg):
+                m = deform_model(4, 4, group_config=cfg)
+                randomize_svf_head(m, np.random.default_rng(10))
+                x = images(4, 4, seed=10)
+                o = m(x, task="deform", training=False)
+                op = m(tf.gather(x, perm), task="deform", training=False)
+                self.assertGreater(np.abs(o["u"].numpy()).max(), 0.1)
+                for k in ("v", "u", "u_inv"):
+                    np.testing.assert_allclose(op[k].numpy(), o[k].numpy()[perm], atol=1e-4,
+                                               err_msg="%s %s" % (cfg, k))
+                del m
+                free_memory()
+
+
+class TestGradientCheckpointing(NetTestCase):
+    def test_recompute_matches(self):
+        tf.random.set_seed(1)
+        m = deform_model(4, 3)
+        x = images(4, 3, seed=12)
+        randomize_svf_head(m, np.random.default_rng(12))
+        variables = [v for v in m.trainable_variables
+                     if id(v) not in part_ids(m.linear_decoder)]
+
+        def loss_and_grads():
+            with tf.GradientTape() as tape:
+                out = m(x, task="deform", training=True, return_warped=True)
+                w = out["warped"]
+                loss = (tf.reduce_mean(tf.square(w - tf.reduce_mean(w, axis=0, keepdims=True)))
+                        + 1e-3 * tf.reduce_mean(tf.square(out["u_inv"])))
+            return loss, tape.gradient(loss, variables)
+
+        graph_fn = tf.function(loss_and_grads)
+        results = {}
+        for mode in ("none", "integrator", "decoder", "both"):
+            m.gradient_checkpointing = mode
+            results[mode] = loss_and_grads()
+        m.gradient_checkpointing = "both"
+        results["both_graph"] = graph_fn()
+        m.gradient_checkpointing = "none"
+        ref_loss, ref_grads = results["none"]
+        # Variables whose gradient is analytically ~0 (e.g. a conv bias right before a BN) only
+        # carry rounding noise: floor the per-variable tolerance at 1e-6 of the largest gradient.
+        g_max = max(float(np.abs(tf.convert_to_tensor(r).numpy()).max()) for r in ref_grads)
+        for mode, (loss, grads) in results.items():
+            self.assertAlmostEqual(float(loss), float(ref_loss), delta=1e-4 * abs(float(ref_loss)),
+                                   msg=mode)
+            for v, g, r in zip(variables, grads, ref_grads):
+                self.assertIsNotNone(g, "%s %s" % (mode, v.name))
+                g, r = tf.convert_to_tensor(g).numpy(), tf.convert_to_tensor(r).numpy()
+                tol = 1e-4 * float(np.abs(r).max()) + 1e-6 * g_max
+                self.assertLessEqual(float(np.abs(g - r).max()), tol, "%s %s" % (mode, v.name))
+
+
+class TestDeformMixedPrecision(NetTestCase):
+    def test_mixed_float16(self):
+        old = tf.keras.mixed_precision.global_policy()
+        try:
+            tf.keras.mixed_precision.set_global_policy("mixed_float16")
+            m = deform_model(4, 3)
+            randomize_svf_head(m, np.random.default_rng(14))
+            x = images(4, 3, seed=14)
+            with tf.GradientTape() as tape:
+                out = m(x, task="deform", training=True, return_warped=True)
+                loss = tf.reduce_mean(tf.square(out["warped"] - x))
+            grads = tape.gradient(loss, m.deform_decoder.trainable_variables)
+            for k in ("v_raw", "v", "u", "u_inv", "warped"):
+                self.assertEqual(out[k].dtype, tf.float32, k)
+                self.assertTrue(np.all(np.isfinite(out[k].numpy())), k)
+            self.assertEqual(out["dec_feat"].dtype, tf.float16)
+            self.assertEqual(m.deform_decoder.svf_head.compute_dtype, "float32")
+            self.assertGreater(np.abs(out["u"].numpy()).max(), 1e-3)
+            self.assertTrue(all(g is not None for g in grads))
+        finally:
+            tf.keras.mixed_precision.set_global_policy(old)
+        self.assertEqual(tf.keras.mixed_precision.global_policy().name, old.name)
 
 
 class TestSmokeTraining(NetTestCase):

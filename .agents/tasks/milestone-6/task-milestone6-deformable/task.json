@@ -1,0 +1,7 @@
+{
+  "task_id": "task-milestone6-deformable",
+  "task_description": "Milestone 6 of the TF 2.10 groupwise brain-MRI registration project: deformable DALI pipeline (images + train18 labels, optional residual affine), models/diffeo.py (SVF scaling and squaring, composition, inverse via -v, centering, upsampling, Jacobian), U-Net deformable decoder with zero-init SVF head and the 'deform' task in GroupRegLevelModel, deformable losses (template soft Dice, sampled pairwise soft Dice, smoothness) and metrics, Trainer/CLI/main integration (third traced train step, val_deform, PNGs, best files), synthetic overfit, memory measurement, GPU scripts, docs. Full plan: .agents/tasks/milestone-6/plan.md. Linear-task defaults must stay unchanged. No git commit/push, no cluster access.",
+  "status": "completed",
+  "feature_order": ["FEAT-001", "FEAT-002", "FEAT-003", "FEAT-004"],
+  "blocked_reason": null
+}

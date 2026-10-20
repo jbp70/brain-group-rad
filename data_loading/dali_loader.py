@@ -1,4 +1,5 @@
-"""DALI 1.18 pipelines for the linear (rigid / affine) tasks. Adapted from the rigid project's
+"""DALI 1.18 pipelines for the linear (rigid / affine) tasks and the deformable task (milestone 6,
+`DeformPipeline`, see below). Adapted from the rigid project's
 ``data_loading/dali_loader.py`` (reader, random transforms, warp, intensity augmentation).
 
 One group per batch (design 3.2): the DALI batch size is the group size N, every sample is one
@@ -35,6 +36,20 @@ distribution equals the constant-range pipeline.
 No flips in DALI (they are per group, in TF). No external_source (it failed under model.fit in
 the reference project; the control file is read by a numpy reader as in its curriculum.py).
 
+Deformable pipeline (milestone 6, `DeformPipeline`). Images are already in MNI space (A = I), so
+by default nothing is warped. Outputs (all on GPU):
+    residual off (default): images float32 [N, X, Y, Z, 1], labels uint8 [N, X, Y, Z, 1]
+    residual on:            images, labels, T_dali float32 [N, 3, 4]
+With the residual affine (small, `params.DEFAULT_DEFORM_RESIDUAL_RANGES`) one pull matrix per
+sample warps the image (linear) and its labels (nearest, fill 0), and the forward T_dali is
+emitted as for the linear tasks. Intensity augmentation touches the images only.
+Alignment of images and labels: two numpy readers (`paired_reader_kwargs`, names ImageReader /
+LabelReader) get the same pre-permuted file order (`paired_permutation`), the same seed, and
+identical settings (`shuffle_after_epoch`, `pad_last_batch=False`), so they produce identical
+sample sequences, also across DALI's per-epoch reshuffle. 'buffer' shuffling (two independent
+random_shuffle buffers) is refused because nothing guarantees their alignment. Verified on GPU
+by tests/gpu/verify_dali_pipeline.py check (l).
+
 This module imports without DALI; building a pipeline needs nvidia.dali (`require_dali`).
 """
 import os
@@ -57,6 +72,7 @@ except ImportError as _e:  # local WSL envs have no DALI
     _DALI_IMPORT_ERROR = _e
 
 READER_NAME = "ImageReader"
+LABEL_READER_NAME = "LabelReader"
 CONTROL_READER_NAME = "ControlReader"
 
 
@@ -87,6 +103,29 @@ def base_output_count(task):
     if task not in P.TASKS:
         raise ValueError("task must be one of {}, got {!r}".format(P.TASKS, task))
     return 3 if task == "rigid" else 2
+
+
+def deform_output_signature(level, batch_size, residual_affine=False):
+    """Static output shapes and dtype names of `DeformPipeline` (no DALI needed):
+    images float32 [N, X, Y, Z, 1], labels uint8 [N, X, Y, Z, 1] (+ T_dali float32 [N, 3, 4]
+    with the residual affine)."""
+    n = int(batch_size)
+    vol = (n,) + tuple(P.LEVEL_SHAPE[P.check_level(level)]) + (1,)
+    shapes, dtypes = [vol, vol], ["float32", "uint8"]
+    if residual_affine:
+        shapes.append((n, 3, 4))
+        dtypes.append("float32")
+    return tuple(shapes), tuple(dtypes)
+
+
+def output_count(task, residual_affine=False):
+    """Number of base outputs of a task's pipeline: linear = `base_output_count` (without the
+    control extras); deform = 2 (images, labels) or 3 with the residual affine (+ T_dali)."""
+    if task == P.DEFORM_TASK:
+        return 3 if residual_affine else 2
+    if task not in P.TASKS:
+        raise ValueError("task must be one of {}, got {!r}".format(P.ALL_TASKS, task))
+    return base_output_count(task)
 
 
 # ---------------------------------------------------------------------------- graph helpers
@@ -317,6 +356,43 @@ def read_images(files, shape_xyz, file_root=None, shuffle=True, initial_fill=102
     return imgs.gpu()
 
 
+def paired_permutation(n, seed):
+    """The one index permutation applied to BOTH the image and the label list (the same
+    RandomState permutation `LinearPipeline` applies to its file list)."""
+    return np.random.RandomState(int(seed)).permutation(int(n))
+
+
+def paired_reader_kwargs(image_files, label_files, file_root=None, shuffle=True, seed=0):
+    """(image kwargs, label kwargs) of the two aligned numpy readers of `DeformPipeline`.
+
+    Both are `numpy_reader_kwargs` with shuffle_mode 'epoch' and identical settings; they differ
+    only in ``files`` and ``name`` (`READER_NAME`, `LABEL_READER_NAME`). The lists must already
+    be in the same (pre-permuted) order and have equal length.
+    """
+    image_files, label_files = [str(f) for f in image_files], [str(f) for f in label_files]
+    if len(image_files) != len(label_files):
+        raise ValueError("image and label lists differ in length (%d vs %d)"
+                         % (len(image_files), len(label_files)))
+    img = numpy_reader_kwargs(image_files, file_root, shuffle, "epoch", seed=seed, name=READER_NAME)
+    lbl = numpy_reader_kwargs(label_files, file_root, shuffle, "epoch", seed=seed,
+                              name=LABEL_READER_NAME)
+    return img, lbl
+
+
+def _reader_to_gpu(kwargs, shape_xyz, dtype=None):
+    out = fn.readers.numpy(**kwargs)
+    if dtype is not None:
+        out = fn.cast(out, dtype=dtype)
+    out = fn.reshape(out, shape=[int(v) for v in shape_xyz] + [1], layout="DHWC")
+    return out.gpu()
+
+
+def read_labels(files, shape_xyz, file_root=None, shuffle=True, seed=0, name=LABEL_READER_NAME):
+    """numpy reader -> GPU uint8 label maps [X, Y, Z, 1] per sample (layout DHWC), 'epoch' mode."""
+    kwargs = numpy_reader_kwargs(files, file_root, shuffle, "epoch", seed=seed, name=name)
+    return _reader_to_gpu(kwargs, shape_xyz, types.UINT8)
+
+
 def warp_linear(images, pull_matrix):
     """Pull warp on GPU: out(u) = in(pull_matrix u), linear interpolation, fill 0, same size."""
     return fn.warp_affine(images, matrix=pull_matrix, fill_value=0.0, inverse_map=True,
@@ -450,3 +526,90 @@ class LinearPipeline(Pipeline):
         if self.task == "rigid":
             return (imgs, t_fwd.gpu(), rt.gpu()) + extra
         return (imgs, t_fwd.gpu()) + extra
+
+
+def check_deform_inputs(image_files, label_files, shuffle_mode="epoch"):
+    """Pure-Python validation of `DeformPipeline` inputs (runs before `require_dali`)."""
+    if shuffle_mode != "epoch":
+        raise ValueError("DeformPipeline supports shuffle_mode 'epoch' only (two random_shuffle "
+                         "buffers are not guaranteed to stay aligned), got {!r}".format(shuffle_mode))
+    if len(image_files) != len(label_files):
+        raise ValueError("image and label lists differ in length (%d vs %d)"
+                         % (len(image_files), len(label_files)))
+    if not image_files:
+        raise ValueError("DeformPipeline needs at least one file")
+
+
+class DeformPipeline(Pipeline):
+    """Deformable-task pipeline: one group of N (image, train18 labels) pairs per batch.
+
+    Args:
+      level: 4, 2 or 1.
+      image_files, label_files: aligned .npy lists (same cases, same order; relative to
+        `file_root` if given), e.g. `LinearDataModule.files` / `.label_files`.
+      batch_size: group size N.
+      seed: pipeline and reader seed. With shuffle=True both lists are permuted once with
+        `paired_permutation(len, seed)` before DALI's per-epoch reshuffle.
+      shuffle: shuffle the readers ('epoch' mode). False reads the lists in order.
+      residual_affine: apply a small random residual affine (default False: no warp at all).
+      residual_ranges: dict of `params.deform_residual_ranges` overrides (rotation_deg,
+        translation_mm, log_scale, shear); None -> design defaults.
+      intensity_aug: `params.IntensityAugConfig` (None -> defaults ON), images only.
+      shuffle_mode: 'epoch' only ('buffer' raises ValueError, module docstring).
+      Other arguments as `LinearPipeline`.
+    Outputs: (images, labels[, T_dali]) (module docstring, `deform_output_signature`).
+    """
+
+    def __init__(self, level, image_files, label_files, batch_size, seed=0, file_root=None,
+                 shuffle=True, residual_affine=False, residual_ranges=None, intensity_aug=None,
+                 num_threads=4, device_id=0, prefetch_queue_depth=1,
+                 pixel_center=P.DALI_PIXEL_CENTER, shuffle_mode="epoch", exec_async=True,
+                 exec_pipelined=True):
+        image_files, label_files = [str(f) for f in image_files], [str(f) for f in label_files]
+        check_deform_inputs(image_files, label_files, shuffle_mode)
+        level = P.check_level(level)
+        ranges = P.deform_residual_ranges(level, **dict(residual_ranges or {}))
+        require_dali()
+        super().__init__(batch_size=int(batch_size), num_threads=int(num_threads),
+                         device_id=int(device_id), seed=int(seed),
+                         prefetch_queue_depth=int(prefetch_queue_depth),
+                         exec_async=exec_async, exec_pipelined=exec_pipelined)
+        self.task = P.DEFORM_TASK
+        self.level = level
+        self.volume_shape = P.LEVEL_SHAPE[level]
+        self.group_size = int(batch_size)
+        self.shuffle = bool(shuffle)
+        self.shuffle_mode = shuffle_mode
+        if self.shuffle:
+            perm = paired_permutation(len(image_files), seed)
+            image_files = [image_files[i] for i in perm]
+            label_files = [label_files[i] for i in perm]
+        self.files = image_files
+        self.label_files = label_files
+        self.file_root = file_root
+        self.reader_seed = int(seed)
+        self.residual_affine = bool(residual_affine)
+        self.ranges = ranges
+        self.intensity_aug = P.IntensityAugConfig() if intensity_aug is None else intensity_aug
+        self.pixel_center = float(pixel_center)
+
+    def output_signature(self):
+        return deform_output_signature(self.level, self.group_size, self.residual_affine)
+
+    def define_graph(self):
+        img_kw, lbl_kw = paired_reader_kwargs(self.files, self.label_files, self.file_root,
+                                              self.shuffle, self.reader_seed)
+        imgs = _reader_to_gpu(img_kw, self.volume_shape)
+        labels = _reader_to_gpu(lbl_kw, self.volume_shape, types.UINT8)
+        extra = ()
+        if self.residual_affine:
+            t_fwd, t_pull, _ = build_linear_matrices(random_linear_params(self.ranges),
+                                                     self.volume_shape, self.pixel_center)
+            imgs = warp_linear(imgs, t_pull)
+            # Same pull matrix for the labels (nearest, background fill): image and labels stay
+            # aligned voxel by voxel.
+            labels = fn.warp_affine(labels, matrix=t_pull, fill_value=0, inverse_map=True,
+                                    interp_type=types.DALIInterpType.INTERP_NN)
+            extra = (t_fwd.gpu(),)
+        imgs = intensity_augment(imgs, self.intensity_aug, self.volume_shape)
+        return (imgs, labels) + extra

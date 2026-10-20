@@ -1,4 +1,4 @@
-"""Per-level file lists from export_manifest.csv and the linear-task DALIDatasets.
+"""Per-level file lists from export_manifest.csv and the per-task DALIDatasets.
 
 Data layout (preprocessing `export-npy`, design 3.1): ``<export_root>/export_manifest.csv`` with
 one row per case; files live in ``<export_root>/<dataset>/<subject_dir>/`` and are named by the
@@ -15,8 +15,13 @@ Usage::
     it = data.iterator("rigid")               # yields (images, T_dali, Rt_dali)
     it_aff = data.iterator("affine")          # yields (images, T_dali)
 
-With ``control_dir`` (curriculum / global transform) every tuple also ends with G_dali [N, 3, 4]
-and control_version [N] (`dali_loader.linear_output_signature(..., control=True)`).
+    it_def = data.iterator("deform")          # yields (images, labels[, T_dali]) (milestone 6)
+
+With ``control_dir`` (curriculum / global transform) every linear tuple also ends with G_dali
+[N, 3, 4] and control_version [N] (`dali_loader.linear_output_signature(..., control=True)`).
+The deformable dataset (`dali_loader.DeformPipeline`) reads the image and the train18 label file
+of each case (`label_files`, resolved lazily so linear-only runs never need label columns); its
+group size is ``deform_batch_size`` (default: ``batch_size``). Control files are linear-only.
 
 Device placement: the DALIDatasets are created and iterated under ``tf.device('/gpu:0')`` with
 DALI ``device_id=0``, i.e. the single GPU the process sees (set CUDA_VISIBLE_DEVICES outside).
@@ -110,12 +115,12 @@ def make_dali_dataset(pipeline, device_id=0):
 
 
 class LinearDataModule:
-    """Rigid and affine DALIDatasets for one level.
+    """Rigid, affine and deformable DALIDatasets for one level (alias `DataModule`).
 
     Args:
       export_root: npy export folder (holds export_manifest.csv and template/).
       level: 4, 2 or 1; batch_size: group size N for this level.
-      seed: base seed; rigid uses seed + 0, affine seed + 1 (deformable will use seed + 2).
+      seed: base seed; rigid uses seed + 0, affine seed + 1, deform seed + 2.
       split: manifest split for the file list ('train' or 'val').
       shuffle: reader shuffle (training: True).
       shuffle_mode: 'epoch' (default, full reshuffle every epoch) or 'buffer'
@@ -123,8 +128,10 @@ class LinearDataModule:
       rigid_ranges / affine_ranges: dicts of `LinearPipeline` range overrides
         (rotation_deg, translation_mm, log_scale, shear); empty -> design defaults.
       intensity_aug: `params.IntensityAugConfig` (None -> defaults ON).
-      deform_residual_affine: residual affine in the deformable pipeline (default OFF). Stored
-        for milestone 6 (the deformable pipeline is not implemented yet).
+      deform_residual_affine: residual affine in the deformable pipeline (default OFF).
+      deform_batch_size: group size of the deformable pipeline (None -> batch_size).
+      deform_ranges: dict of residual-affine range overrides (`params.deform_residual_ranges`);
+        empty -> design defaults. Only used with deform_residual_affine.
       num_threads, prefetch_queue_depth (default 1), device_id (default 0): DALI settings.
       contrast: optional manifest contrast filter.
       control_dir: folder of the per-task control files (curriculum / global transform, design
@@ -141,10 +148,13 @@ class LinearDataModule:
                  rigid_ranges=None, affine_ranges=None, intensity_aug=None,
                  deform_residual_affine=P.DEFAULT_DEFORM_RESIDUAL_AFFINE, num_threads=4,
                  prefetch_queue_depth=1, device_id=0, contrast=None, manifest_path=None,
-                 shuffle_mode="epoch", control_dir=None, control_init=None):
+                 shuffle_mode="epoch", control_dir=None, control_init=None, deform_batch_size=None,
+                 deform_ranges=None):
         self.export_root = export_root
         self.level = P.check_level(level)
         self.batch_size = int(batch_size)
+        self.deform_batch_size = self.batch_size if deform_batch_size is None else int(deform_batch_size)
+        self.deform_ranges = dict(deform_ranges or {})
         self.seed = int(seed)
         self.split = split
         self.shuffle = bool(shuffle)
@@ -159,7 +169,9 @@ class LinearDataModule:
         rows = read_manifest(self.manifest_path)
         self.rows = [r for r in rows if split is None or r.get("split") == split]
         check_level_shape(self.rows, self.level)
+        self.contrast = contrast
         self.files = manifest_files(self.rows, self.level, split=None, contrast=contrast)
+        self._label_files = None
         if len(self.files) < self.batch_size:
             raise ValueError("split %r has %d images at level %d, fewer than the group size %d"
                              % (split, len(self.files), self.level, self.batch_size))
@@ -183,7 +195,28 @@ class LinearDataModule:
     def template_dir(self):
         return os.path.join(self.export_root, TEMPLATE_DIR)
 
+    @property
+    def label_files(self):
+        """train18 label files of the same rows, in the same order as `files` (resolved on first
+        use; raises KeyError / ValueError if the manifest lacks them)."""
+        if self._label_files is None:
+            self._label_files = manifest_files(self.rows, self.level, split=None, kind="labels",
+                                               label_set=DEFAULT_LABEL_SET, contrast=self.contrast)
+        return self._label_files
+
     def pipeline(self, task):
+        if task == P.DEFORM_TASK:
+            if len(self.files) < self.deform_batch_size:
+                raise ValueError("split %r has %d images at level %d, fewer than the deform group "
+                                 "size %d" % (self.split, len(self.files), self.level,
+                                              self.deform_batch_size))
+            return dali_loader.DeformPipeline(
+                self.level, self.files, self.label_files, self.deform_batch_size,
+                seed=self.seed + TASK_SEED_OFFSET[task], file_root=self.export_root,
+                shuffle=self.shuffle, residual_affine=self.deform_residual_affine,
+                residual_ranges=self.deform_ranges, intensity_aug=self.intensity_aug,
+                num_threads=self.num_threads, device_id=self.device_id,
+                prefetch_queue_depth=self.prefetch_queue_depth, shuffle_mode=self.shuffle_mode)
         return dali_loader.LinearPipeline(
             task, self.level, self.files, self.batch_size, seed=self.seed + TASK_SEED_OFFSET[task],
             file_root=self.export_root, shuffle=self.shuffle, intensity_aug=self.intensity_aug,
@@ -198,8 +231,8 @@ class LinearDataModule:
 
     def dataset(self, task):
         """The task's DALIDataset (built once, cached)."""
-        if task not in P.TASKS:
-            raise ValueError("task must be one of {}, got {!r}".format(P.TASKS, task))
+        if task not in P.ALL_TASKS:
+            raise ValueError("task must be one of {}, got {!r}".format(P.ALL_TASKS, task))
         if task not in self._datasets:
             self._datasets[task] = make_dali_dataset(self.pipeline(task), self.device_id)
         return self._datasets[task]
@@ -209,3 +242,7 @@ class LinearDataModule:
         ds = self.dataset(task)
         with tf.device("/gpu:%d" % self.device_id):
             return iter(ds)
+
+
+# The module now serves all three tasks; the old name stays for existing callers.
+DataModule = LinearDataModule

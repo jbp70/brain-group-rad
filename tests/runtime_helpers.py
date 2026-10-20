@@ -28,8 +28,11 @@ def free_memory():
     gc.collect()
 
 
-def write_fake_export(tmp, n_train=3, n_val=2, level=4, seed=0):
-    """Tiny export (manifest + level .npy images + template mask) under <tmp>/export."""
+def write_fake_export(tmp, n_train=3, n_val=2, level=4, seed=0, labels=False):
+    """Tiny export (manifest + level .npy images + template mask) under <tmp>/export.
+
+    ``labels=True``: images come from `fd.synthetic_label_phantom` and each case also gets its
+    aligned ``labels_train18<suffix>.npy`` (uint8) and the ``labels_l<k>`` column."""
     import csv
     import os
     from runtime import fixed_data as fd
@@ -43,10 +46,18 @@ def write_fake_export(tmp, n_train=3, n_val=2, level=4, seed=0):
             sub = "%s_%02d" % (split, i)
             d = os.path.join(root, "LUMIR", sub)
             os.makedirs(d)
-            np.save(os.path.join(d, "image%s.npy" % suffix), fd.smooth_phantom(shape, rng)[0])
-            rows.append({"dataset": "LUMIR", "subject_dir": sub, "split": split, "contrast": "T1w",
-                         "image_l%d" % level: "image%s.npy" % suffix,
-                         "shape_l%d" % level: "x".join(map(str, shape))})
+            row = {"dataset": "LUMIR", "subject_dir": sub, "split": split, "contrast": "T1w",
+                   "image_l%d" % level: "image%s.npy" % suffix,
+                   "shape_l%d" % level: "x".join(map(str, shape))}
+            if labels:
+                img, lab = fd.synthetic_label_phantom(shape, rng)
+                lname = "labels_train18%s.npy" % suffix
+                np.save(os.path.join(d, lname), lab)
+                row["labels_l%d" % level] = lname
+            else:
+                img = fd.smooth_phantom(shape, rng)[0]
+            np.save(os.path.join(d, "image%s.npy" % suffix), img)
+            rows.append(row)
     os.makedirs(os.path.join(root, "template"))
     mask = np.zeros(shape, np.uint8)
     mask[10:30, 15:40, 12:36] = 1

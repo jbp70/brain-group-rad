@@ -1,0 +1,53 @@
+{
+  "verdict": "APPROVED",
+  "findings": [
+    {
+      "severity": "minor",
+      "file": "tests/test_deform_data.py",
+      "issue": "No unit test distinguishes the pairwise composition order compose(u_i, u_inv_j) from the reversed order: existing pair-loss tests use zero/constant fields where both orders coincide. Reviewer oracle (synthetic_deform_group max_vox 6, u = exp(-v_true)): pair hard Dice identity 0.691, code order 0.936, reversed 0.879.",
+      "fix": "Add a test on synthetic_deform_group with u = exp(-v_true), u_inv = exp(v_true) asserting the code's pairwise warp of one-hot_i matches labels_j clearly better than the reversed composition."
+    },
+    {
+      "severity": "minor",
+      "file": "runtime/args.py",
+      "issue": "--deform-group-size defaults to --group-size (32 at level 4); memory.json extrapolates ~70+ GB at N=32 with default widths, so a default three-task run likely OOMs on a 48 GB RTX 8000.",
+      "fix": "Use a level-dependent deform default (e.g. 16 at level 4) or print a warning when deform N > 16 at level 4; keep the linear N unchanged."
+    },
+    {
+      "severity": "minor",
+      "file": "data_loading/dali_loader.py",
+      "issue": "DeformPipeline image/label reader alignment across epoch reshuffles and the NN residual label warp are unverified on GPU (check l and dryrun_deform not yet run).",
+      "fix": "Run tests/gpu/run_verify_glacier.sh check l and run_overfit_glacier.sh dryrun_deform on glacier before any deform SLURM run."
+    },
+    {
+      "severity": "minor",
+      "file": ".agents/tasks/milestone-6/report.md",
+      "issue": "Plan item 21 not done: the full suite has not been run after the last edit, test-log.txt is missing, and report.md still contains two '[FILLED IN BY THE FINAL STEP]' placeholders.",
+      "fix": "Run tests/run_tests_wsl.sh in the background, save the output to .agents/tasks/milestone-6/test-log.txt and fill in the count/result in report.md."
+    },
+    {
+      "severity": "minor",
+      "file": "tests/test_group_net.py",
+      "issue": "Pre-existing flaky linear test TestGroupBehaviour.test_permutation_equivariance (fails ~1 in 8, also at HEAD; translation tolerance floor assumes ~10 mm) can make the final full suite fail.",
+      "fix": "Rerun the module if it is the only failure, or (with Jay's approval) loosen the translation tolerance floor, e.g. to 3e-5."
+    },
+    {
+      "severity": "minor",
+      "file": "runtime/run.py",
+      "issue": "deform_diagnostics computes diag_dead_frac on dec_feat, the signed conv output of the D1 pre-activation GroupConvBlock, so 'channel <= 0 everywhere' practically never fires and carries no information.",
+      "fix": "Compute diag_dead_frac after a norm-act of dec_feat (e.g. return the activated features from DeformDecoder) or drop it from DEFORM_DIAG_KEYS."
+    },
+    {
+      "severity": "minor",
+      "file": "tests/test_deform_overfit.py",
+      "issue": "With the default BN momentum 0.99, eval-mode deform Dice lags train mode in short runs (synthetic overfit: eval template 0.873 vs train mode 0.966 at stop); the test passes only with --bn-momentum 0.9.",
+      "fix": "No code change required; in the first real deform debug runs compare val_deform with val_deform_trainmode and lower BN momentum if the gap persists."
+    },
+    {
+      "severity": "minor",
+      "file": "tests/test_diffeo.py",
+      "issue": "test_warp_matches_scipy uses map_coordinates(mode='grid-constant'), which needs scipy >= 1.6; the container has scipy 1.4.1 (tests currently only run locally with scipy 1.13).",
+      "fix": "Add a scipy-version skip for that comparison, as tests/test_upsample.py does for zoom(grid_mode=True)."
+    }
+  ]
+}

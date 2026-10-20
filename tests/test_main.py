@@ -1,5 +1,8 @@
 """main.py end to end: DALI check, dry run, the real-data overfit path and the OVERFIT test.
 
+Milestone 6 adds the deform dry run, the real-data deform overfit path and the three-task dry
+run (the synthetic deform overfit is tests/test_deform_overfit.py).
+
 Milestone 5 adds: the affine overfit (full affine ranges, < 1 mm eval mode), the mixed
 rigid:affine overfit on two fixed groups (both < 1 mm; tests/gpu/check_mixed_run.py on its run
 dir), the resumed step's control values before the pipelines start, and --init-weights.
@@ -100,6 +103,143 @@ class TestMain(MainCase):
         with open(os.path.join(self.run_dir("real"), "overfit_summary.json")) as f:
             s = json.load(f)
         self.assertEqual((s["steps_run"], s["end_step"]), (5, 25))
+
+
+class TestDeformMain(MainCase):
+    """Milestone 6: deform runs through main.py (overfit mode, no DALI)."""
+
+    def read_metrics(self, name):
+        with open(os.path.join(self.run_dir(name), "logs", "metrics.jsonl")) as f:
+            return [json.loads(line) for line in f]
+
+    def test_synthetic_deform_dry_run(self):
+        rc = M.main(["--overfit-one-group", "--overfit-synthetic", "--dry-run", "--group-size", "4",
+                     "--task-ratio", "deform:1", "--results", os.path.join(self.tmp, "results"),
+                     "--run-name", "ddry"] + NARROW_ARGS + COMMON)
+        self.assertEqual(rc, 0)
+        d = self.run_dir("ddry")
+        with open(os.path.join(d, "config.json")) as f:
+            cfg = json.load(f)
+        mc = cfg["model_config"]
+        self.assertEqual((mc["deform_decoder"], mc["decoder_widths"], mc["integration_steps"]), (True, None, 7))
+        for k in ("lambda_pdice", "p_pdice", "lambda_smooth", "smooth_order", "integration_steps",
+                  "decoder_widths", "deform_decoder", "deform_residual_affine", "deform_group_size",
+                  "gradient_checkpointing", "overfit_dice_threshold", "overfit_fold_max", "val_deform_max_pairs"):
+            self.assertIn(k, cfg["args"])
+        self.assertEqual(cfg["args"]["best_metric"], "val_deform/pair_dice_loss")
+        self.assertIn("deform_decoder", cfg["param_counts"])
+        lines = self.read_metrics("ddry")
+        self.assertTrue(any("val_deform/pair_dice" in r["data"] for r in lines[1:]))
+        self.assertTrue(any("train_deform/soft_dice_tmpl" in r["data"] for r in lines[1:]))
+        self.assertEqual(os.listdir(os.path.join(d, "val_png")), ["deform_step0000002.png"])
+        self.assertFalse(os.path.exists(os.path.join(d, "control")))
+
+    def test_deform_real_data_overfit_path(self):
+        root = write_fake_export(self.tmp, n_train=5, n_val=2, labels=True)
+        rc = M.main(["--overfit-one-group", "--data", root, "--group-size", "4", "--task-ratio", "deform:1",
+                     "--overfit-max-steps", "3", "--log-every", "1", "--val-every", "3",
+                     "--results", os.path.join(self.tmp, "results"), "--run-name", "dreal",
+                     "--schedule", "constant", "--warmup-steps", "0"] + NARROW_ARGS + COMMON)
+        self.assertIn(rc, (0, 1))
+        with open(os.path.join(self.run_dir("dreal"), "overfit_summary.json")) as f:
+            s = json.load(f)
+        self.assertEqual(s["steps_run"], 3)
+        self.assertEqual(s["trace_counts"], {"deform": 1})
+        self.assertEqual(s["curve"], [])                                   # no linear task
+        self.assertEqual(len(s["deform_curve"]), 3)
+        self.assertEqual(s["deform_curve_columns"], ["step", "loss", "soft_dice_tmpl", "soft_dice_pair", "fold_frac"])
+        self.assertEqual([r[0] for r in s["deform_val_curve"]], [3])
+        iv = s["initial_val"]
+        self.assertAlmostEqual(iv["val_deform/pair_dice"], iv["val_deform/pair_dice_identity"], places=10)
+        self.assertTrue(np.isfinite(s["final_val"]["val_deform/template_dice"]))
+        self.assertIsNone(s["window_deform"])                             # 3 steps < the 10-step window
+        self.assertEqual(s["window_center_rms_by_task"], {})
+        self.assertFalse(s["reached"])
+        with open(os.path.join(self.run_dir("dreal"), "config.json")) as f:
+            self.assertIn("train18 labels", json.load(f)["data"])
+
+    def test_mixed_three_task_dry_run(self):
+        res = os.path.join(self.tmp, "results")
+        base = ["--overfit-one-group", "--overfit-synthetic", "--group-size", "4",
+                "--task-ratio", "rigid:1,affine:1,deform:2", "--results", res] + NARROW_ARGS + COMMON
+        self.assertEqual(M.main(base + ["--dry-run", "--run-name", "m3dry"]), 0)
+        lines = self.read_metrics("m3dry")
+        val = [r["data"] for r in lines[1:] if "val_deform/pair_dice" in r["data"]]
+        self.assertEqual(len(val), 1)
+        for k in ("val_rigid/pair_rms_mm", "val_affine/pair_rms_mm", "val/mean_pair_rms_mm"):
+            self.assertIn(k, val[0])
+        self.assertAlmostEqual(val[0]["val/mean_pair_rms_mm"],
+                               0.5 * (val[0]["val_rigid/pair_rms_mm"] + val[0]["val_affine/pair_rms_mm"]), places=10)
+        self.assertEqual(sorted(os.listdir(os.path.join(self.run_dir("m3dry"), "val_png"))),
+                         ["affine_step0000002.png", "deform_step0000002.png", "rigid_step0000002.png"])
+        free_memory()
+        # A short (non-dry) run writes both best files: ckpt/best (linear rule) and ckpt/best_deform.
+        rc = M.main(base + ["--run-name", "m3", "--overfit-max-steps", "4", "--val-every", "2", "--log-every", "2",
+                            "--val-png", "false"])
+        self.assertIn(rc, (0, 1))
+        d = self.run_dir("m3")
+        self.assertTrue(any(n.startswith("best-") for n in os.listdir(os.path.join(d, "ckpt", "best"))))
+        self.assertTrue(any(n.startswith("best_deform-") for n in os.listdir(os.path.join(d, "ckpt", "best_deform"))))
+        with open(os.path.join(d, "overfit_summary.json")) as f:
+            s = json.load(f)
+        self.assertEqual(sorted(s["trace_counts"]), ["affine", "deform", "rigid"])
+        self.assertTrue(all(v <= 1 for v in s["trace_counts"].values()))
+        self.assertEqual(s["val_curve_columns"], ["step", "rigid_eval_center_rms_mm", "rigid_trainmode_center_rms_mm",
+                                                  "affine_eval_center_rms_mm", "affine_trainmode_center_rms_mm"])
+        self.assertEqual(len(s["curve"]) + len(s["deform_curve"]), 4)
+
+    def test_dali_data_wiring_with_deform(self):
+        # The DALI path cannot run locally: stub the data module and the val loaders, check what
+        # _build_dali_data hands them (deform group size, controls / linear val sets linear-only).
+        from data_loading import params as P
+        from runtime import args as A
+        seen, calls = {}, {}
+        shape = (6,) + P.LEVEL_SHAPE[4] + (1,)
+
+        class FakeDM:
+            def __init__(self, *a, **kw):
+                seen.clear()
+                seen.update(kw)
+                self.control_writers = {t: None for t in kw.get("control_init", {})}
+                self.files, self.template_dir = ["f"], "t"
+
+            def iterator(self, task):
+                return iter((task,))
+
+        def record(name, value):
+            def fn(*a, **k):
+                calls[name] = (a, k)
+                return value
+            return fn
+
+        fd = _Stub(load_level_images=record("images", (np.zeros(shape, np.float32), [])),
+                   load_level_images_and_labels=record(
+                       "images_labels", (np.zeros(shape, np.float32), np.zeros(shape, np.uint8), [], [])),
+                   build_validation_sets=record("linear_val", {}),
+                   DeformValidationSet=_Stub(build=record("deform_val", "deform_set")))
+        mods = (fd, P, None, _Stub(brain_S_matrix=lambda *a, **k: np.eye(4)), _Stub(LinearDataModule=FakeDM))
+        common = ["--data", self.tmp, "--results", self.tmp, "--run-name", "r"]
+        args = A.parse_args(common + ["--task-ratio", "rigid:1,deform:2", "--group-size", "8",
+                                      "--deform-group-size", "4", "--curriculum", "true",
+                                      "--val-groups", "3", "--val-seed", "7"])
+        sources, val_sets, _, _, controls = M._build_dali_data(args, 4, mods)
+        self.assertEqual((seen["deform_batch_size"], seen["deform_residual_affine"]), (4, False))
+        self.assertEqual(sorted(seen["control_init"]), ["rigid"])
+        self.assertEqual(sorted(controls), ["rigid"])
+        self.assertEqual(sorted(sources), ["deform", "rigid"])
+        self.assertEqual(list(calls["linear_val"][0][1]), ["rigid"])
+        a, k = calls["deform_val"]
+        self.assertEqual((a[2], a[3], a[4], k["seed"]), (4, 4, 3, 7))     # level, nv = min(4, 6), groups
+        self.assertEqual(val_sets["deform"], "deform_set")
+        calls.clear()
+        args = A.parse_args(common + ["--task-ratio", "deform:1", "--group-size", "8",
+                                      "--deform-residual-affine", "true"])
+        sources, val_sets, _, _, controls = M._build_dali_data(args, 4, mods)
+        self.assertEqual((seen["deform_batch_size"], seen["deform_residual_affine"]), (8, True))
+        self.assertNotIn("control_init", seen)
+        self.assertEqual((sorted(sources), sorted(val_sets), controls), (["deform"], ["deform"], {}))
+        self.assertEqual(sorted(calls), ["deform_val", "images_labels"])  # no linear val loading
+        self.assertEqual(calls["deform_val"][0][3], 6)                      # nv = min(8, 6 val cases)
 
 
 class _Stub:

@@ -1,4 +1,5 @@
-"""Linear losses (runtime.losses) and metrics (runtime.metrics) against numpy brute force."""
+"""Linear and deformable losses (runtime.losses) and metrics (runtime.metrics) against numpy
+references."""
 import unittest
 
 from tests import tf_setup  # noqa: F401  (log level, TF32 off, GPU memory growth)
@@ -8,6 +9,7 @@ import tensorflow as tf
 from scipy.linalg import expm as sp_expm
 
 from data_loading import params as P
+from models import diffeo
 from models import transforms as tfm
 from runtime import losses
 from runtime import metrics as M
@@ -267,6 +269,226 @@ class TestAffineMetrics(unittest.TestCase):
         self.assertEqual(M.mean_pair_rms(m, ["rigid", "affine"]), 3.0)
         self.assertEqual(M.mean_pair_rms(m, ["rigid"]), 2.0)
         self.assertIsNone(M.mean_pair_rms({"val_rigid/pair_rms_mm": 2.0}, ["rigid", "affine"]))
+
+
+# ============================================================================ deformable (m6)
+def np_soft_dice(a, b, eps=1e-5):
+    """Numpy reference of losses.soft_dice (foreground channels, masked mean over present)."""
+    a, b = np.asarray(a, np.float64)[..., 1:], np.asarray(b, np.float64)[..., 1:]
+    out = []
+    for n in range(a.shape[0]):
+        vals = []
+        for c in range(a.shape[-1]):
+            sa, sb = a[n, ..., c].sum(), b[n, ..., c].sum()
+            if sa + sb > 1e-3:
+                vals.append((2.0 * (a[n, ..., c] * b[n, ..., c]).sum() + eps) / (sa + sb + eps))
+        out.append(np.mean(vals) if vals else 1.0)
+    return np.asarray(out)
+
+
+def np_grad_l2(u):
+    u = np.asarray(u, np.float64)
+    return np.mean([np.mean(np.diff(u, axis=a + 1) ** 2) for a in range(3)])
+
+
+def np_bending(u):
+    """Plain numpy re-implementation of the bending energy: per interior voxel
+    sum_c [u_xx^2 + u_yy^2 + u_zz^2 + 2 (u_xy^2 + u_xz^2 + u_yz^2)], mean over N, voxels, c."""
+    u = np.asarray(u, np.float64)
+    n, X, Y, Z, C = u.shape
+    tot, cnt = 0.0, 0
+    for x in range(1, X - 1):
+        for y in range(1, Y - 1):
+            for z in range(1, Z - 1):
+                f = u[:, x - 1:x + 2, y - 1:y + 2, z - 1:z + 2]      # [n, 3, 3, 3, C]
+                dxx = f[:, 0, 1, 1] - 2 * f[:, 1, 1, 1] + f[:, 2, 1, 1]
+                dyy = f[:, 1, 0, 1] - 2 * f[:, 1, 1, 1] + f[:, 1, 2, 1]
+                dzz = f[:, 1, 1, 0] - 2 * f[:, 1, 1, 1] + f[:, 1, 1, 2]
+                dxy = (f[:, 0, 0, 1] - f[:, 2, 0, 1] - f[:, 0, 2, 1] + f[:, 2, 2, 1]) / 4
+                dxz = (f[:, 0, 1, 0] - f[:, 2, 1, 0] - f[:, 0, 1, 2] + f[:, 2, 1, 2]) / 4
+                dyz = (f[:, 1, 0, 0] - f[:, 1, 2, 0] - f[:, 1, 0, 2] + f[:, 1, 2, 2]) / 4
+                tot += np.sum(dxx ** 2 + dyy ** 2 + dzz ** 2 + 2 * (dxy ** 2 + dxz ** 2 + dyz ** 2))
+                cnt += n * C
+    return tot / cnt
+
+
+def block_labels(shape, n_classes, rng):
+    """Integer map with a few axis-aligned blocks of foreground labels away from the border."""
+    lab = np.zeros(shape, np.int64)
+    for k in range(1, n_classes):
+        lo = [int(rng.integers(2, s // 2)) for s in shape]
+        hi = [min(l + int(rng.integers(3, s // 2)), s - 3) for l, s in zip(lo, shape)]
+        lab[lo[0]:hi[0], lo[1]:hi[1], lo[2]:hi[2]] = k
+    return lab
+
+
+class TestDeformLosses(unittest.TestCase):
+    SHAPE = (12, 14, 10)
+
+    def setUp(self):
+        self.rng = np.random.default_rng(5)
+
+    def onehot(self, lab, c):
+        return np.eye(c, dtype=np.float32)[lab]
+
+    def test_soft_dice_matches_numpy_and_excludes_absent(self):
+        a = self.rng.uniform(size=(3,) + self.SHAPE + (5,)).astype(np.float32)
+        b = self.rng.uniform(size=(3,) + self.SHAPE + (5,)).astype(np.float32)
+        a[0, ..., 3] = 0.0
+        b[0, ..., 3] = 0.0                       # channel 3 absent in image 0
+        got = losses.soft_dice(tf.constant(a), tf.constant(b)).numpy()
+        np.testing.assert_allclose(got, np_soft_dice(a, b), rtol=1e-5)
+        # Counted, the absent channel would add a Dice of 1 (eps / eps) and inflate the mean.
+        inflated = (np_soft_dice(a, b)[0] * 3 + 1.0) / 4.0
+        self.assertLess(got[0], inflated - 0.05)
+        # No present foreground channel at all -> 1.
+        z = np.zeros((1,) + self.SHAPE + (3,), np.float32)
+        z[..., 0] = 1.0
+        self.assertEqual(float(losses.soft_dice(z, z)[0]), 1.0)
+        # Background included on request.
+        full = losses.soft_dice(tf.constant(a), tf.constant(b), exclude_background=False).numpy()
+        self.assertFalse(np.allclose(full, got))
+
+    def test_perfect_alignment_zero_and_shift(self):
+        c = 4
+        lab = block_labels(self.SHAPE, c, self.rng)
+        oh = np.stack([self.onehot(lab, c)] * 3)
+        zeros = tf.zeros((3,) + self.SHAPE + (3,))
+        tmpl, dice_t, template = losses.template_dice_loss(diffeo.warp(oh, zeros))
+        self.assertLess(float(tmpl), 1e-6)
+        np.testing.assert_allclose(template.numpy()[0], oh[0], atol=1e-7)
+        pdice, dice_p = losses.pair_dice_loss(oh, zeros, zeros, [0, 1, 2], [1, 2, 0])
+        self.assertLess(float(pdice), 1e-6)
+        self.assertEqual(dice_p.shape, (3,))
+        # Image 1 is image 0 shifted by one voxel along x: unregistered Dice = numpy Dice.
+        shifted = np.zeros_like(lab)
+        shifted[:-1] = lab[1:]                   # shifted(x) = lab(x + 1)
+        oh2 = np.stack([self.onehot(lab, c), self.onehot(shifted, c)])
+        z2 = tf.zeros((2,) + self.SHAPE + (3,))
+        _, d = losses.pair_dice_loss(oh2, z2, z2, [0], [1])
+        np.testing.assert_allclose(d.numpy(), np_soft_dice(oh2[:1], oh2[1:]), rtol=1e-5)
+        self.assertLess(float(d[0]), 0.95)
+        # u_inv_1 = +1 voxel along x maps 1's coords to 0's: onehot_0(x + 1) = onehot_1(x).
+        u_inv = np.zeros((2,) + self.SHAPE + (3,), np.float32)
+        u_inv[1, ..., 0] = 1.0
+        _, d = losses.pair_dice_loss(oh2, z2, tf.constant(u_inv), [0], [1])
+        self.assertGreater(float(d[0]), 1.0 - 1e-6)
+
+    def test_template_gradient_flows_through_template(self):
+        c = 3
+        labs = [block_labels(self.SHAPE, c, self.rng) for _ in range(3)]
+        oh = tf.constant(np.stack([self.onehot(l, c) for l in labs]))
+        u = tf.Variable(self.rng.normal(scale=0.3, size=(3,) + self.SHAPE + (3,)).astype(np.float32))
+
+        def grads(stop):
+            with tf.GradientTape() as tape:
+                w = diffeo.warp(oh, u)
+                if stop:
+                    t = tf.stop_gradient(tf.reduce_mean(w, axis=0, keepdims=True))
+                    loss = tf.reduce_mean(1.0 - losses.soft_dice(w, tf.broadcast_to(t, tf.shape(w))))
+                else:
+                    loss = losses.template_dice_loss(w)[0]
+            return tape.gradient(loss, u).numpy()
+
+        g, g_stop = grads(False), grads(True)
+        for i in range(3):
+            self.assertGreater(float(np.abs(g[i]).sum()), 0.0)
+        self.assertTrue(np.all(np.isfinite(g)))
+        self.assertGreater(float(np.abs(g - g_stop).max()), 1e-6)   # the template term contributes
+
+    def test_smoothness_orders(self):
+        u = self.rng.normal(size=(2,) + self.SHAPE + (3,))
+        np.testing.assert_allclose(losses.smoothness_loss(tf.constant(u), 1).numpy(), np_grad_l2(u),
+                                   rtol=1e-10)
+        np.testing.assert_allclose(losses.smoothness_loss(tf.constant(u), 2).numpy(), np_bending(u),
+                                   rtol=1e-10)
+        self.assertEqual(losses.smoothness_loss(tf.constant(u, tf.float32), 1).dtype, tf.float32)
+        const = np.ones((2,) + self.SHAPE + (3,)) * np.array([0.5, -1.0, 2.0])
+        for order in (1, 2):
+            self.assertEqual(float(losses.smoothness_loss(tf.constant(const), order)), 0.0)
+        # Affine field u = B x + b: bending energy 0; first order = mean_a sum_c B[c, a]^2 / 3.
+        g = np.stack(np.meshgrid(*[np.arange(n, dtype=np.float64) for n in self.SHAPE],
+                                 indexing="ij"), -1)
+        B = self.rng.normal(scale=0.1, size=(3, 3))
+        aff = (g @ B.T + np.array([0.3, 0.1, -0.2]))[None]
+        self.assertLess(float(losses.smoothness_loss(tf.constant(aff), 2)), 1e-20)
+        np.testing.assert_allclose(float(losses.smoothness_loss(tf.constant(aff), 1)),
+                                   np.sum(B ** 2) / 9.0, rtol=1e-10)
+        with self.assertRaises(ValueError):
+            losses.smoothness_loss(tf.constant(u), 3)
+
+    def test_total_loss(self):
+        c = 4
+        labs = [block_labels(self.SHAPE, c, self.rng) for _ in range(3)]
+        oh = np.stack([self.onehot(l, c) for l in labs])
+        v = tf.constant(self.rng.normal(scale=0.3, size=(3,) + self.SHAPE + (3,)).astype(np.float32))
+        u, u_inv = diffeo.exp_and_inverse(v, 4)
+        batch = {"onehot": oh, "pair_i": tf.constant([0, 2]), "pair_j": tf.constant([1, 0])}
+        terms = losses.deform_loss({"u": u, "u_inv": u_inv}, batch, lambda_pdice=0.7,
+                                   lambda_smooth=0.3, smooth_order=2)
+        for k in ("loss", "tmpl", "pdice", "smooth", "soft_dice_tmpl", "soft_dice_pair"):
+            self.assertEqual(terms[k].dtype, tf.float32, k)
+            self.assertTrue(np.isfinite(float(terms[k])), k)
+        np.testing.assert_allclose(float(terms["loss"]), float(terms["tmpl"]) + 0.7 * float(terms["pdice"])
+                                   + 0.3 * float(terms["smooth"]), rtol=1e-6)
+        tmpl, dice_t, _ = losses.template_dice_loss(diffeo.warp(oh, u))
+        np.testing.assert_allclose(float(terms["tmpl"]), float(tmpl), rtol=1e-6)
+        np.testing.assert_allclose(float(terms["soft_dice_tmpl"]), float(np.mean(dice_t)), rtol=1e-6)
+        np.testing.assert_allclose(float(terms["smooth"]), float(losses.smoothness_loss(u, 2)), rtol=1e-6)
+        pd, _ = losses.pair_dice_loss(oh, u, u_inv, [0, 2], [1, 0])
+        np.testing.assert_allclose(float(terms["pdice"]), float(pd), rtol=1e-6)
+        np.testing.assert_allclose(float(terms["soft_dice_pair"]), 1.0 - float(pd), rtol=1e-6)
+
+
+class TestDeformMetrics(unittest.TestCase):
+    def test_hard_dice_hand_made(self):
+        a = np.array([0, 1, 1, 2, 2, 0])
+        b = np.array([0, 1, 2, 2, 2, 0])
+        d = M.hard_dice_per_label(a, b, 4)
+        self.assertEqual(d.shape, (3,))
+        np.testing.assert_allclose(d[:2], [2.0 / 3.0, 0.8])
+        self.assertTrue(np.isnan(d[2]))                      # label 3 absent in both
+        self.assertAlmostEqual(M.mean_fg_dice(a, b, 4), (2.0 / 3.0 + 0.8) / 2.0)
+        self.assertEqual(M.mean_fg_dice(a, a, 4), 1.0)
+        self.assertEqual(M.mean_fg_dice(np.array([1, 1, 0, 0]), np.array([0, 0, 2, 2]), 3), 0.0)
+        self.assertEqual(M.mean_fg_dice(np.zeros(5, int), np.zeros(5, int), 3), 1.0)
+        with self.assertRaises(ValueError):
+            M.hard_dice_per_label(a, b[:3], 4)
+
+    def test_deform_group_errors(self):
+        rng = np.random.default_rng(0)
+        shape = (6, 7, 5)
+        seg = rng.integers(0, 3, size=(3,) + shape)
+        jac = np.ones((3, 4, 5, 3))
+        jac[1, 0, 0, :2] = -0.5                              # 2 folded voxels of 60
+        err = np.zeros((3,) + shape + (3,))
+        err[2, ..., 0] = 0.25                                # 0.25 vox everywhere in image 2
+        err[2, 0, 0, 0] = [0.0, 3.0, 4.0]                    # max 5 vox
+        v = rng.normal(size=(3,) + shape + (3,))
+        v_c = v - v.mean(axis=0, keepdims=True)
+        e = M.deform_group_errors(seg, seg[0], seg[:2], seg[1:], jac, err, v_c, v, 4.0, 3)
+        np.testing.assert_allclose(e["template_dice"][0], 1.0)
+        self.assertEqual(e["template_dice"].shape, (3,))
+        for p in range(2):
+            self.assertAlmostEqual(e["pair_dice"][p], M.mean_fg_dice(seg[p], seg[p + 1], 3))
+        np.testing.assert_allclose(e["neg_jac_pct"], [0.0, 100.0 * 2 / 60, 0.0])
+        n_vox = float(np.prod(shape))
+        np.testing.assert_allclose(e["inv_consistency_mm"],
+                                   [0.0, 0.0, 4.0 * (0.25 * (n_vox - 1) + 5.0) / n_vox])
+        np.testing.assert_allclose(e["inv_consistency_max_mm"], [0.0, 0.0, 20.0])
+        self.assertLess(float(e["centrality_mm"][0]), 1e-12)
+        ref = 4.0 * np.mean(np.linalg.norm(v.mean(axis=0), axis=-1))
+        np.testing.assert_allclose(e["raw_centrality_mm"], [ref])
+        m = M.summarize(e, "val_deform")
+        for k in ("template_dice", "pair_dice", "neg_jac_pct", "inv_consistency_mm",
+                  "inv_consistency_max_mm", "centrality_mm", "raw_centrality_mm"):
+            self.assertIn("val_deform/" + k, m)
+        self.assertAlmostEqual(M.deform_pair_dice_loss(m, "val_deform"), 1.0 - m["val_deform/pair_dice"])
+        self.assertIsNone(M.deform_pair_dice_loss({}, "val_deform"))
+        # Norm input [N, X, Y, Z] is accepted too.
+        e2 = M.deform_group_errors(seg, seg[0], seg[:2], seg[1:], jac, np.linalg.norm(err, axis=-1),
+                                   v_c, v, 4.0, 3)
+        np.testing.assert_allclose(e2["inv_consistency_mm"], e["inv_consistency_mm"])
 
 
 if __name__ == "__main__":

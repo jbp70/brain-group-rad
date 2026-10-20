@@ -7,8 +7,8 @@
 #
 # Modes:
 #   verify   (default) tests/gpu/verify_dali_pipeline.py -> summary.json, verify.log
-#            [checks]: comma-separated subset of a-k (default: all; e.g. h,i,j,k for the
-#            curriculum / global-transform checks)
+#            [checks]: comma-separated subset of a-l (default: all; e.g. h,i,j,k for the
+#            curriculum / global-transform checks, l for the deformable image/label pipeline)
 #   unittest python -m unittest discover -s tests -t . -v -> unittest.log (the DALI test runs
 #            here instead of skipping; the tests' tempfile folders go to TMPDIR = scratch)
 #
@@ -34,8 +34,8 @@ if [[ "$MODE" != "verify" && "$MODE" != "unittest" ]]; then
     echo "mode must be 'verify' or 'unittest', got '$MODE'" >&2
     exit 2
 fi
-if [[ -n "$CHECKS" ]] && ! [[ "$CHECKS" =~ ^[a-k](,[a-k])*$ ]]; then
-    echo "checks must be a comma-separated list of letters a-k, got '$CHECKS'" >&2
+if [[ -n "$CHECKS" ]] && ! [[ "$CHECKS" =~ ^[a-l](,[a-l])*$ ]]; then
+    echo "checks must be a comma-separated list of letters a-l, got '$CHECKS'" >&2
     exit 2
 fi
 

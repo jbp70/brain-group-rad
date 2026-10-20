@@ -1,0 +1,245 @@
+{
+  "environment": {
+    "python": "3.9.13",
+    "tensorflow": "2.10.0",
+    "numpy": "1.24.3",
+    "gpu": "NVIDIA GeForce GTX 1080",
+    "gpu_memory_limit_mb": 6000,
+    "level": 4,
+    "measured_steps": 3,
+    "cuda_visible_devices": null,
+    "tf_cudnn_use_autotune": "0"
+  },
+  "results": [
+    {
+      "n": 2,
+      "widths": "default",
+      "gradient_checkpointing": "both",
+      "params": 29628638,
+      "warmup_peak_mb": 3896.69970703125,
+      "resident_mb": 424.483642578125,
+      "peak_mb": 3909.302001953125,
+      "step_ms": 2293.1833267211914,
+      "step_ms_all": [
+        2372.987747192383,
+        2287.389039993286,
+        2293.1833267211914
+      ],
+      "loss": 0.45669490098953247,
+      "finite": true,
+      "trace_counts": {
+        "deform": 1
+      },
+      "status": "ok",
+      "wall_s": 46.43203067779541
+    },
+    {
+      "n": 4,
+      "widths": "default",
+      "gradient_checkpointing": "both",
+      "status": "oom",
+      "error": "{{function_node __inference_<lambda>_55475}} OOM when allocating tensor with shape[4,224,40,56,48] and type float on /job:localhost/replica:0/task:0/device:GPU:0 by allocator GPU_0_bfc",
+      "wall_s": 40.32036638259888
+    },
+    {
+      "n": 8,
+      "widths": "default",
+      "gradient_checkpointing": "both",
+      "status": "skipped",
+      "error": "OOM at N = 4"
+    },
+    {
+      "n": 2,
+      "widths": "default",
+      "gradient_checkpointing": "none",
+      "params": 29628638,
+      "warmup_peak_mb": 4501.68798828125,
+      "resident_mb": 411.3583984375,
+      "peak_mb": 4437.02294921875,
+      "step_ms": 1918.889045715332,
+      "step_ms_all": [
+        1898.094892501831,
+        1950.8028030395508,
+        1918.889045715332
+      ],
+      "loss": 0.4557594954967499,
+      "finite": true,
+      "trace_counts": {
+        "deform": 1
+      },
+      "status": "ok",
+      "wall_s": 40.143327951431274
+    },
+    {
+      "n": 3,
+      "widths": "default",
+      "gradient_checkpointing": "none",
+      "status": "oom",
+      "error": "{{function_node __inference_<lambda>_47323}} OOM when allocating tensor with shape[3,3,40,56,48] and type float on /job:localhost/replica:0/task:0/device:GPU:0 by allocator GPU_0_bfc",
+      "wall_s": 31.238479375839233
+    },
+    {
+      "n": 4,
+      "widths": "default",
+      "gradient_checkpointing": "none",
+      "status": "oom",
+      "error": "{{function_node __inference_<lambda>_70957}} OOM when allocating tensor with shape[4,448,40,56,48] and type float on /job:localhost/replica:0/task:0/device:GPU:0 by allocator GPU_0_bfc",
+      "wall_s": 26.405876636505127
+    },
+    {
+      "n": 8,
+      "widths": "default",
+      "gradient_checkpointing": "none",
+      "status": "skipped",
+      "error": "OOM at N = 4"
+    },
+    {
+      "n": 16,
+      "widths": "default",
+      "gradient_checkpointing": "none",
+      "status": "skipped",
+      "error": "OOM at N = 4"
+    },
+    {
+      "n": 4,
+      "widths": "narrow",
+      "gradient_checkpointing": "both",
+      "params": 4032846,
+      "warmup_peak_mb": 2519.7451171875,
+      "resident_mb": 93.631591796875,
+      "peak_mb": 2509.731689453125,
+      "step_ms": 1375.4329681396484,
+      "step_ms_all": [
+        1397.5303173065186,
+        1371.037244796753,
+        1375.4329681396484
+      ],
+      "loss": 0.4163625240325928,
+      "finite": true,
+      "trace_counts": {
+        "deform": 1
+      },
+      "status": "ok",
+      "wall_s": 42.04469919204712
+    },
+    {
+      "n": 8,
+      "widths": "narrow",
+      "gradient_checkpointing": "both",
+      "params": 4032846,
+      "warmup_peak_mb": 4993.704345703125,
+      "resident_mb": 148.4326171875,
+      "peak_mb": 4781.261962890625,
+      "step_ms": 2323.594570159912,
+      "step_ms_all": [
+        2323.9920139312744,
+        2323.594570159912,
+        2284.7390174865723
+      ],
+      "loss": 0.3898933231830597,
+      "finite": true,
+      "trace_counts": {
+        "deform": 1
+      },
+      "status": "ok",
+      "wall_s": 36.05107259750366
+    },
+    {
+      "n": 16,
+      "widths": "narrow",
+      "gradient_checkpointing": "both",
+      "status": "oom",
+      "error": "{{function_node __inference_<lambda>_83308}} OOM when allocating tensor with shape[24,40,56,48] and type int32 on /job:localhost/replica:0/task:0/device:GPU:0 by allocator gpu_host_bfc",
+      "wall_s": 119.81229329109192
+    },
+    {
+      "n": 2,
+      "widths": "narrow",
+      "gradient_checkpointing": "none",
+      "params": 4032846,
+      "warmup_peak_mb": 2028.271728515625,
+      "resident_mb": 66.821044921875,
+      "peak_mb": 2089.451416015625,
+      "step_ms": 705.2171230316162,
+      "step_ms_all": [
+        697.2846984863281,
+        727.9543876647949,
+        705.2171230316162
+      ],
+      "loss": 0.45751261711120605,
+      "finite": true,
+      "trace_counts": {
+        "deform": 1
+      },
+      "status": "ok",
+      "wall_s": 40.1212112903595
+    },
+    {
+      "n": 3,
+      "widths": "narrow",
+      "gradient_checkpointing": "none",
+      "params": 4032846,
+      "warmup_peak_mb": 2849.074951171875,
+      "resident_mb": 70.6591796875,
+      "peak_mb": 3008.227294921875,
+      "step_ms": 948.4653472900391,
+      "step_ms_all": [
+        948.4653472900391,
+        918.41721534729,
+        1060.2319240570068
+      ],
+      "loss": 0.4204785227775574,
+      "finite": true,
+      "trace_counts": {
+        "deform": 1
+      },
+      "status": "ok",
+      "wall_s": 26.409329891204834
+    },
+    {
+      "n": 4,
+      "widths": "narrow",
+      "gradient_checkpointing": "none",
+      "params": 4032846,
+      "warmup_peak_mb": 3953.16259765625,
+      "resident_mb": 80.50634765625,
+      "peak_mb": 4009.670654296875,
+      "step_ms": 1074.72825050354,
+      "step_ms_all": [
+        1074.72825050354,
+        1128.9386749267578,
+        1066.6639804840088
+      ],
+      "loss": 0.41530561447143555,
+      "finite": true,
+      "trace_counts": {
+        "deform": 1
+      },
+      "status": "ok",
+      "wall_s": 35.76542282104492
+    },
+    {
+      "n": 6,
+      "widths": "narrow",
+      "gradient_checkpointing": "none",
+      "status": "oom",
+      "error": "{{function_node __inference_<lambda>_71019}} OOM when allocating tensor with shape[6,40,56,48,19] and type float on /job:localhost/replica:0/task:0/device:GPU:0 by allocator GPU_0_bfc",
+      "wall_s": 44.00637340545654
+    },
+    {
+      "n": 8,
+      "widths": "narrow",
+      "gradient_checkpointing": "none",
+      "status": "oom",
+      "error": "{{function_node __inference_<lambda>_47325}} OOM when allocating tensor with shape[8,40,56,48,3] and type float on /job:localhost/replica:0/task:0/device:GPU:0 by allocator GPU_0_bfc",
+      "wall_s": 40.950509548187256
+    },
+    {
+      "n": 16,
+      "widths": "narrow",
+      "gradient_checkpointing": "none",
+      "status": "skipped",
+      "error": "OOM at N = 8"
+    }
+  ]
+}

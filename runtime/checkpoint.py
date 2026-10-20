@@ -5,6 +5,11 @@ best validation value and extra trackables (the post-processing RNGs, so a resum
 the same flip / pair sequence). Two `tf.train.CheckpointManager`s write it:
 * ``ckpt/last``: every ``ckpt_every`` steps and at the end, keep 2; resume restores the latest.
 * ``ckpt/best``: when the validation metric improves (lower is better), keep 1.
+* optional extra best files (``extra_best={name: dir}``, milestone 6: ``ckpt/best_deform`` in
+  runs that train deform with a linear task): each has its own ``best_metric_<name>`` variable
+  in the checkpoint and its own manager (``checkpoint_name='best_<name>'``, keep 1), saved by
+  ``maybe_save_best(value, name)``. Without extra_best the checkpoint holds exactly the
+  milestone-5 objects, so old checkpoints restore unchanged.
 
 Build the model and the optimizer (on all trainable variables) before restoring, so every
 variable exists and restores eagerly (`assert_existing_objects_matched`).
@@ -23,10 +28,15 @@ from models.config import ModelConfig
 
 class RunCheckpoint:
     def __init__(self, ckpt_dir_last, ckpt_dir_best, model, optimizer, step, extra=None,
-                 keep_last=2):
+                 keep_last=2, extra_best=None):
         self.step = step
         self.best_metric = tf.Variable(np.inf, dtype=tf.float64, trainable=False, name="best_metric")
         objs = dict(model=model, optimizer=optimizer, step=step, best_metric=self.best_metric)
+        self.extra_best_metric = {}
+        for name in (extra_best or {}):
+            key = "best_metric_%s" % name
+            self.extra_best_metric[name] = tf.Variable(np.inf, dtype=tf.float64, trainable=False, name=key)
+            objs[key] = self.extra_best_metric[name]
         for k, v in (extra or {}).items():
             if k in objs:
                 raise ValueError("extra key %r collides with a checkpoint field" % k)
@@ -36,6 +46,9 @@ class RunCheckpoint:
                                                checkpoint_name="last")
         self.best = tf.train.CheckpointManager(self.checkpoint, ckpt_dir_best, max_to_keep=1,
                                                checkpoint_name="best")
+        self.extra_best = {name: tf.train.CheckpointManager(self.checkpoint, d, max_to_keep=1,
+                                                            checkpoint_name="best_%s" % name)
+                           for name, d in (extra_best or {}).items()}
 
     @property
     def latest_last(self):
@@ -48,13 +61,20 @@ class RunCheckpoint:
     def save_last(self):
         return self.last.save(checkpoint_number=int(self.step.numpy()))
 
-    def maybe_save_best(self, value):
-        """Save to 'best' if `value` is finite and lower than the best so far. Returns True if saved."""
+    def latest_best_named(self, name):
+        """Latest checkpoint of the extra best file `name` (None if never saved)."""
+        return self.extra_best[name].latest_checkpoint
+
+    def maybe_save_best(self, value, name=None):
+        """Save to 'best' (or the extra best file `name`) if `value` is finite and lower than that
+        file's best so far. Returns True if saved."""
+        var = self.best_metric if name is None else self.extra_best_metric[name]
+        manager = self.best if name is None else self.extra_best[name]
         value = float(value)
-        if not np.isfinite(value) or value >= float(self.best_metric.numpy()):
+        if not np.isfinite(value) or value >= float(var.numpy()):
             return False
-        self.best_metric.assign(value)
-        self.best.save(checkpoint_number=int(self.step.numpy()))
+        var.assign(value)
+        manager.save(checkpoint_number=int(self.step.numpy()))
         return True
 
     def _restore(self, path):

@@ -1,0 +1,22 @@
+test_synthetic_deform_overfit (tests.test_deform_overfit.TestDeformOverfit) ... 
+[deform overfit] steps 313, reached True, window {'soft_dice_tmpl': 0.9100506186485291, 'fold_frac': 0.0}, median step 1116 ms, gpu peak 4149.58837890625 MB
+  identity (initial val): template Dice 0.8635, pair Dice 0.7742
+  step    1  loss 0.3946  soft tmpl Dice 0.8307  soft pair Dice 0.7747  fold 0.00000
+  step   50  loss 0.2569  soft tmpl Dice 0.8684  soft pair Dice 0.8774  fold 0.00000
+  step  100  loss 0.2137  soft tmpl Dice 0.8870  soft pair Dice 0.9023  fold 0.00000
+  step  150  loss 0.1994  soft tmpl Dice 0.8952  soft pair Dice 0.9088  fold 0.00000
+  step  200  loss 0.1920  soft tmpl Dice 0.9014  soft pair Dice 0.9102  fold 0.00000
+  step  250  loss 0.1809  soft tmpl Dice 0.9055  soft pair Dice 0.9176  fold 0.00000
+  step  300  loss 0.1784  soft tmpl Dice 0.9093  soft pair Dice 0.9165  fold 0.00000
+  step  313  loss 0.1798  soft tmpl Dice 0.9102  soft pair Dice 0.9144  fold 0.00000
+[deform overfit val] step, template Dice, pair Dice, neg J %:
+   250  0.9673  0.9423  0.0000
+   313  0.9709  0.9493  0.0000
+ok
+
+----------------------------------------------------------------------
+Ran 1 test in 396.281s
+
+OK
+overfit deform: reached=True after 313 steps; 10-step window soft template Dice 0.9101 (threshold 0.91), fold 0.00000 (max 0.001); final val template Dice 0.9709, pair Dice 0.9493 (identity 0.8635 / 0.7742), neg J 0.0000 %
+exit: 0  wall 402 s

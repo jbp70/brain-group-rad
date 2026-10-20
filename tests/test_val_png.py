@@ -1,5 +1,6 @@
 """Validation PNGs (runtime.val_png and the Trainer hook): panel arrays, figure layout, file
-names and sizes, the identity / perfect-model rows, and no output when the PNGs are off."""
+names and sizes, the identity / perfect-model rows, and no output when the PNGs are off.
+Milestone 6: the deformable figure (identity rows, label colours, padded Jacobian, file size)."""
 import os
 import shutil
 import struct
@@ -78,6 +79,65 @@ class TestPanels(unittest.TestCase):
             rows, cols = (3 if gt else 2), N + (1 if mean else 0)
             self.assertEqual(len(fig.axes), rows * cols)
             self.assertEqual(fig.axes[1 * cols].get_xlabel(), "0.00 mm")      # row-2 error label
+
+
+class TestDeformPanels(unittest.TestCase):
+    """Milestone 6: the deformable figure (4 rows: input, warped, labels, det J)."""
+
+    @classmethod
+    def setUpClass(cls):
+        g = fd.synthetic_deform_group(4, N, seed=0)
+        cls.images = g["images"]
+        cls.seg = g["labels"][..., 0].astype(np.int64)
+        shape = P.LEVEL_SHAPE[4]
+        cls.jac = np.ones((N,) + tuple(s - 2 for s in shape), np.float32)
+
+    def tearDown(self):
+        free_memory()
+
+    def test_identity_panels(self):
+        template = self.seg[0]
+        p = V.build_deform_panels(self.images, self.images, self.seg, template, self.jac)
+        self.assertEqual((len(p), len(p[0])), (4, N + 1))
+        Y, X = P.LEVEL_SHAPE[4][1], P.LEVEL_SHAPE[4][0]
+        self.assertEqual(p[0][0].shape, (Y, X))
+        self.assertEqual(p[2][0].shape, (Y, X, 3))                  # RGB label panels
+        for r1, r2 in zip(p[0], p[1]):                              # identity: warped row == input row
+            np.testing.assert_array_equal(r1, r2)
+        np.testing.assert_allclose(p[0][-1], np.mean(np.stack(p[0][:N]), axis=0), atol=1e-6)
+        np.testing.assert_array_equal(p[2][-1], V.label_display(template))   # template column
+        np.testing.assert_allclose(p[3][-1], 1.0)                   # mean J of identity maps
+        bg = V.axial_display(self.seg[0]) == 0
+        self.assertTrue(bg.any())
+        np.testing.assert_array_equal(p[2][0][bg], 0.0)             # background is black
+        self.assertGreater(len({tuple(c) for c in p[2][0].reshape(-1, 3)}), 3)
+        p = V.build_deform_panels(self.images, self.images, self.seg, template, self.jac, mean_col=False)
+        self.assertEqual(len(p[0]), N)
+
+    def test_jacobian_padding_and_file(self):
+        jac = self.jac.copy()
+        jac[0, 5, 5, P.LEVEL_SHAPE[4][2] // 2 - 1] = -1.0           # interior index -> full index + 1
+        full = V.pad_jacobian(jac)
+        self.assertEqual(full.shape, (N,) + tuple(P.LEVEL_SHAPE[4]))
+        self.assertEqual(full[0, 6, 6, P.LEVEL_SHAPE[4][2] // 2], -1.0)
+        self.assertEqual(full[0, 0, 0, 0], 1.0)
+        tmp = tempfile.mkdtemp(prefix="bgr_m6_png_")
+        try:
+            path = os.path.join(tmp, "deform_step0000007.png")
+            title = V.deform_figure_title(7, 0.8, 0.7, 0.01, P.LEVEL_SHAPE[4][2] // 2)
+            self.assertIn("deform step 7", title)
+            panels, fig = V.write_deform_png(path, self.images, self.images, self.seg, self.seg[0], jac, title,
+                                             np.zeros(N), labels=["a", "b", "c", "d"])
+            self.assertEqual(png_size(path), V.figure_size_px(4, N + 1))
+            self.assertEqual(len(fig.axes), 4 * (N + 1))
+            self.assertEqual(fig.axes[3 * (N + 1)].get_xlabel(), "fold 0.000 %")
+            self.assertEqual(fig.axes[0].get_title(), "a")
+            path2 = os.path.join(tmp, "small.png")
+            V.write_deform_png(path2, self.images[:2], self.images[:2], self.seg[:2], self.seg[0], jac[:2], title,
+                               np.zeros(2), mean_col=False)
+            self.assertEqual(png_size(path2), V.figure_size_px(4, 2))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 class TestTrainerPng(unittest.TestCase):

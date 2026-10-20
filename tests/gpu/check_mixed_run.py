@@ -1,18 +1,22 @@
 #!/usr/bin/env python
-"""Check a finished mixed-task main.py run directory (milestone 5, `dryrun_mixed`). numpy-free,
-TF-free (Python 3.8 stdlib only), so it runs inside or outside the container.
+"""Check a finished mixed-task main.py run directory (milestone 5 `dryrun_mixed`, milestone 6
+`dryrun_deform`). numpy-free, TF-free (Python 3.8 stdlib only), so it runs inside or outside the
+container.
 
     python tests/gpu/check_mixed_run.py <run_dir> [--tasks rigid,affine] [--steps 20]
 
-Passes (exit 0) when:
+Tasks: rigid, affine (linear) and deform. Passes (exit 0) when:
 * every task trained: ``train_<task>/loss`` logged and finite, and the logged steps reach --steps;
-* every task was validated at the final step: ``val_<task>/{center,pair}_rms_mm`` finite, the
-  affine set also with its scale/shear/rotation errors, and ``val/mean_pair_rms_mm`` (the
-  default best metric of mixed runs) equal to the mean of the tasks' pair RMS;
+* every task was validated at the final step: linear ``val_<task>/{center,pair}_rms_mm`` finite,
+  the affine set also with its scale/shear/rotation errors; deform
+  ``val_deform/{template_dice,pair_dice,neg_jac_pct,inv_consistency_mm,centrality_mm}`` finite;
+  with >= 2 linear tasks ``val/mean_pair_rms_mm`` (the default best metric of mixed linear runs)
+  equal to the mean of the linear tasks' pair RMS (skipped with fewer linear tasks);
 * each step function was traced exactly once (``fit_summary.json`` or ``overfit_summary.json``
   ``trace_counts``) and no step was non-finite;
 * ``val_png/<task>_step<final>.png`` exists for every task, and a 'best' checkpoint was written
-  (only checked when --expect-best, the default).
+  in ``ckpt/best`` (only checked when --expect-best, the default); with deform AND a linear task
+  also ``ckpt/best_deform`` (the deform best file; ``ckpt/best`` keeps the linear criterion).
 Prints one line per criterion and writes nothing.
 """
 import argparse
@@ -21,8 +25,11 @@ import math
 import os
 import sys
 
+LINEAR_TASKS = ("rigid", "affine")
+DEFORM_TASK = "deform"
 AFFINE_KEYS = ("center_scale_pct", "center_shear_pct", "center_qr_rot_deg", "pair_scale_pct",
                "pair_shear_pct", "pair_qr_rot_deg")
+DEFORM_VAL_KEYS = ("template_dice", "pair_dice", "neg_jac_pct", "inv_consistency_mm", "centrality_mm")
 
 
 def _finite(v):
@@ -30,6 +37,11 @@ def _finite(v):
         return math.isfinite(float(v))
     except (TypeError, ValueError):
         return False
+
+
+def _has_checkpoint(run_dir, sub, prefix):
+    d = os.path.join(run_dir, "ckpt", sub)
+    return os.path.isdir(d) and any(n.startswith(prefix + "-") for n in os.listdir(d))
 
 
 def check(run_dir, tasks, steps, expect_best=True):
@@ -48,19 +60,27 @@ def check(run_dir, tasks, steps, expect_best=True):
     for r in recs:
         if r["step"] == final:
             val.update({k: v for k, v in r["data"].items() if k.startswith("val")})
+    linear = [t for t in tasks if t in LINEAR_TASKS]
     pairs = []
     for t in tasks:
-        keys = ["val_%s/center_rms_mm" % t, "val_%s/pair_rms_mm" % t]
-        if t == "affine":
-            keys += ["val_affine/" + k for k in AFFINE_KEYS]
+        if t == DEFORM_TASK:
+            keys = ["val_deform/" + k for k in DEFORM_VAL_KEYS]
+        else:
+            keys = ["val_%s/center_rms_mm" % t, "val_%s/pair_rms_mm" % t]
+            if t == "affine":
+                keys += ["val_affine/" + k for k in AFFINE_KEYS]
+            pairs.append(val.get("val_%s/pair_rms_mm" % t))
         missing = [k for k in keys if not _finite(val.get(k))]
         res.append(("val_%s" % t, not missing, "final-step validation %s" % (
             "complete" if not missing else "missing/non-finite: %s" % missing)))
-        pairs.append(val.get("val_%s/pair_rms_mm" % t))
     mean = val.get("val/mean_pair_rms_mm")
-    mean_ok = (len(tasks) < 2 or (_finite(mean) and all(_finite(p) for p in pairs)
-                                  and abs(float(mean) - sum(pairs) / len(pairs)) < 1e-6))
-    res.append(("val_mean_pair_rms_mm", mean_ok, "val/mean_pair_rms_mm = %s, task pair RMS %s" % (mean, pairs)))
+    if len(linear) < 2:
+        res.append(("val_mean_pair_rms_mm", True, "skipped (%d linear task(s))" % len(linear)))
+    else:
+        mean_ok = (_finite(mean) and all(_finite(p) for p in pairs)
+                   and abs(float(mean) - sum(pairs) / len(pairs)) < 1e-6)
+        res.append(("val_mean_pair_rms_mm", mean_ok,
+                    "val/mean_pair_rms_mm = %s, linear task pair RMS %s" % (mean, pairs)))
     summ = None
     for name in ("fit_summary.json", "overfit_summary.json"):
         p = os.path.join(run_dir, name)
@@ -77,9 +97,11 @@ def check(run_dir, tasks, steps, expect_best=True):
     have = set(os.listdir(os.path.join(run_dir, "val_png"))) if os.path.isdir(os.path.join(run_dir, "val_png")) else set()
     res.append(("val_png", all(p in have for p in pngs), "PNGs %s present: %s" % (pngs, [p in have for p in pngs])))
     if expect_best:
-        best = os.path.join(run_dir, "ckpt", "best")
-        ok_best = os.path.isdir(best) and any(n.startswith("best-") for n in os.listdir(best))
+        ok_best = _has_checkpoint(run_dir, "best", "best")
         res.append(("best_checkpoint", ok_best, "ckpt/best has a checkpoint: %s" % ok_best))
+        if DEFORM_TASK in tasks and linear:
+            ok_bd = _has_checkpoint(run_dir, "best_deform", "best_deform")
+            res.append(("best_deform_checkpoint", ok_bd, "ckpt/best_deform has a checkpoint: %s" % ok_bd))
     return all(p for _, p, _ in res), res
 
 
@@ -91,6 +113,9 @@ def main(argv=None):
     ap.add_argument("--expect-best", default="true", choices=["true", "false"])
     a = ap.parse_args(argv)
     tasks = [t for t in a.tasks.split(",") if t]
+    unknown = [t for t in tasks if t not in LINEAR_TASKS + (DEFORM_TASK,)]
+    if unknown:
+        ap.error("unknown task(s) %s" % unknown)
     ok, res = check(a.run_dir, tasks, a.steps, a.expect_best == "true")
     for name, passed, detail in res:
         print("%s %-22s %s" % ("PASS" if passed else "FAIL", name, detail))

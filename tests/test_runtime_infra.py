@@ -103,21 +103,93 @@ class TestArgs(unittest.TestCase):
 
     def test_ratio_and_required_data(self):
         self.assertEqual(dict(A.parse_task_ratio("rigid:3, affine:1")), {"rigid": 3.0, "affine": 1.0})
-        with self.assertRaises(NotImplementedError) as cm:
-            A.parse_task_ratio("rigid:1,deform:2")
-        self.assertIn("milestone 6", str(cm.exception))
+        # Milestone 6: deform is accepted (was NotImplementedError before).
+        self.assertEqual(dict(A.parse_task_ratio("rigid:1,deform:2")), {"rigid": 1.0, "deform": 2.0})
+        self.assertEqual(list(A.parse_task_ratio("deform:1,affine:1")), ["deform", "affine"])
         with self.assertRaises(ValueError):
             A.parse_task_ratio("rigid:0")
+        with self.assertRaises(ValueError):
+            A.parse_task_ratio("warp:1")
+        a = A.parse_args(["--data", "x", "--task-ratio", "deform:1"])
+        self.assertEqual(dict(a.task_ratio_parsed), {"deform": 1.0})
+        self.assertTrue(a.run_name.startswith("l4_deform1_"))
         devnull = open(os.devnull, "w")
         try:
             import contextlib
             with contextlib.redirect_stderr(devnull):
                 with self.assertRaises(SystemExit):
                     A.parse_args([])                      # --data missing
-                with self.assertRaises(SystemExit):
-                    A.parse_args(["--data", "x", "--task-ratio", "deform:1"])
         finally:
             devnull.close()
+
+    def test_deform_flag_defaults(self):
+        a = A.parse_args(["--data", "x"])
+        want = {"lambda_pdice": 1.0, "p_pdice": 0.1, "lambda_smooth": 0.5, "smooth_order": 1,
+                "integration_steps": 7, "decoder_widths": None, "deform_decoder": "auto",
+                "deform_residual_affine": False, "deform_group_size": 32,
+                "gradient_checkpointing": "none", "overfit_dice_threshold": 0.9,
+                "overfit_fold_max": 0.001, "val_deform_max_pairs": 64}
+        d = A.args_to_dict(a)
+        for k, v in want.items():
+            self.assertEqual(getattr(a, k), v, k)
+            self.assertIn(k, d)                                  # saved in config.json args
+        mc = A.model_config_from_args(a)
+        self.assertEqual((mc.deform_decoder, mc.decoder_widths, mc.integration_steps), (False, None, 7))
+        tc = A.train_config_from_args(a)
+        for k in ("lambda_pdice", "p_pdice", "lambda_smooth", "smooth_order", "deform_residual_affine",
+                  "deform_group_size", "overfit_dice_threshold", "overfit_fold_max", "val_deform_max_pairs"):
+            self.assertEqual(getattr(tc, k), want[k], k)
+        self.assertEqual(tc.n_classes, P.N_TRAIN_LABELS)
+        # --deform-decoder auto: on iff deform is trained; true forces it for a linear run.
+        self.assertTrue(A.model_config_from_args(A.parse_args(["--data", "x", "--task-ratio", "deform:1"])).deform_decoder)
+        self.assertTrue(A.model_config_from_args(A.parse_args(["--data", "x", "--deform-decoder", "true"])).deform_decoder)
+        a = A.parse_args(["--data", "x", "--task-ratio", "rigid:1,deform:1", "--group-size", "8",
+                          "--deform-group-size", "4", "--decoder-widths", "8,8,8,4,4", "--integration-steps", "5",
+                          "--lambda-pdice", "2", "--p-pdice", "0.5", "--lambda-smooth", "1", "--smooth-order", "2",
+                          "--deform-residual-affine", "true", "--gradient-checkpointing", "both",
+                          "--overfit-dice-threshold", "0.8", "--overfit-fold-max", "0.01",
+                          "--val-deform-max-pairs", "12"])
+        mc = A.model_config_from_args(a)
+        self.assertEqual((mc.deform_decoder, mc.decoder_widths, mc.integration_steps), (True, (8, 8, 8, 4, 4), 5))
+        tc = A.train_config_from_args(a)
+        self.assertEqual((tc.group_size, tc.deform_group_size, tc.lambda_pdice, tc.p_pdice, tc.lambda_smooth,
+                          tc.smooth_order, tc.deform_residual_affine, tc.overfit_dice_threshold,
+                          tc.overfit_fold_max, tc.val_deform_max_pairs),
+                         (8, 4, 2.0, 0.5, 1.0, 2, True, 0.8, 0.01, 12))
+        self.assertEqual(a.gradient_checkpointing, "both")
+        json.dumps(A.args_to_dict(a))
+        import contextlib
+        with open(os.devnull, "w") as devnull, contextlib.redirect_stderr(devnull):
+            for bad in (["--task-ratio", "deform:1", "--deform-decoder", "false"],
+                        ["--decoder-widths", "8,8"], ["--deform-group-size", "1"], ["--smooth-order", "3"],
+                        ["--gradient-checkpointing", "all"], ["--p-pdice", "0"], ["--integration-steps", "-1"],
+                        ["--val-deform-max-pairs", "0"]):
+                with self.assertRaises(SystemExit, msg=str(bad)):
+                    A.parse_args(["--data", "x"] + bad)
+
+    def test_best_metric_with_deform(self):
+        from runtime.run import DEFORM_BEST_METRIC, MEAN_PAIR_METRIC, resolve_best_metric
+        self.assertEqual(A.DEFORM_BEST_METRIC, DEFORM_BEST_METRIC)
+        cases = [("deform:1", DEFORM_BEST_METRIC), ("rigid:1,deform:2", "val_rigid/pair_rms_mm"),
+                 ("deform:1,affine:1", "val_affine/pair_rms_mm"),
+                 ("rigid:1,affine:1,deform:2", MEAN_PAIR_METRIC)]
+        for ratio, want in cases:
+            a = A.parse_args(["--data", "x", "--task-ratio", ratio])
+            self.assertEqual(a.best_metric, want, ratio)
+            self.assertEqual(resolve_best_metric(None, list(a.task_ratio_parsed)), want, ratio)
+        a = A.parse_args(["--data", "x", "--task-ratio", "deform:1,affine:1", "--best-metric", "val_rigid/center_rms_mm"])
+        self.assertEqual(a.best_metric, "val_affine/center_rms_mm")
+
+    def test_controls_skip_deform(self):
+        a = A.parse_args(["--data", "x", "--task-ratio", "rigid:1,deform:1", "--curriculum", "true",
+                          "--global-transform", "true"])
+        self.assertEqual(sorted(A.task_controls_from_args(a)), ["rigid"])
+        self.assertEqual(A.linear_tasks(a), ["rigid"])
+        import contextlib
+        with open(os.devnull, "w") as devnull, contextlib.redirect_stderr(devnull):
+            for flag in ("--curriculum", "--global-transform"):
+                with self.assertRaises(SystemExit):
+                    A.parse_args(["--data", "x", "--task-ratio", "deform:1", flag, "true"])
 
 
 class TestLogging(TempDirCase):
@@ -201,6 +273,43 @@ class TestCheckpoint(TempDirCase):
         model2, opt2, step2, gen2, ck2 = self.make()
         ck2.restore_last()
         self.assertEqual(float(ck2.best_metric.numpy()), 4.0)
+
+    def test_extra_best(self):
+        # Milestone 6: ckpt/best_deform next to ckpt/best (deform + linear runs only).
+        model, opt, step, gen, _ = self.make()
+        ck = C.RunCheckpoint(os.path.join(self.tmp, "last2"), os.path.join(self.tmp, "best2"), model, opt, step,
+                             extra={"gen": gen}, extra_best={"deform": os.path.join(self.tmp, "best_deform")})
+        self.assertIsNone(ck.latest_best_named("deform"))
+        for s, lin, dfm in ((1, 5.0, 0.5), (2, 4.0, 0.6), (3, 6.0, 0.3)):
+            step.assign(s)
+            self.assertEqual(ck.maybe_save_best(lin), lin != 6.0)
+            self.assertEqual(ck.maybe_save_best(dfm, name="deform"), dfm != 0.6)
+            ck.save_last()
+        self.assertTrue(ck.latest_best.endswith("best-2"))
+        self.assertTrue(ck.latest_best_named("deform").endswith("best_deform-3"))
+        self.assertEqual((float(ck.best_metric.numpy()), float(ck.extra_best_metric["deform"].numpy())), (4.0, 0.3))
+        self.assertFalse(ck.maybe_save_best(float("nan"), name="deform"))
+        with self.assertRaises(KeyError):
+            ck.maybe_save_best(0.1, name="other")
+        # Restores with the extra variable, and into a RunCheckpoint without it.
+        model2, opt2, step2, gen2, _ = self.make()
+        ck2 = C.RunCheckpoint(os.path.join(self.tmp, "last2"), os.path.join(self.tmp, "x"), model2, opt2, step2,
+                              extra={"gen": gen2}, extra_best={"deform": os.path.join(self.tmp, "y")})
+        self.assertTrue(ck2.restore_last())
+        self.assertEqual(float(ck2.extra_best_metric["deform"].numpy()), 0.3)
+        model3, opt3, step3, gen3, ck3 = self.make()
+        ck3 = C.RunCheckpoint(os.path.join(self.tmp, "last2"), os.path.join(self.tmp, "z"), model3, opt3, step3,
+                              extra={"gen": gen3})
+        self.assertTrue(ck3.restore_last())
+        self.assertEqual((int(step3.numpy()), float(ck3.best_metric.numpy())), (3, 4.0))
+        # An old checkpoint (no extra best) restores into an old-style RunCheckpoint unchanged.
+        _, _, step4, _, ck4 = self.make()
+        step4.assign(7)
+        ck4.save_last()
+        _, _, step5, _, ck5 = self.make()
+        self.assertTrue(ck5.restore_last())
+        self.assertEqual(int(step5.numpy()), 7)
+        self.assertEqual(ck5.extra_best, {})
 
     def test_load_model_weights_warm_start(self):
         # --init-weights: model variables only, from a saved tiny run; config mismatch raises.

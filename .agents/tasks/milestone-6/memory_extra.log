@@ -1,0 +1,19 @@
+environment: {'python': '3.9.13', 'tensorflow': '2.10.0', 'numpy': '1.24.3', 'gpu': 'NVIDIA GeForce GTX 1080', 'gpu_memory_limit_mb': 6000, 'level': 4, 'measured_steps': 3, 'cuda_visible_devices': None, 'tf_cudnn_use_autotune': '0'}
+N=2   narrow  ckpt=none       peak   2089.5 MB (warm-up   2028.3, resident    66.8)  step   705.2 ms  loss 0.4575
+N=3   narrow  ckpt=none       peak   3008.2 MB (warm-up   2849.1, resident    70.7)  step   948.5 ms  loss 0.4205
+N=6   narrow  ckpt=none       OOM: {{function_node __inference_<lambda>_71019}} OOM when allocating tensor with shape[6,40,56,48,19] and type float on /job:localhost/replica:0/task:0/device:GPU:0 by allocator GPU_0_bfc
+written .agents/tasks/milestone-6/memory.json
+environment: {'python': '3.9.13', 'tensorflow': '2.10.0', 'numpy': '1.24.3', 'gpu': 'NVIDIA GeForce GTX 1080', 'gpu_memory_limit_mb': 6000, 'level': 4, 'measured_steps': 3, 'cuda_visible_devices': None, 'tf_cudnn_use_autotune': '0'}
+N=2   default ckpt=none       peak   4437.0 MB (warm-up   4501.7, resident   411.4)  step  1918.9 ms  loss 0.4558
+N=3   default ckpt=none       OOM: {{function_node __inference_<lambda>_47323}} OOM when allocating tensor with shape[3,3,40,56,48] and type float on /job:localhost/replica:0/task:0/device:GPU:0 by allocator GPU_0_bfc
+written .agents/tasks/milestone-6/memory.json
+environment: {'python': '3.9.13', 'tensorflow': '2.10.0', 'numpy': '1.24.3', 'gpu': 'NVIDIA GeForce GTX 1080', 'gpu_memory_limit_mb': 6000, 'level': 4, 'measured_steps': 3, 'cuda_visible_devices': None, 'tf_cudnn_use_autotune': '0'}
+N=4   narrow  ckpt=both       peak   2509.7 MB (warm-up   2519.7, resident    93.6)  step  1375.4 ms  loss 0.4164
+N=8   narrow  ckpt=both       peak   4781.3 MB (warm-up   4993.7, resident   148.4)  step  2323.6 ms  loss 0.3899
+N=16  narrow  ckpt=both       OOM: {{function_node __inference_<lambda>_83308}} OOM when allocating tensor with shape[24,40,56,48] and type int32 on /job:localhost/replica:0/task:0/device:GPU:0 by allocator gpu_host_bfc
+written .agents/tasks/milestone-6/memory.json
+environment: {'python': '3.9.13', 'tensorflow': '2.10.0', 'numpy': '1.24.3', 'gpu': 'NVIDIA GeForce GTX 1080', 'gpu_memory_limit_mb': 6000, 'level': 4, 'measured_steps': 3, 'cuda_visible_devices': None, 'tf_cudnn_use_autotune': '0'}
+N=2   default ckpt=both       peak   3909.3 MB (warm-up   3896.7, resident   424.5)  step  2293.2 ms  loss 0.4567
+N=4   default ckpt=both       OOM: {{function_node __inference_<lambda>_55475}} OOM when allocating tensor with shape[4,224,40,56,48] and type float on /job:localhost/replica:0/task:0/device:GPU:0 by allocator GPU_0_bfc
+written .agents/tasks/milestone-6/memory.json
+DONE

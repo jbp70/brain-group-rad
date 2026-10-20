@@ -184,6 +184,80 @@ class TestLinearPostprocess(unittest.TestCase):
         np.testing.assert_array_equal(a["pair_i"].numpy(), b["pair_i"].numpy())
 
 
+class TestDeformPostprocess(unittest.TestCase):
+    """Milestone 6: shared flips of images and labels, one-hot, pairs, residual T."""
+
+    def setUp(self):
+        self.rng = np.random.default_rng(31)
+        self.n = 4
+        shape = (self.n,) + P.LEVEL_SHAPE[4] + (1,)
+        self.images = self.rng.uniform(size=shape).astype(np.float32)
+        self.labels = self.rng.integers(0, P.N_TRAIN_LABELS, size=shape).astype(np.uint8)
+
+    def test_flips_shared_and_onehot(self):
+        post = pp.DeformPostprocess(4, seed=2)
+        for flags in FLIPS:
+            out = post(self.images, self.labels, flip_axes=flags)
+            axes = tuple(a + 1 for a in range(3) if flags[a])
+            ref_img = np.flip(self.images, axis=axes) if axes else self.images
+            ref_lab = (np.flip(self.labels, axis=axes) if axes else self.labels)[..., 0]
+            np.testing.assert_array_equal(out["images"].numpy(), ref_img)
+            np.testing.assert_array_equal(out["labels"].numpy(), ref_lab.astype(np.int32))
+            self.assertEqual(out["labels"].dtype, tf.int32)
+            oh = out["onehot"].numpy()
+            self.assertEqual(oh.shape, self.labels.shape[:4] + (P.N_TRAIN_LABELS,))
+            self.assertEqual(oh.dtype, np.float32)
+            np.testing.assert_array_equal(oh.sum(axis=-1), 1.0)
+            np.testing.assert_array_equal(np.argmax(oh, axis=-1), ref_lab)
+            np.testing.assert_array_equal(out["flip_axes"].numpy(), flags)
+            self.assertNotIn("T_render", out)
+        with self.assertRaises(ValueError):
+            post(self.images, self.labels, np.zeros((self.n, 3, 4), np.float32))
+
+    def test_pairs_distinct_and_deterministic(self):
+        a = pp.DeformPostprocess(4, p_pdice=0.5, seed=7)(self.images, self.labels)
+        b = pp.DeformPostprocess(4, p_pdice=0.5, seed=7)(self.images, self.labels)
+        i, j = a["pair_i"].numpy(), a["pair_j"].numpy()
+        self.assertEqual(len(i), int(pp.num_pairs(self.n, 0.5)))
+        self.assertTrue(np.all(i != j))
+        self.assertEqual(len(set(zip(i, j))), len(i))
+        np.testing.assert_array_equal(i, b["pair_i"].numpy())
+        np.testing.assert_array_equal(j, b["pair_j"].numpy())
+        np.testing.assert_array_equal(a["flip_axes"].numpy(), b["flip_axes"].numpy())
+        np.testing.assert_array_equal(a["labels"].numpy(), b["labels"].numpy())
+
+    def test_residual_t_conjugated(self):
+        t, _ = random_dali_batch(self.rng, "affine", 4, self.n)
+        post = pp.DeformPostprocess(4, seed=3, residual_affine=True)
+        flags = [True, False, True]
+        out = post(self.images, self.labels, t, flip_axes=flags)
+        f = tfm.flip_matrix(flags).numpy()
+        np.testing.assert_allclose(out["T_render"].numpy(), f @ pp.dali_to_mm(t, 4).numpy() @ f,
+                                   atol=1e-5)
+        with self.assertRaises(ValueError):
+            post(self.images, self.labels)
+
+    def test_tf_function_uint8_random_flips(self):
+        post = pp.DeformPostprocess(4, flip_prob=0.5, seed=8)
+        traces = []
+
+        @tf.function
+        def step(x, y):
+            traces.append(1)
+            return post(x, y)
+
+        x = tf.constant(self.images)
+        y = tf.constant(self.labels)
+        for _ in range(4):
+            out = step(x, y)
+            flags = out["flip_axes"].numpy()
+            img = tfm.flip_images(x, flags).numpy()
+            np.testing.assert_array_equal(out["images"].numpy(), img)
+            ref = tfm.flip_images(y, flags).numpy()[..., 0].astype(np.int32)
+            np.testing.assert_array_equal(out["labels"].numpy(), ref)
+        self.assertEqual(len(traces), 1)
+
+
 class TestBrainS(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="m2_template_")

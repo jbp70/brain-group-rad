@@ -1,0 +1,169 @@
+test_best_metric_defaults (tests.test_runtime_infra.TestArgs) ... ok
+test_best_metric_with_deform (tests.test_runtime_infra.TestArgs) ... ok
+test_controls_skip_deform (tests.test_runtime_infra.TestArgs) ... ok
+test_deform_flag_defaults (tests.test_runtime_infra.TestArgs) ... ok
+test_level_defaults_and_overfit_dropout (tests.test_runtime_infra.TestArgs) ... ok
+test_loss_scale_and_head_activation_flags (tests.test_runtime_infra.TestArgs) ... ok
+test_model_config_round_trip (tests.test_runtime_infra.TestArgs) ... ok
+test_ratio_and_required_data (tests.test_runtime_infra.TestArgs) ... ok
+test_str2bool (tests.test_runtime_infra.TestArgs) ... ok
+test_best_and_keep_last (tests.test_runtime_infra.TestCheckpoint) ... ok
+test_config_json_and_compatibility (tests.test_runtime_infra.TestCheckpoint) ... ok
+test_extra_best (tests.test_runtime_infra.TestCheckpoint) ... WARNING:tensorflow:Detecting that an object or model or tf.train.Checkpoint is being deleted with unrestored values. See the following logs for the specific values in question. To silence these warnings, use `status.expect_partial()`. See https://www.tensorflow.org/api_docs/python/tf/train/Checkpoint#restorefor details about the status object returned by the restore function.
+WARNING:tensorflow:Value in checkpoint could not be found in the restored object: (root).best_metric_deform
+ok
+test_load_model_weights_warm_start (tests.test_runtime_infra.TestCheckpoint) ... ok
+test_peek_last_step (tests.test_runtime_infra.TestCheckpoint) ... ok
+test_round_trip_bit_exact (tests.test_runtime_infra.TestCheckpoint) ... ok
+test_dllogger_backend (tests.test_runtime_infra.TestDLLoggerBackend) ... skipped 'dllogger is not importable here (the container may have it)'
+test_dali_batch_round_trip (tests.test_runtime_infra.TestFixedData) ... ok
+test_load_level_images (tests.test_runtime_infra.TestFixedData) ... ok
+test_transform_ranges (tests.test_runtime_infra.TestFixedData) ... ok
+test_validation_set_deterministic (tests.test_runtime_infra.TestFixedData) ... ok
+test_validation_set_independent_of_task_order (tests.test_runtime_infra.TestFixedData) ... ok
+test_jsonl_and_tensorboard (tests.test_runtime_infra.TestLogging) ... ok
+test_identity_panels (tests.test_val_png.TestDeformPanels) ... ok
+test_jacobian_padding_and_file (tests.test_val_png.TestDeformPanels) ... ok
+test_axial_display_convention (tests.test_val_png.TestPanels) ... ok
+test_figure_layout (tests.test_val_png.TestPanels) ... ok
+test_identity_and_perfect_rows (tests.test_val_png.TestPanels) ... ok
+test_select_indices_fixed (tests.test_val_png.TestPanels) ... ok
+test_off_writes_nothing_and_failure_does_not_raise (tests.test_val_png.TestTrainerPng) ... WARNING step 0: validation PNG for rigid failed: IndexError('too many indices for array: array is 0-dimensional, but 1 were indexed')
+ok
+test_written_at_validation_and_final_step (tests.test_val_png.TestTrainerPng) ... ok
+test_dali_data_wiring_with_deform (tests.test_main.TestDeformMain) ... ok
+test_deform_real_data_overfit_path (tests.test_main.TestDeformMain) ... ok
+test_mixed_three_task_dry_run (tests.test_main.TestDeformMain) ... WARNING:tensorflow:5 out of the last 6 calls to <function Trainer._val_fn.<locals>.fwd at 0x7f588c357b80> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:5 out of the last 6 calls to <function Trainer._val_fn.<locals>.fwd_train_mode at 0x7f58d80aff70> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:6 out of the last 7 calls to <function Trainer._val_fn.<locals>.fwd at 0x7f5828b574c0> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:6 out of the last 7 calls to <function Trainer._val_fn.<locals>.fwd_train_mode at 0x7f5828b57af0> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+ok
+test_synthetic_deform_dry_run (tests.test_main.TestDeformMain) ... ok
+test_dry_run_without_dali_fails_clearly (tests.test_main.TestMain) ... ok
+test_real_data_overfit_path (tests.test_main.TestMain) ... WARNING:tensorflow:5 out of the last 10 calls to <function Trainer._make_train_step.<locals>.<lambda> at 0x7f588c357790> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+ok
+test_synthetic_overfit_dry_run (tests.test_main.TestMain) ... ok
+test_overfit_affine_below_1mm (tests.test_main.TestOverfit) ... 
+[overfit affine:1] steps 1846, reached True, best worst-task 10-step mean 0.7949 mm, per task {'affine': 0.7948701500892639}, median step 575 ms
+[overfit affine:1 val] step, eval_center_rms_mm, trainmode_center_rms_mm:
+  250   23.593    1.644
+  500    3.037    2.126
+  750    1.650    1.655
+  1000    1.157    1.052
+  1250    2.406    2.412
+  1500    1.499    1.467
+  1750    1.020    0.985
+  1846    0.606    0.618
+[overfit affine:1 final] affine eval 0.6063 mm, train mode 0.6180 mm
+[overfit affine final] scale 0.499 %, shear 0.549 %, QR rotation 0.617 deg (centered)
+ok
+test_overfit_mixed_rigid_affine_below_1mm (tests.test_main.TestOverfit) ... WARNING:tensorflow:5 out of the last 30 calls to <function Trainer._make_train_step.<locals>.<lambda> at 0x7f58b41a8c10> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+
+[overfit rigid:1,affine:1] steps 2199, reached True, best worst-task 10-step mean 0.7903 mm, per task {'rigid': 0.6393289536237716, 'affine': 0.7903458118438721}, median step 574 ms
+[overfit rigid:1,affine:1 val] step, rigid_eval_center_rms_mm, rigid_trainmode_center_rms_mm, affine_eval_center_rms_mm, affine_trainmode_center_rms_mm:
+  250   18.503    8.116   22.480    7.458
+  500    2.304    1.967    4.195    3.922
+  750    1.394    1.404    3.642    3.649
+  1000    0.771    0.775    1.511    1.545
+  1250    1.215    1.204    1.585    1.530
+  1500    1.031    1.056    1.486    1.450
+  1750    0.767    0.781    1.048    1.007
+  2000    0.797    0.815    0.996    0.956
+  2199    0.318    0.336    0.605    0.620
+[overfit rigid:1,affine:1 final] rigid eval 0.3176 mm, train mode 0.3365 mm
+[overfit rigid:1,affine:1 final] affine eval 0.6053 mm, train mode 0.6201 mm
+ok
+test_overfit_synthetic_group_below_1mm (tests.test_main.TestOverfit) ... 
+[overfit curve] lr 3e-4, steps 593, reached True, best 10-step mean 0.7611 mm, median step 572 ms
+  step    1  center RMS  22.291 mm  pair RMS  41.478 mm
+  step   50  center RMS  12.744 mm  pair RMS  20.225 mm
+  step  100  center RMS  10.511 mm  pair RMS  19.724 mm
+  step  150  center RMS   8.059 mm  pair RMS   8.654 mm
+  step  200  center RMS   6.110 mm  pair RMS   5.501 mm
+  step  250  center RMS   4.789 mm  pair RMS   8.746 mm
+  step  300  center RMS   3.557 mm  pair RMS   5.931 mm
+  step  350  center RMS   1.938 mm  pair RMS   3.572 mm
+  step  400  center RMS   1.168 mm  pair RMS   2.522 mm
+  step  450  center RMS   2.033 mm  pair RMS   1.696 mm
+  step  500  center RMS   1.154 mm  pair RMS   0.858 mm
+  step  550  center RMS   0.884 mm  pair RMS   1.868 mm
+  step  593  center RMS   0.478 mm  pair RMS   1.063 mm
+[overfit val] step, eval-mode center RMS, train-mode center RMS (mm):
+   250   21.354    4.717
+   500    1.815    1.356
+   593    0.763    0.589
+ok
+test_init_weights_warm_start (tests.test_main.TestResumeControlsAndWarmStart) ... ok
+test_resumed_step_control_values_before_pipelines (tests.test_main.TestResumeControlsAndWarmStart) ... ok
+test_crafted_values (tests.test_trainer.TestCollapseDiagnostics) ... ok
+test_healthy_group_logs_diagnostics (tests.test_trainer.TestCollapseDiagnostics) ... ok
+test_identical_images_zero_spread_and_warning (tests.test_trainer.TestCollapseDiagnostics) ... WARNING step 3: possible group collapse (3 consecutive steps with relative pre-head feature spread < 0.001 or grad norm < 0.001; now rel_spread 0, grad_norm 0, dead_frac 0.480)
+ok
+test_controls_written_each_step_and_logged (tests.test_trainer.TestControls) ... ok
+test_g_warmup_logged (tests.test_trainer.TestControls) ... ok
+test_named_val_sets_and_pngs (tests.test_trainer.TestControls) ... ok
+test_off_is_unchanged (tests.test_trainer.TestControls) ... ok
+test_collapse_diag_deform (tests.test_trainer.TestDeformStep) ... WARNING:tensorflow:5 out of the last 9 calls to <function Trainer._make_deform_step.<locals>.<lambda> at 0x7f582890bb80> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING step 3: possible group collapse (3 consecutive steps with relative pre-head feature spread < 0.001 or grad norm < 0.001; now rel_spread 0, grad_norm 3.39e-07, dead_frac 0.000)
+WARNING:tensorflow:6 out of the last 13 calls to <function Trainer._make_deform_step.<locals>.<lambda> at 0x7f596a47bee0> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+ok
+test_nan_guard_skips_update (tests.test_trainer.TestDeformStep) ... ok
+test_none_gradients_filtered (tests.test_trainer.TestDeformStep) ... ok
+test_residual_affine_step (tests.test_trainer.TestDeformStep) ... ok
+test_best_metrics_with_deform (tests.test_trainer.TestDeformValidation) ... WARNING:tensorflow:5 out of the last 8 calls to <function Trainer._val_deform_fn.<locals>.fwd at 0x7f58281a2700> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:5 out of the last 8 calls to <function Trainer._val_deform_fn.<locals>.fwd_train_mode at 0x7f58b9831430> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:6 out of the last 9 calls to <function Trainer._val_deform_fn.<locals>.fwd at 0x7f596f8263a0> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:6 out of the last 9 calls to <function Trainer._val_deform_fn.<locals>.fwd_train_mode at 0x7f588f1fe9d0> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+ok
+test_deform_validation_and_pngs (tests.test_trainer.TestDeformValidation) ... ok
+test_build_and_run (tests.test_trainer.TestHeadActivation) ... ok
+test_gradient_scales_and_logged_terms_do_not (tests.test_trainer.TestLossScale) ... ok
+test_interleaving_starting_rigid (tests.test_trainer.TestMixedTasks) ... ok
+test_mixed_validation_best_metric_and_pngs (tests.test_trainer.TestMixedTasks) ... ok
+test_mixed_precision_overflow_skips (tests.test_trainer.TestResumeAndValidation) ... WARNING:tensorflow:Mixed precision compatibility check (mixed_float16): WARNING
+Your GPUs may run slowly with dtype policy mixed_float16 because they do not have compute capability of at least 7.0. Your GPUs:
+  NVIDIA GeForce GTX 1080, compute capability 6.1 (x2)
+See https://developer.nvidia.com/cuda-gpus for a list of GPUs and their compute capabilities.
+If you will use compatible GPU(s) not attached to this host, e.g. by running a multi-worker model, you can ignore this warning. This message will only be logged once
+
+[amp overflow] 33 skipped steps, first applied step at loss scale 2^7
+ok
+test_mixed_precision_smoke (tests.test_trainer.TestResumeAndValidation) ... WARNING:tensorflow:You forgot to call LossScaleOptimizer.get_scaled_loss() and LossScaleOptimizer.get_unscaled_gradients() before calling LossScaleOptimizer.apply_gradients(). This will likely result in worse model quality, so please call them in the correct places! For example:
+    with tf.GradientTape() as tape:
+      loss = loss_fn()
+      scaled_loss = opt.get_scaled_loss(loss)
+    scaled_grads = tape.gradient(scaled_loss, vars)
+    grads = opt.get_unscaled_gradients(scaled_grads)
+    opt.apply_gradients([(grads, var)])
+For more information, see https://www.tensorflow.org/api_docs/python/tf/keras/mixed_precision/LossScaleOptimizer
+ok
+test_resume_continues_step_count (tests.test_trainer.TestResumeAndValidation) ... ok
+test_trainmode_validation_keeps_bn_statistics (tests.test_trainer.TestResumeAndValidation) ... ok
+test_validation_identity_model (tests.test_trainer.TestResumeAndValidation) ... ok
+test_ratio_and_determinism (tests.test_trainer.TestTaskSchedule) ... ok
+test_trace_once_mixed (tests.test_trainer.TestThreeTasks) ... ok
+test_nan_guard_skips_update (tests.test_trainer.TestTrainStep) ... ok
+test_none_gradients_filtered (tests.test_trainer.TestTrainStep) ... ok
+test_rebuild_steps_after_bn_freeze (tests.test_trainer.TestTrainStep) ... ok
+test_trace_once_per_task (tests.test_trainer.TestTrainStep) ... WARNING:tensorflow:5 out of the last 26 calls to <function Trainer._make_train_step.<locals>.<lambda> at 0x7f58c0152f70> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+ok
+
+----------------------------------------------------------------------
+Ran 70 tests in 4189.173s
+
+OK (skipped=1)
+overfit deform: reached=False after 3 steps; 10-step window soft template Dice nan (threshold 0.9), fold nan (max 0.001); final val template Dice 0.3991, pair Dice 0.1164 (identity 0.4001 / 0.1164), neg J 0.0000 %
+dry run: steps 0 -> 2, trace counts {'rigid': 1, 'affine': 0, 'deform': 1}, finite True
+overfit: reached=False best 10-step mean center RMS (worst task) nan mm after 4 steps; final val center RMS: rigid eval 22.1609 mm, train mode 22.1605 mm; affine eval 26.3739 mm, train mode 26.3739 mm
+overfit deform: reached=False after 4 steps; 10-step window soft template Dice nan (threshold 0.9), fold nan (max 0.001); final val template Dice 0.8643, pair Dice 0.7742 (identity 0.8635 / 0.7742), neg J 0.0000 %
+dry run: steps 0 -> 2, trace counts {'deform': 1}, finite True
+overfit: reached=False best 10-step mean center RMS (worst task) 14.8880 mm after 20 steps; final val center RMS: rigid eval 18.3573 mm, train mode 13.7494 mm
+overfit: reached=False best 10-step mean center RMS (worst task) nan mm after 5 steps; final val center RMS: rigid eval 18.3149 mm, train mode 12.9966 mm
+dry run: steps 0 -> 2, trace counts {'rigid': 1}, finite True
+dry run: steps 0 -> 2, trace counts {'rigid': 1}, finite True
+overfit: reached=True best 10-step mean center RMS (worst task) 0.7949 mm after 1846 steps; final val center RMS: affine eval 0.6063 mm, train mode 0.6180 mm
+overfit: reached=True best 10-step mean center RMS (worst task) 0.7903 mm after 2199 steps; final val center RMS: rigid eval 0.3176 mm, train mode 0.3365 mm; affine eval 0.6053 mm, train mode 0.6201 mm
+overfit: reached=True best 10-step mean center RMS (worst task) 0.7611 mm after 593 steps; final val center RMS: rigid eval 0.7629 mm, train mode 0.5886 mm
+dry run: steps 0 -> 2, trace counts {'rigid': 1}, finite True
+dry run: steps 0 -> 2, trace counts {'rigid': 1}, finite True
+exit: 0  wall 4196 s

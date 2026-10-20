@@ -19,6 +19,17 @@ triangular with the shears (k_xy, k_xz, k_yz) = (K01 / K11, K02 / K22, K12 / K22
 
 `group_errors` returns per-matrix arrays (so validation can pool them over groups);
 `summarize` turns them into means (+ p95 of the RMS values) under a key prefix.
+
+Deformable metrics (design 7, milestone 6), from hard label maps (argmax of warped one-hots):
+* hard Dice per foreground label, NaN where the label is absent in both maps; the mean
+  foreground Dice is the nanmean (absent labels skipped; 1 when no label is present at all);
+* template_dice [N]: warped seg_i vs the label template (argmax of the mean warped one-hot);
+* pair_dice [P]: seg_i moved into j's space vs seg_j;
+* neg_jac_pct [N]: 100 * fraction of interior voxels with det J <= 0;
+* inv_consistency_mm / _max_mm [N]: mean / max over voxels of |compose(u, u_inv)| * spacing;
+* centrality_mm / raw_centrality_mm [1]: mean over voxels of |mean_i v_i| * spacing for the
+  centred v (~0 by construction) and for the raw head output v_raw.
+`deform_group_errors` returns per-item arrays (poolable with `concat_errors`, `summarize`).
 """
 import numpy as np
 
@@ -162,6 +173,75 @@ def mean_pair_rms(metrics, tasks):
     if not vals or any(v is None for v in vals):
         return None
     return float(np.mean(vals))
+
+
+def hard_dice_per_label(seg_a, seg_b, n_classes):
+    """Dice of every foreground label 1..n_classes-1 between two integer maps -> [n_classes - 1]
+    (float64), NaN where the label is absent in both."""
+    a = np.asarray(seg_a).reshape(-1)
+    b = np.asarray(seg_b).reshape(-1)
+    if a.shape != b.shape:
+        raise ValueError("label maps differ in size (%d vs %d)" % (a.size, b.size))
+    n = int(n_classes)
+    a, b = a.astype(np.int64), b.astype(np.int64)
+    count_a = np.bincount(a, minlength=n)[:n].astype(np.float64)
+    count_b = np.bincount(b, minlength=n)[:n].astype(np.float64)
+    inter = np.bincount(a[a == b], minlength=n)[:n].astype(np.float64)
+    total = count_a + count_b
+    with np.errstate(invalid="ignore", divide="ignore"):
+        dice = np.where(total > 0, 2.0 * inter / np.where(total > 0, total, 1.0), np.nan)
+    return dice[1:]
+
+
+def mean_fg_dice(seg_a, seg_b, n_classes):
+    """Mean foreground hard Dice over the labels present in either map (1.0 if none is)."""
+    d = hard_dice_per_label(seg_a, seg_b, n_classes)
+    if not np.any(np.isfinite(d)):
+        return 1.0
+    return float(np.nanmean(d))
+
+
+def deform_group_errors(seg_warped, seg_template, seg_pair_pred, seg_pair_true, jac, inv_err_vox,
+                        v, v_raw, spacing, n_classes):
+    """Per-item deformable error arrays of one group (unprefixed keys, module docstring).
+
+    seg_warped [N, X, Y, Z] (int), seg_template [X, Y, Z] (or [1, X, Y, Z]), seg_pair_pred /
+    seg_pair_true [P, X, Y, Z], jac [N, ...] (det J, interior), inv_err_vox [N, X, Y, Z, 3]
+    (the displacement compose(u, u_inv), voxels) or its norm [N, X, Y, Z], v / v_raw
+    [N, X, Y, Z, 3] (voxels), spacing: scalar mm per voxel.
+    """
+    sw = np.asarray(seg_warped)
+    st = np.asarray(seg_template)
+    if st.ndim == sw.ndim:
+        st = st[0]
+    sp_pred, sp_true = np.asarray(seg_pair_pred), np.asarray(seg_pair_true)
+    s = float(spacing)
+    jac = _np(jac)
+    err = _np(inv_err_vox)
+    if err.ndim == 5:
+        err = np.linalg.norm(err, axis=-1)
+    err = err.reshape((err.shape[0], -1)) * s
+
+    def centrality(field):
+        f = _np(field)
+        return np.asarray([float(np.mean(np.linalg.norm(f.mean(axis=0), axis=-1))) * s])
+
+    return {"template_dice": np.asarray([mean_fg_dice(sw[i], st, n_classes)
+                                         for i in range(sw.shape[0])]),
+            "pair_dice": np.asarray([mean_fg_dice(sp_pred[p], sp_true[p], n_classes)
+                                     for p in range(sp_pred.shape[0])]),
+            "neg_jac_pct": 100.0 * np.mean((jac <= 0).reshape((jac.shape[0], -1)), axis=1),
+            "inv_consistency_mm": err.mean(axis=1),
+            "inv_consistency_max_mm": err.max(axis=1),
+            "centrality_mm": centrality(v),
+            "raw_centrality_mm": centrality(v_raw)}
+
+
+def deform_pair_dice_loss(metrics, prefix):
+    """Deformable best-checkpoint metric 1 - ``<prefix>/pair_dice`` (lower is better), or None if
+    missing."""
+    v = metrics.get("%s/pair_dice" % prefix)
+    return None if v is None else 1.0 - float(v)
 
 
 def summarize(errors, prefix):

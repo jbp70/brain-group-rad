@@ -18,6 +18,15 @@ Pattern from the rigid project's ``runtime/args.py`` (argparse + ``str2bool``). 
 * group size per level: 32 (level 4), 8 (level 2), 2 (level 1) (design 5.1);
 * model: `models.config.ModelConfig` defaults (dense-path norm 'layer'); dropout 0.15, or 0.0
   in overfit mode.
+* deformable task (milestone 6; 'deform' in --task-ratio): lambda_pdice 1, p_pdice 0.1,
+  lambda_smooth 0.5 with first-order smoothness, 7 scaling-and-squaring steps, decoder widths
+  half the encoder widths, the deform decoder built iff 'deform' is in the ratio
+  (--deform-decoder auto), no residual affine, deform group size = --group-size, no gradient
+  checkpointing; overfit stop: window soft template Dice >= 0.9 and folding fraction < 0.001;
+  validation pairs capped at 64 per group. Curriculum, global transform and control files are
+  linear-only. Best checkpoint: the linear rule over the linear tasks; deform-only runs use
+  val_deform/pair_dice_loss (1 - mean pairwise hard Dice); deform + linear runs also keep
+  ckpt/best_deform on that key.
 """
 import argparse
 import collections
@@ -36,8 +45,12 @@ CURRICULUM_START_DEFAULTS = {
 }
 RANGE_KEYS = ("rotation_deg", "translation_mm", "log_scale", "shear")
 TRAIN_TASKS = ("rigid", "affine")
+LINEAR_TASKS = TRAIN_TASKS
+DEFORM_TASK = "deform"
 # Combined best-checkpoint key (same value as runtime.run.MEAN_PAIR_METRIC; args stays TF-free).
 MEAN_PAIR_METRIC = "val/mean_pair_rms_mm"
+# Deformable best-checkpoint key (same value as runtime.run.DEFORM_BEST_METRIC).
+DEFORM_BEST_METRIC = "val_deform/pair_dice_loss"
 ALL_TASKS = ("rigid", "affine", "deform")
 _MC = ModelConfig()
 
@@ -60,7 +73,7 @@ def int_list(v):
 
 
 def parse_task_ratio(text):
-    """'rigid:1,affine:1' -> OrderedDict(task -> weight > 0). 'deform' -> NotImplementedError."""
+    """'rigid:1,affine:1,deform:2' -> OrderedDict(task -> weight > 0)."""
     out = collections.OrderedDict()
     for part in str(text).split(","):
         part = part.strip()
@@ -70,8 +83,6 @@ def parse_task_ratio(text):
         name = name.strip()
         if name not in ALL_TASKS:
             raise ValueError("unknown task {!r} in task ratio {!r} (tasks: {})".format(name, text, ALL_TASKS))
-        if name == "deform":
-            raise NotImplementedError("the deformable task arrives in milestone 6; use rigid/affine only")
         weight = float(w) if w.strip() else 1.0
         if not math.isfinite(weight) or weight < 0:
             raise ValueError("task weight must be finite and >= 0, got {!r}".format(part))
@@ -82,8 +93,25 @@ def parse_task_ratio(text):
     return out
 
 
+def linear_tasks(tasks):
+    """The linear tasks (rigid / affine) of `tasks` (a ratio dict, a list or parsed args), in order."""
+    if hasattr(tasks, "task_ratio_parsed"):
+        tasks = tasks.task_ratio_parsed
+    return [t for t in tasks if t in LINEAR_TASKS]
+
+
+def default_best_metric(tasks):
+    """Default best-checkpoint key (same rule as runtime.run.resolve_best_metric): over the linear
+    tasks, `MEAN_PAIR_METRIC` with more than one, else ``val_<task>/pair_rms_mm``; a deform-only
+    ratio uses `DEFORM_BEST_METRIC`."""
+    lin = linear_tasks(tasks)
+    if not lin:
+        return DEFORM_BEST_METRIC
+    return MEAN_PAIR_METRIC if len(lin) > 1 else "val_%s/pair_rms_mm" % lin[0]
+
+
 def build_parser():
-    p = argparse.ArgumentParser(description="Groupwise registration training (milestone 4: rigid/affine, one level)")
+    p = argparse.ArgumentParser(description="Groupwise registration training (rigid / affine / deform, one level)")
     a = p.add_argument
     g = p.add_argument_group("data and run")
     g.add_argument("--data", default=None, help="npy export root (holds export_manifest.csv and template/), "
@@ -109,8 +137,10 @@ def build_parser():
     g.add_argument("--best-metric", default=None,
                    help="validation key for the 'best' checkpoint (lower is better). 'mean_pair_rms_mm' "
                    "(logged as val/mean_pair_rms_mm) = mean of val_<task>/pair_rms_mm over the trained "
-                   "tasks. Default: mean_pair_rms_mm when more than one task is trained, else "
-                   "val_<task>/pair_rms_mm")
+                   "linear tasks. Default: mean_pair_rms_mm when more than one linear task is "
+                   "trained, else val_<task>/pair_rms_mm of the linear task; deform-only: "
+                   "val_deform/pair_dice_loss. Deform + linear runs also keep ckpt/best_deform "
+                   "on val_deform/pair_dice_loss")
     g = p.add_argument_group("optimizer and schedule")
     g.add_argument("--optimizer", default="adam", choices=["sgdw", "sgd", "adam", "adamw"],
                    help="default adam: every real level-4 SGDW run (lr 3e-3, momentum 0.99; clipped or "
@@ -136,7 +166,7 @@ def build_parser():
                    help="cap TF's GPU memory (logical device limit) instead of memory growth; 0 = off. "
                    "Needed on 8 GB WSL GPUs, where growing into the last GB pages GPU memory to host RAM")
     g = p.add_argument_group("tasks and losses")
-    g.add_argument("--task-ratio", default="rigid:1", help="e.g. 'rigid:1,affine:1' (deform: milestone 6)")
+    g.add_argument("--task-ratio", default="rigid:1", help="e.g. 'rigid:1,affine:1' or 'rigid:1,affine:1,deform:2'")
     g.add_argument("--lambda-pair", type=float, default=1.0)
     g.add_argument("--loss-scale-mm2", type=float, default=1.0,
                    help="divide the training objective (center + lambda_pair * pair, mm^2) by this "
@@ -146,6 +176,33 @@ def build_parser():
     g.add_argument("--p-pair", type=float, default=0.1)
     g.add_argument("--flip-prob", type=float, default=0.5, help="per-axis group flip probability")
     g.add_argument("--target-iters", type=int, default=10)
+    g = p.add_argument_group("deformable task (milestone 6; 'deform' in --task-ratio)")
+    g.add_argument("--lambda-pdice", type=float, default=1.0, help="weight of the pairwise soft Dice loss")
+    g.add_argument("--p-pdice", type=float, default=0.1,
+                   help="fraction of the ordered pairs of a group in the pairwise Dice loss (>= 1 pair)")
+    g.add_argument("--lambda-smooth", type=float, default=0.5, help="weight of the displacement smoothness loss")
+    g.add_argument("--smooth-order", type=int, default=1, choices=[1, 2],
+                   help="1: mean squared forward differences of u; 2: bending energy")
+    g.add_argument("--integration-steps", type=int, default=_MC.integration_steps,
+                   help="scaling-and-squaring steps of the SVF integration (ModelConfig)")
+    g.add_argument("--decoder-widths", type=int_list, default=None,
+                   help="deform decoder widths D5..D1 (5 values; default half the matching encoder widths)")
+    g.add_argument("--deform-decoder", default="auto", choices=["auto", "true", "false"],
+                   help="build the deform decoder: auto = iff 'deform' is in --task-ratio; true also "
+                   "for linear runs that will warm-start a deform run")
+    g.add_argument("--deform-residual-affine", type=str2bool, default=False,
+                   help="small random residual affine in the deformable pipeline (images linear, "
+                   "labels nearest, same matrix)")
+    g.add_argument("--deform-group-size", type=int, default=None, help="deform group size (default --group-size)")
+    g.add_argument("--gradient-checkpointing", default="none", choices=["none", "integrator", "decoder", "both"],
+                   help="tf.recompute_grad around the SVF integrator and/or the deform decoder (memory)")
+    g.add_argument("--overfit-dice-threshold", type=float, default=0.9,
+                   help="overfit stop for deform: window mean soft template Dice >= this ...")
+    g.add_argument("--overfit-fold-max", type=float, default=0.001,
+                   help="... and window mean folding fraction (J <= 0) < this")
+    g.add_argument("--val-deform-max-pairs", type=int, default=64,
+                   help="deform validation: all ordered pairs of a group if at most this many, else a "
+                   "fixed seeded subset of this size")
     g = p.add_argument_group("augmentation (half-widths of uniform ranges)")
     for task in TRAIN_TASKS:
         d = P.DEFAULT_LINEAR_RANGES[task]
@@ -220,8 +277,11 @@ def build_parser():
     g.add_argument("--dry-run", action="store_true", help="build everything, run 2 steps + 1 validation group, exit")
     g.add_argument("--overfit-one-group", action="store_true",
                    help="one fixed group of N training images per trained task (rigid: fixed pure-rigid "
-                   "transforms; affine: fixed transforms from the --affine-* ranges), TF-side warp (no "
-                   "DALI); stops when every task's 10-step mean center RMS is below the threshold")
+                   "transforms; affine: fixed transforms from the --affine-* ranges; deform: a fixed "
+                   "group of --deform-group-size images with labels, synthetic = a label phantom "
+                   "deformed by random diffeomorphisms), TF-side warp (no DALI); stops when every "
+                   "linear task's 10-step mean center RMS is below the threshold and the deform "
+                   "window passes --overfit-dice-threshold / --overfit-fold-max")
     g.add_argument("--overfit-synthetic", action="store_true", help="overfit on a synthetic phantom (no data needed)")
     g.add_argument("--overfit-threshold-mm", type=float, default=1.0)
     g.add_argument("--overfit-max-steps", type=int, default=1500)
@@ -235,10 +295,10 @@ def parse_args(argv=None):
     args = parser.parse_args(argv)
     try:
         args.task_ratio_parsed = parse_task_ratio(args.task_ratio)
-    except NotImplementedError as e:
-        parser.error(str(e))
     except ValueError as e:
         parser.error(str(e))
+    lin = linear_tasks(args)
+    deform = DEFORM_TASK in args.task_ratio_parsed
     if args.data is None and not (args.overfit_one_group and args.overfit_synthetic):
         parser.error("--data is required unless --overfit-one-group --overfit-synthetic is given")
     if args.overfit_synthetic and not args.overfit_one_group:
@@ -251,6 +311,21 @@ def parse_args(argv=None):
         parser.error("--val-png-k must be >= 1 and --val-png-group >= 0")
     if args.group_size < 2:
         parser.error("--group-size must be >= 2 (pairwise loss), got %d" % args.group_size)
+    if args.deform_group_size is None:
+        args.deform_group_size = args.group_size
+    if args.deform_group_size < 2:
+        parser.error("--deform-group-size must be >= 2 (pairwise loss), got %d" % args.deform_group_size)
+    if deform and args.deform_decoder == "false":
+        parser.error("'deform' in --task-ratio needs the deform decoder (--deform-decoder auto or true)")
+    if args.decoder_widths is not None and (len(args.decoder_widths) != 5
+                                            or any(w < 1 for w in args.decoder_widths)):
+        parser.error("--decoder-widths needs 5 positive values (D5..D1), got %r" % (args.decoder_widths,))
+    if args.integration_steps < 0:
+        parser.error("--integration-steps must be >= 0, got %d" % args.integration_steps)
+    if args.val_deform_max_pairs < 1:
+        parser.error("--val-deform-max-pairs must be >= 1, got %d" % args.val_deform_max_pairs)
+    if not (0.0 < args.p_pdice <= 1.0):
+        parser.error("--p-pdice must be in (0, 1], got %r" % args.p_pdice)
     if args.dropout is None:
         args.dropout = 0.0 if args.overfit_one_group else _MC.dropout
     if args.ckpt_every is None:
@@ -268,10 +343,13 @@ def parse_args(argv=None):
     if args.curriculum or args.global_transform:
         if args.overfit_one_group:
             parser.error("--curriculum / --global-transform need the DALI pipeline (not --overfit-one-group)")
+        if not lin:
+            parser.error("--curriculum / --global-transform act on the linear tasks only; "
+                         "--task-ratio %s has none" % args.task_ratio)
     if args.curriculum:
         if args.curriculum_ramp_steps < 0:
             parser.error("--curriculum-ramp-steps must be >= 0, got %d" % args.curriculum_ramp_steps)
-        for task in args.task_ratio_parsed:
+        for task in lin:
             for k in RANGE_KEYS:
                 s = getattr(args, "%s_%s_start" % (task, k))
                 e = getattr(args, "%s_%s" % (task, k))
@@ -287,14 +365,20 @@ def parse_args(argv=None):
             parser.error("--global-resample-every must be >= 1, got %d" % args.global_resample_every)
         if args.global_start_step < 0 or args.global_ramp_steps < 0:
             parser.error("--global-start-step and --global-ramp-steps must be >= 0")
-    tasks = list(args.task_ratio_parsed)
     if args.best_metric is None:
-        args.best_metric = MEAN_PAIR_METRIC if len(tasks) > 1 else "val_%s/pair_rms_mm" % tasks[0]
+        args.best_metric = default_best_metric(args.task_ratio_parsed)
     elif args.best_metric == "mean_pair_rms_mm":
         args.best_metric = MEAN_PAIR_METRIC
-    elif args.best_metric.startswith("val_rigid/") and "rigid" not in args.task_ratio_parsed:
-        args.best_metric = args.best_metric.replace("val_rigid/", "val_%s/" % tasks[0])
+    elif args.best_metric.startswith("val_rigid/") and "rigid" not in args.task_ratio_parsed and lin:
+        args.best_metric = args.best_metric.replace("val_rigid/", "val_%s/" % lin[0])
     return args
+
+
+def deform_decoder_from_args(args):
+    """--deform-decoder: auto -> True iff 'deform' is in the task ratio; true / false as given."""
+    if args.deform_decoder == "auto":
+        return DEFORM_TASK in args.task_ratio_parsed
+    return args.deform_decoder == "true"
 
 
 def model_config_from_args(args):
@@ -305,7 +389,10 @@ def model_config_from_args(args):
                        block=args.block,
                        negative_slope=args.negative_slope, bn_momentum=args.bn_momentum,
                        centering_iters=args.centering_iters,
-                       translation_scale=args.translation_scale, seed=args.seed)
+                       translation_scale=args.translation_scale, seed=args.seed,
+                       deform_decoder=deform_decoder_from_args(args),
+                       decoder_widths=args.decoder_widths,
+                       integration_steps=args.integration_steps)
 
 
 def ranges_from_args(args):
@@ -329,9 +416,10 @@ def controls_enabled(args):
 
 
 def task_controls_from_args(args, seed_offset=None):
-    """{task: `runtime.curriculum.TaskControl`} for the ratio's tasks, or {} when both features
-    are off. G uses seed ``args.seed + seed_offset[task]`` (default rigid 0, affine 1). The
-    writers are attached by the caller (`LinearDataModule.control_writers`)."""
+    """{task: `runtime.curriculum.TaskControl`} for the ratio's LINEAR tasks (the deformable task
+    has no control file), or {} when both features are off. G uses seed ``args.seed +
+    seed_offset[task]`` (default rigid 0, affine 1). The writers are attached by the caller
+    (`LinearDataModule.control_writers`)."""
     if not controls_enabled(args):
         return {}
     from runtime.curriculum import GlobalTransformSampler, LinearCurriculum, TaskControl
@@ -339,7 +427,7 @@ def task_controls_from_args(args, seed_offset=None):
     end = ranges_from_args(args)
     start = curriculum_start_from_args(args)
     out = {}
-    for task in args.task_ratio_parsed:
+    for task in linear_tasks(args):
         cur = (LinearCurriculum(start[task], end[task], args.curriculum_ramp_steps)
                if args.curriculum else None)
         smp = (GlobalTransformSampler(args.global_rot_max_deg, args.global_trans_max_mm,
@@ -374,7 +462,14 @@ def train_config_from_args(args):
                        overfit=args.overfit_one_group,
                        overfit_threshold_mm=args.overfit_threshold_mm,
                        val_png_k=args.val_png_k, val_png_group=args.val_png_group,
-                       val_png_gt_row=args.val_png_gt_row, val_png_mean_col=args.val_png_mean_col)
+                       val_png_gt_row=args.val_png_gt_row, val_png_mean_col=args.val_png_mean_col,
+                       lambda_pdice=args.lambda_pdice, p_pdice=args.p_pdice,
+                       lambda_smooth=args.lambda_smooth, smooth_order=args.smooth_order,
+                       deform_residual_affine=args.deform_residual_affine,
+                       deform_group_size=args.deform_group_size,
+                       overfit_dice_threshold=args.overfit_dice_threshold,
+                       overfit_fold_max=args.overfit_fold_max,
+                       val_deform_max_pairs=args.val_deform_max_pairs)
 
 
 def args_to_dict(args):

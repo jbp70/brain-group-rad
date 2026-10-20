@@ -224,12 +224,150 @@ class TestManifest(unittest.TestCase):
     def test_memory_growth_helper(self):
         self.assertIsInstance(dm.enable_memory_growth(), list)
 
+    def test_label_files_aligned_and_deform_batch_size(self):
+        data = dm.LinearDataModule(self.tmp, level=4, batch_size=4, seed=3)
+        self.assertEqual(data.deform_batch_size, 4)
+        self.assertEqual(data.deform_ranges, {})
+        self.assertEqual(len(data.label_files), len(data.files))
+        for img, lab in zip(data.files, data.label_files):
+            self.assertEqual(os.path.dirname(img), os.path.dirname(lab))
+            self.assertEqual(os.path.basename(lab), "labels_train18_4.npy")
+        data = dm.LinearDataModule(self.tmp, level=4, batch_size=4, deform_batch_size=2,
+                                   deform_ranges={"rotation_deg": 2.0})
+        self.assertEqual((data.batch_size, data.deform_batch_size), (4, 2))
+        self.assertEqual(data.deform_ranges, {"rotation_deg": 2.0})
+        self.assertIs(dm.DataModule, dm.LinearDataModule)
+        with self.assertRaises(ValueError):
+            data.dataset("bogus")
+
+    def test_missing_labels_raise_only_for_deform(self):
+        _write_manifest(self.path, [_row(i, "train", labels="labels_lumir10_4.npy") for i in range(4)])
+        data = dm.LinearDataModule(self.tmp, level=4, batch_size=2)   # linear-only: fine
+        self.assertEqual(len(data.files), 4)
+        with self.assertRaises(ValueError):
+            data.label_files
+        with self.assertRaises(ValueError):
+            data.pipeline("deform")
+
+
+class TestDeformData(unittest.TestCase):
+    """Milestone 6: deformable constants, signatures and reader settings (no DALI needed)."""
+
+    def test_constants(self):
+        from preprocessing import luts
+        self.assertEqual(P.TASKS, ("rigid", "affine"))
+        self.assertEqual(P.DEFORM_TASK, "deform")
+        self.assertEqual(P.ALL_TASKS, ("rigid", "affine", "deform"))
+        self.assertEqual(P.N_TRAIN_LABELS, luts.n_classes(luts.get_lut("train18")))
+        self.assertEqual(dm.TASK_SEED_OFFSET["deform"], 2)
+
+    def test_deform_residual_ranges(self):
+        r = P.deform_residual_ranges(4)
+        self.assertEqual(r.task, "deform")
+        self.assertEqual((r.rotation_deg, r.translation_mm), (1.0, 1.0))
+        self.assertAlmostEqual(r.translation_vox, 0.25)
+        self.assertAlmostEqual(r.log_scale, math.log(1.005))
+        self.assertAlmostEqual(r.shear, 0.0025)
+        self.assertAlmostEqual(P.deform_residual_ranges(2, translation_mm=3.0).translation_vox, 1.5)
+        with self.assertRaises(ValueError):
+            P.deform_residual_ranges(4, rotation_deg=-1.0)
+        with self.assertRaises(ValueError):
+            P.deform_residual_ranges(3)
+
+    def test_signature_and_output_count(self):
+        shapes, dtypes = dali_loader.deform_output_signature(4, 6)
+        self.assertEqual(shapes, ((6, 40, 56, 48, 1), (6, 40, 56, 48, 1)))
+        self.assertEqual(dtypes, ("float32", "uint8"))
+        shapes, dtypes = dali_loader.deform_output_signature(2, 3, residual_affine=True)
+        self.assertEqual(shapes, ((3, 80, 112, 96, 1), (3, 80, 112, 96, 1), (3, 3, 4)))
+        self.assertEqual(dtypes, ("float32", "uint8", "float32"))
+        self.assertEqual(dali_loader.output_count("rigid"), 3)
+        self.assertEqual(dali_loader.output_count("affine", residual_affine=True), 2)
+        self.assertEqual(dali_loader.output_count("deform"), 2)
+        self.assertEqual(dali_loader.output_count("deform", residual_affine=True), 3)
+        with self.assertRaises(ValueError):
+            dali_loader.output_count("bogus")
+        with self.assertRaises(ValueError):
+            dali_loader.linear_output_signature("deform", 4, 2)
+
+    def test_paired_reader_kwargs(self):
+        imgs = ["a/image_4.npy", "b/image_4.npy", "c/image_4.npy"]
+        labs = ["a/labels_train18_4.npy", "b/labels_train18_4.npy", "c/labels_train18_4.npy"]
+        ki, kl = dali_loader.paired_reader_kwargs(imgs, labs, file_root="/root", seed=5)
+        self.assertEqual((ki["files"], kl["files"]), (imgs, labs))
+        self.assertEqual((ki["name"], kl["name"]), ("ImageReader", "LabelReader"))
+        strip = lambda d: {k: v for k, v in d.items() if k not in ("files", "name")}
+        self.assertEqual(strip(ki), strip(kl))
+        self.assertTrue(ki["shuffle_after_epoch"])
+        self.assertFalse(ki["random_shuffle"])
+        self.assertFalse(ki["pad_last_batch"])
+        self.assertEqual((ki["seed"], ki["file_root"]), (5, "/root"))
+        ki, kl = dali_loader.paired_reader_kwargs(imgs, labs, shuffle=False)
+        self.assertEqual(strip(ki), strip(kl))
+        self.assertNotIn("shuffle_after_epoch", ki)
+        with self.assertRaises(ValueError):
+            dali_loader.paired_reader_kwargs(imgs, labs[:2])
+
+    def test_paired_permutation_keeps_pairs(self):
+        imgs = ["case%02d/image_4.npy" % i for i in range(17)]
+        labs = ["case%02d/labels_train18_4.npy" % i for i in range(17)]
+        perm = dali_loader.paired_permutation(17, 9)
+        self.assertEqual(sorted(perm.tolist()), list(range(17)))
+        np.testing.assert_array_equal(perm, dali_loader.paired_permutation(17, 9))
+        np.testing.assert_array_equal(perm, np.random.RandomState(9).permutation(17))  # = linear
+        for i in perm:
+            self.assertEqual(os.path.dirname(imgs[i]), os.path.dirname(labs[i]))
+        self.assertFalse(np.array_equal(perm, np.arange(17)))
+
+    def test_pipeline_input_validation_without_dali(self):
+        with self.assertRaises(ValueError):
+            dali_loader.DeformPipeline(4, ["a.npy"], ["a_l.npy"], 1, shuffle_mode="buffer")
+        with self.assertRaises(ValueError):
+            dali_loader.DeformPipeline(4, ["a.npy", "b.npy"], ["a_l.npy"], 1)
+        with self.assertRaises(ValueError):
+            dali_loader.DeformPipeline(4, [], [], 1)
+        with self.assertRaises(ValueError):
+            dali_loader.DeformPipeline(4, ["a.npy"], ["a_l.npy"], 1, residual_ranges={"shear": -1})
+
 
 class TestDaliGuard(unittest.TestCase):
     @unittest.skipIf(dali_loader.DALI_AVAILABLE, "nvidia.dali is installed")
     def test_pipeline_needs_dali(self):
         with self.assertRaises(ImportError):
             dali_loader.LinearPipeline("rigid", 4, ["a.npy"], 2)
+        with self.assertRaises(ImportError):
+            dali_loader.DeformPipeline(4, ["a.npy"], ["a_l.npy"], 2)
+
+    @unittest.skipUnless(dali_loader.DALI_AVAILABLE and tf.config.list_physical_devices("GPU"),
+                         "needs nvidia.dali and a GPU")
+    def test_deform_pipeline_aligned_on_synthetic_files(self):
+        tmp = tempfile.mkdtemp(prefix="m6_dali_")
+        try:
+            imgs, labs, ref = [], [], []
+            for i in range(4):
+                img = np.full(P.LEVEL_SHAPE[4], float(i + 1) / 8.0, np.float32)
+                lab = np.full(P.LEVEL_SHAPE[4], i + 1, np.uint8)
+                np.save(os.path.join(tmp, "img%d.npy" % i), img)
+                np.save(os.path.join(tmp, "lab%d.npy" % i), lab)
+                imgs.append("img%d.npy" % i)
+                labs.append("lab%d.npy" % i)
+            for residual in (False, True):
+                pipe = dali_loader.DeformPipeline(4, imgs, labs, 2, seed=1, file_root=tmp,
+                                                  residual_affine=residual,
+                                                  intensity_aug=P.IntensityAugConfig.off())
+                pipe.build()
+                for _ in range(3):  # crosses the epoch boundary
+                    outs = pipe.run()
+                    x = outs[0].as_cpu().as_array()
+                    y = outs[1].as_cpu().as_array()
+                    self.assertEqual(x.shape, (2, 40, 56, 48, 1))
+                    self.assertEqual(y.dtype, np.uint8)
+                    centre = (slice(None), 20, 28, 24, 0)
+                    np.testing.assert_allclose(x[centre] * 8.0, y[centre].astype(np.float32), atol=1e-4)
+                self.assertEqual(len(outs), 3 if residual else 2)
+                del pipe
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
     @unittest.skipUnless(dali_loader.DALI_AVAILABLE and tf.config.list_physical_devices("GPU"),
                          "needs nvidia.dali and a GPU")

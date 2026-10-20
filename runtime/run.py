@@ -1,5 +1,5 @@
-"""Custom training loop for the linear tasks (design 5.2): task schedule, one tf.function train
-step per task, NaN guard, validation, logging and checkpoint hooks.
+"""Custom training loop (design 5.2): task schedule, one tf.function train step per task (rigid,
+affine and, milestone 6, deform), NaN guard, validation, logging and checkpoint hooks.
 
 Train step (one per task, traced once; input_signature = the DALI output shapes for the fixed N
 of the level, `data_loading.dali_loader.linear_output_signature`)::
@@ -50,6 +50,41 @@ step creates no variable and retraces nothing.
 `rebuild_steps()` re-creates every step function. Call it after changing anything read at trace
 time, in particular `model.set_bn_stats_frozen(...)` (an already traced step keeps updating
 the statistics otherwise).
+
+Deformable step (milestone 6, traced once; input_signature =
+`dali_loader.deform_output_signature` for the deform group size)::
+
+    step(images float32 [N,X,Y,Z,1], labels uint8 [N,X,Y,Z,1] (, T_dali [N,3,4] residual affine))
+      batch = DeformPostprocess(...)            # flips (images and labels), one-hot, pairs
+      non-finite images -> zeroed and the step skipped (as linear); backup BN statistics
+      with GradientTape: out = model(images, "deform", training=True)
+        terms = deform_loss(out, batch)   # template soft Dice + lambda_pdice pairwise soft Dice
+                                          # + lambda_smooth smoothness (no mm^2 scaling)
+      diag = deform_diagnostics(out)      # same diag_feat_* / diag_dead_frac keys as linear on
+                                          # the D1 decoder features, + v / u / folding stats
+      static None filter, finite flag, tf.cond apply, BN rollback, step += 1 (as linear)
+
+None gradients per step (dropped at trace time; the ONE optimizer has slots for every trainable
+variable from `__init__`, so no step creates variables or retraces; BN statistics of a part that
+did not run are untouched):
+
+| step   | None-gradient variables                                                 |
+|---|---|
+| rigid  | scale/shear head, the whole deform decoder                              |
+| affine | the whole deform decoder                                                |
+| deform | the whole linear decoder (reductions, dense, heads, head_norm_act)      |
+
+Deformable validation (`DeformValidationSet`, ``val_deform/...``, eval mode = source of truth):
+template_dice / pair_dice (hard Dice of argmax-warped one-hots; pairs: all ordered pairs, or a
+fixed seeded subset of ``val_deform_max_pairs``), neg_jac_pct, inv_consistency(_max)_mm,
+centrality_mm, raw_centrality_mm, pair_dice_loss = 1 - pair_dice (deform best metric), the
+cached identity baseline pair_dice_identity / template_dice_identity, and
+``val_deform_trainmode/{template_dice, pair_dice}``. ``val/mean_pair_rms_mm`` covers the linear
+tasks only. Best files: linear tasks -> ``ckpt/best`` keeps the linear rule; deform-only ->
+``ckpt/best`` on ``val_deform/pair_dice_loss``; deform + linear -> also ``extra_best`` (main.py
+wires ``ckpt/best_deform``). Overfit stop (`overfit_status`): every linear task's window mean
+center RMS below the threshold (unchanged) AND the deform window mean soft template Dice >=
+``overfit_dice_threshold`` with window mean folding fraction < ``overfit_fold_max``.
 """
 import collections
 import dataclasses
@@ -66,7 +101,8 @@ import tensorflow as tf
 
 from data_loading import dali_loader
 from data_loading import params as P
-from data_loading.postprocess import LinearPostprocess
+from data_loading.postprocess import DeformPostprocess, LinearPostprocess
+from models import diffeo
 from models import transforms as tfm
 from runtime import losses
 from runtime import metrics as M
@@ -74,25 +110,62 @@ from runtime import optimizers as O
 from runtime.args import parse_task_ratio  # noqa: F401  (re-exported)
 from runtime.schedulers import ScheduleConfig, lr_at
 
-POSTPROCESS_SEED_OFFSET = {"rigid": 101, "affine": 202}
+POSTPROCESS_SEED_OFFSET = {"rigid": 101, "affine": 202, "deform": 303}
+LINEAR_TASKS = P.TASKS
+DEFORM = P.DEFORM_TASK
 # Combined best-checkpoint metric (milestone 5): mean of val_<task>/pair_rms_mm over the trained
-# tasks; the default --best-metric when more than one task is trained.
+# linear tasks; the default --best-metric when more than one linear task is trained.
 MEAN_PAIR_METRIC = "val/mean_pair_rms_mm"
 MEAN_PAIR_ALIASES = ("mean_pair_rms_mm", MEAN_PAIR_METRIC)
+# Deformable best-checkpoint metric (milestone 6): 1 - mean pairwise hard Dice (lower is better).
+DEFORM_BEST_METRIC = "val_deform/pair_dice_loss"
 
 
 def resolve_best_metric(best_metric, tasks):
-    """Validation key of the 'best' checkpoint. None: `MEAN_PAIR_METRIC` if more than one task is
-    trained, else ``val_<task>/pair_rms_mm``; 'mean_pair_rms_mm' is an alias of
-    `MEAN_PAIR_METRIC`; any other value is used as given."""
-    tasks = list(tasks)
+    """Validation key of the 'best' checkpoint. None: over the LINEAR tasks, `MEAN_PAIR_METRIC`
+    if more than one is trained, else ``val_<task>/pair_rms_mm``; deform-only:
+    `DEFORM_BEST_METRIC`. 'mean_pair_rms_mm' is an alias of `MEAN_PAIR_METRIC`; any other value
+    is used as given."""
+    lin = [t for t in tasks if t in LINEAR_TASKS]
     if best_metric is None:
-        return MEAN_PAIR_METRIC if len(tasks) > 1 else "val_%s/pair_rms_mm" % tasks[0]
+        if not lin:
+            return DEFORM_BEST_METRIC
+        return MEAN_PAIR_METRIC if len(lin) > 1 else "val_%s/pair_rms_mm" % lin[0]
     if best_metric in MEAN_PAIR_ALIASES:
         return MEAN_PAIR_METRIC
     return best_metric
+
+
 DIAG_KEYS = ("diag_feat_spread", "diag_feat_rel_spread", "diag_dead_frac", "diag_rot10_norm",
              "diag_head_spread")
+DEFORM_LOSS_KEYS = ("loss", "tmpl", "pdice", "smooth", "soft_dice_tmpl", "soft_dice_pair")
+DEFORM_DIAG_KEYS = ("diag_feat_spread", "diag_feat_rel_spread", "diag_dead_frac", "diag_v_rms_vox",
+                    "diag_v_raw_mean_rms_vox", "diag_u_max_vox", "diag_fold_frac")
+
+
+def deform_diagnostics(out):
+    """Diagnostics of one deform forward pass (TF, float32 scalars, no gradient needed).
+
+    Same collapse keys as `collapse_diagnostics`, on the D1 decoder features ``dec_feat``
+    [N, X, Y, Z, C]: diag_feat_spread (mean over voxels and channels of the std across the
+    group), diag_feat_rel_spread (that / mean |dec_feat|), diag_dead_frac (fraction of channels
+    <= 0 at every voxel of every image). Plus diag_v_rms_vox (RMS |v| of the centered SVF),
+    diag_v_raw_mean_rms_vox (RMS |mean_i v_raw_i|: what the centering removed), diag_u_max_vox
+    (max |u|) and diag_fold_frac (mean folding fraction J <= 0 over the group).
+    """
+    f = tf.cast(out["dec_feat"], tf.float32)
+    spread = tf.reduce_mean(tf.math.reduce_std(f, axis=0))
+    v = tf.cast(out["v"], tf.float32)
+    v_raw_mean = tf.reduce_mean(tf.cast(out["v_raw"], tf.float32), axis=0)
+    u = tf.cast(out["u"], tf.float32)
+    return {"diag_feat_spread": spread,
+            "diag_feat_rel_spread": tf.math.divide_no_nan(spread, tf.reduce_mean(tf.abs(f))),
+            "diag_dead_frac": tf.reduce_mean(tf.cast(tf.reduce_all(f <= 0.0, axis=[0, 1, 2, 3]),
+                                                     tf.float32)),
+            "diag_v_rms_vox": tf.sqrt(tf.reduce_mean(tf.reduce_sum(tf.square(v), axis=-1))),
+            "diag_v_raw_mean_rms_vox": tf.sqrt(tf.reduce_mean(tf.reduce_sum(tf.square(v_raw_mean), axis=-1))),
+            "diag_u_max_vox": tf.reduce_max(tf.norm(u, axis=-1)),
+            "diag_fold_frac": tf.reduce_mean(diffeo.folding_fraction(u))}
 
 
 def collapse_diagnostics(pre_head, params):
@@ -127,8 +200,6 @@ class TaskSchedule:
         self.ratio = collections.OrderedDict((k, float(v)) for k, v in ratio.items() if float(v) > 0)
         if not self.ratio:
             raise ValueError("empty task ratio")
-        if "deform" in self.ratio:
-            raise NotImplementedError("the deformable task arrives in milestone 6")
         self.seed = int(seed)
         total = sum(self.ratio.values())
         acc = 0.0
@@ -191,6 +262,21 @@ class TrainConfig:
     val_png_gt_row: bool = True
     val_png_mean_col: bool = True
     val_png_seed: int = 0
+    # Deformable task (milestone 6): loss = template soft Dice + lambda_pdice * pairwise soft Dice
+    # (p_pdice of the ordered pairs) + lambda_smooth * smoothness(u, smooth_order).
+    lambda_pdice: float = 1.0
+    p_pdice: float = 0.1
+    lambda_smooth: float = 0.5
+    smooth_order: int = 1
+    n_classes: int = P.N_TRAIN_LABELS
+    deform_residual_affine: bool = False
+    deform_group_size: Optional[int] = None        # None: group_size
+    # Overfit stop of the deform task: window mean soft template Dice >= overfit_dice_threshold
+    # and window mean folding fraction < overfit_fold_max.
+    overfit_dice_threshold: float = 0.9
+    overfit_fold_max: float = 0.001
+    # Deform validation: all ordered pairs of a group if at most this many, else a fixed subset.
+    val_deform_max_pairs: int = 64
 
 
 def _peak_gpu_mb():
@@ -213,9 +299,9 @@ class Trainer:
       cfg: `TrainConfig`.
       logger: optional `runtime.logging.RunLogger`; checkpoint: optional `RunCheckpoint` (can be
         attached later, it needs `trainer.step` and `checkpoint_variables()`).
-      val_sets: optional {name: `runtime.fixed_data.ValidationSet`}; the name is the metric
-        prefix ``val_<name>`` (e.g. 'rigid', or 'rigid_g' for the set with a global transform),
-        the set's ``task`` selects the model head.
+      val_sets: optional {name: `runtime.fixed_data.ValidationSet` or `DeformValidationSet`};
+        the name is the metric prefix ``val_<name>`` (e.g. 'rigid', 'rigid_g' for the set with a
+        global transform, 'deform'), the set's ``task`` selects the model head.
       controls: optional {task: `runtime.curriculum.TaskControl`} with writers attached
         (curriculum / global transform). Each step first writes every task's control values of
         that step; batches then carry G_dali and control_version, which are logged and dropped
@@ -240,11 +326,24 @@ class Trainer:
         if missing:
             raise ValueError("no data source for task(s) %s" % missing)
         self.best_metric = resolve_best_metric(cfg.best_metric, self.schedule.tasks)
+        self.linear_tasks = [t for t in self.schedule.tasks if t in LINEAR_TASKS]
+        # Deform + linear: 'best' keeps the linear rule, the deform best goes to an extra file.
+        self.extra_best = ({DEFORM: DEFORM_BEST_METRIC}
+                           if DEFORM in self.schedule.tasks and self.linear_tasks else {})
         self.step = tf.Variable(0, dtype=tf.int64, trainable=False, name="global_step")
-        self.postprocess = {t: LinearPostprocess(t, self.level, flip_prob=cfg.flip_prob, p_pair=cfg.p_pair,
-                                                 seed=cfg.seed + POSTPROCESS_SEED_OFFSET[t],
-                                                 target_iters=cfg.target_iters)
-                            for t in self.sources}
+        self.postprocess = {}
+        for t in self.sources:
+            if t == DEFORM:
+                self.postprocess[t] = DeformPostprocess(
+                    self.level, flip_prob=cfg.flip_prob, p_pdice=cfg.p_pdice,
+                    seed=cfg.seed + POSTPROCESS_SEED_OFFSET[t], n_classes=cfg.n_classes,
+                    residual_affine=cfg.deform_residual_affine)
+            else:
+                self.postprocess[t] = LinearPostprocess(t, self.level, flip_prob=cfg.flip_prob,
+                                                        p_pair=cfg.p_pair,
+                                                        seed=cfg.seed + POSTPROCESS_SEED_OFFSET[t],
+                                                        target_iters=cfg.target_iters)
+        self._identity_cache = {}
         self.trace_counts = {t: 0 for t in self.sources}
         self.val_trace_counts = {}
         self.nonfinite_total = 0
@@ -264,8 +363,74 @@ class Trainer:
 
     def rebuild_steps(self):
         """Re-create every train / validation tf.function (re-trace on next use)."""
-        self._steps = {t: self._make_train_step(t) for t in self.sources}
+        self._steps = {t: self._make_deform_step() if t == DEFORM else self._make_train_step(t)
+                       for t in self.sources}
         self._val_fns = {}
+
+    def _group_size(self, task):
+        """Group size of `task`'s batches (the deform group size may differ)."""
+        if task == DEFORM and self.cfg.deform_group_size is not None:
+            return int(self.cfg.deform_group_size)
+        return int(self.cfg.group_size)
+
+    def _make_deform_step(self):
+        model, opt, cfg = self.model, self.optimizer, self.cfg
+        task = DEFORM
+        residual = bool(cfg.deform_residual_affine)
+        shapes, dtypes = dali_loader.deform_output_signature(self.level, self._group_size(task), residual)
+        signature = [tf.TensorSpec(s, tf.as_dtype(d)) for s, d in zip(shapes, dtypes)]
+        pp = self.postprocess[task]
+        amp = bool(cfg.amp)
+        lam_p, lam_s, order = float(cfg.lambda_pdice), float(cfg.lambda_smooth), int(cfg.smooth_order)
+
+        def body(images, labels, t_dali=None):
+            self.trace_counts[task] += 1          # Python side effect: runs only while tracing
+            batch = pp(images, labels, t_dali)    # outside the tape
+            x = batch["images"]
+            in_finite = tf.reduce_all(tf.math.is_finite(x))
+            batch["images"] = tf.where(in_finite, x, tf.zeros_like(x))
+            stats = list(model.non_trainable_variables)
+            backup = [tf.identity(v) for v in stats]
+            tvars = model.trainable_variables
+            with tf.GradientTape() as tape:
+                out = model(batch["images"], task=task, training=True)
+                terms = losses.deform_loss(out, batch, lam_p, lam_s, order)
+                objective = terms["loss"]
+                scaled = opt.get_scaled_loss(objective) if amp else objective
+            grads = tape.gradient(scaled, tvars)
+            diag = deform_diagnostics(out)
+            pairs = [(g, v) for g, v in zip(grads, tvars) if g is not None]   # static filter
+            gs = [g for g, _ in pairs]
+            vs = [v for _, v in pairs]
+            if amp:
+                gs = opt.get_unscaled_gradients(gs)
+            gnorm = tf.linalg.global_norm(gs)
+            finite = tf.logical_and(tf.math.is_finite(terms["loss"]), tf.math.is_finite(gnorm))
+            finite = tf.logical_and(finite, in_finite)
+
+            def apply():
+                opt.apply_gradients(zip(gs, vs))
+                return tf.constant(True)
+
+            tf.cond(in_finite if amp else finite, apply, lambda: tf.constant(False))
+
+            def restore():
+                for v, b in zip(stats, backup):
+                    v.assign(b)
+                return tf.constant(True)
+
+            if stats:
+                tf.cond(finite, lambda: tf.constant(False), restore)
+            self.step.assign_add(1)
+            res = dict(terms)
+            res.update(diag)
+            res.update(grad_norm=gnorm, finite=finite, n_vars_updated=tf.constant(len(pairs)))
+            return res
+
+        if residual:
+            return tf.function(lambda images, labels, t_dali: body(images, labels, t_dali),
+                               input_signature=signature)
+        return tf.function(lambda images, labels: body(images, labels), input_signature=signature)
 
     def _make_train_step(self, task):
         model, opt, cfg = self.model, self.optimizer, self.cfg
@@ -333,11 +498,11 @@ class Trainer:
                                input_signature=signature)
         return tf.function(lambda images, t_dali: body(images, t_dali), input_signature=signature)
 
-    @staticmethod
-    def split_batch(task, batch_tuple):
-        """(step inputs, control extras): the first 3 (rigid) / 2 (affine) DALI outputs, and the
-        trailing (G_dali, control_version) of a control-file pipeline (empty tuple otherwise)."""
-        k = dali_loader.base_output_count(task)
+    def split_batch(self, task, batch_tuple):
+        """(step inputs, control extras): the first 3 (rigid) / 2 (affine) / 2 or 3 (deform, with
+        the residual affine) DALI outputs, and the trailing (G_dali, control_version) of a
+        control-file pipeline (empty tuple otherwise)."""
+        k = dali_loader.output_count(task, self.cfg.deform_residual_affine)
         batch_tuple = tuple(batch_tuple)
         return batch_tuple[:k], batch_tuple[k:]
 
@@ -419,6 +584,158 @@ class Trainer:
                                        affine=task == "affine" and not train_mode))
         return M.concat_errors(errs), mats
 
+    def _val_deform_fn(self, nv, train_mode=False):
+        """Deform validation forward -> dict(u, u_inv, v, v_raw) float32. Eval mode, or (with
+        ``train_mode``) training-mode BN with dropout off and the BN statistics restored, as
+        `_val_fn`."""
+        key = (DEFORM, int(nv), bool(train_mode))
+        if key not in self._val_fns:
+            shape = (int(nv),) + tuple(P.LEVEL_SHAPE[self.level]) + (1,)
+            model = self.model
+            self.val_trace_counts.setdefault(key, 0)
+            names = ("u", "u_inv", "v", "v_raw")
+
+            def fwd(x):
+                self.val_trace_counts[key] += 1
+                out = model(x, task=DEFORM, training=False)
+                return {k: tf.cast(out[k], tf.float32) for k in names}
+
+            def fwd_train_mode(x):
+                self.val_trace_counts[key] += 1
+                stats = list(model.non_trainable_variables)
+                backup = [tf.identity(v) for v in stats]
+                drops = [m for m in model.submodules if isinstance(m, tf.keras.layers.Dropout)]
+                rates = [d.rate for d in drops]
+                try:
+                    for d in drops:
+                        d.rate = 0.0
+                    out = model(x, task=DEFORM, training=True)
+                finally:
+                    for d, r in zip(drops, rates):
+                        d.rate = r
+                res = {k: tf.cast(out[k], tf.float32) for k in names}
+                with tf.control_dependencies(list(res.values())):
+                    restores = [v.assign(b) for v, b in zip(stats, backup)]
+                with tf.control_dependencies(restores):
+                    return {k: tf.identity(v) for k, v in res.items()}
+
+            self._val_fns[key] = tf.function(fwd_train_mode if train_mode else fwd,
+                                             input_signature=[tf.TensorSpec(shape, tf.float32)])
+        return self._val_fns[key]
+
+    def _val_pairs(self, n, seed):
+        """Ordered validation pairs (i, j): all if n (n - 1) <= val_deform_max_pairs, else a fixed
+        seeded subset of that size (sorted)."""
+        i, j = M.all_ordered_pairs(int(n))
+        cap = int(self.cfg.val_deform_max_pairs)
+        if len(i) > cap:
+            sel = np.sort(np.random.default_rng(int(seed)).choice(len(i), cap, replace=False))
+            i, j = i[sel], j[sel]
+        return np.asarray(i, np.int32), np.asarray(j, np.int32)
+
+    def _deform_errors(self, labels, u, u_inv, v, v_raw, seed, chunk=16):
+        """`M.deform_group_errors` of one group (eager TF warps, numpy metrics). labels uint8
+        [N, X, Y, Z(, 1)]; fields float32 [N, X, Y, Z, 3]. Also returns the warped one-hot hard
+        segmentation [N, X, Y, Z] and the label template [X, Y, Z] (for the PNG)."""
+        n_cls = int(self.cfg.n_classes)
+        lab = np.asarray(labels).astype(np.int32)
+        if lab.ndim == 5:
+            lab = lab[..., 0]
+        onehot = tf.one_hot(tf.constant(lab), n_cls, dtype=tf.float32)
+        u, u_inv = tf.convert_to_tensor(u, tf.float32), tf.convert_to_tensor(u_inv, tf.float32)
+        warped = diffeo.warp(onehot, u)
+        seg_warped = tf.argmax(warped, axis=-1).numpy()
+        seg_template = tf.argmax(tf.reduce_mean(warped, axis=0), axis=-1).numpy()
+        del warped
+        i, j = self._val_pairs(lab.shape[0], seed)
+        pred = []
+        for s in range(0, len(i), int(chunk)):
+            ii, jj = i[s:s + chunk], j[s:s + chunk]
+            disp = diffeo.pairwise_displacement(u, u_inv, ii, jj)
+            pred.append(tf.argmax(diffeo.warp(tf.gather(onehot, ii), disp), axis=-1).numpy())
+        seg_pair_pred = np.concatenate(pred, axis=0)
+        jac = diffeo.jacobian_determinant(u).numpy()
+        inv = diffeo.compose(u, u_inv).numpy()
+        errs = M.deform_group_errors(seg_warped, seg_template, seg_pair_pred, lab[j], jac, inv,
+                                     np.asarray(v), np.asarray(v_raw), P.LEVEL_SPACING[self.level], n_cls)
+        return errs, {"seg_warped": seg_warped, "seg_template": seg_template, "jac": jac}
+
+    def _val_deform_errors(self, vs, groups, train_mode):
+        """(pooled errors, [dict(u, seg_warped, seg_template, jac) per group])."""
+        fn = self._val_deform_fn(vs.group_size, train_mode)
+        errs, extras = [], []
+        for g, grp in enumerate(groups):
+            out = fn(tf.constant(grp["images"]))
+            e, ex = self._deform_errors(grp["labels"], out["u"], out["u_inv"], out["v"].numpy(),
+                                        out["v_raw"].numpy(), seed=g)
+            ex["u"] = out["u"].numpy()
+            errs.append(e)
+            extras.append(ex)
+        return M.concat_errors(errs), extras
+
+    def _identity_deform_metrics(self, name, vs, groups):
+        """Identity baseline (u = 0) of a deform validation set: pair / template hard Dice,
+        computed once per (set name, number of groups) and cached."""
+        key = (name, len(groups))
+        if key not in self._identity_cache:
+            errs = []
+            for g, grp in enumerate(groups):
+                z = np.zeros(tuple(grp["images"].shape[:4]) + (3,), np.float32)
+                errs.append(self._deform_errors(grp["labels"], z, z, z, z, seed=g)[0])
+            pooled = M.concat_errors(errs)
+            self._identity_cache[key] = {
+                "val_%s/pair_dice_identity" % name: float(np.mean(pooled["pair_dice"])),
+                "val_%s/template_dice_identity" % name: float(np.mean(pooled["template_dice"]))}
+        return dict(self._identity_cache[key])
+
+    def _write_deform_png(self, name, grp, extra, metrics, step):
+        """Deformable validation PNG (`runtime.val_png.write_deform_png`), file
+        ``<name>_step<step>.png``. Never raises."""
+        cfg = self.cfg
+        try:
+            from runtime import val_png as V
+            idx = V.select_indices(grp["images"].shape[0], cfg.val_png_k, cfg.val_png_seed)
+            images = np.asarray(grp["images"], np.float32)[idx]
+            u = extra["u"][idx]
+            warped = diffeo.warp(tf.constant(images), tf.constant(u)).numpy()
+            jac = extra["jac"][idx]
+            fold = 100.0 * np.mean((jac <= 0).reshape((jac.shape[0], -1)), axis=1)
+            z = P.LEVEL_SHAPE[self.level][2] // 2
+            pre = "val_%s" % name
+            title = V.deform_figure_title(step, metrics[pre + "/template_dice"],
+                                          metrics[pre + "/pair_dice"], metrics[pre + "/neg_jac_pct"], z)
+            labels = ["val %d" % int(i) for i in np.asarray(grp["index"])[idx]]
+            os.makedirs(cfg.val_png_dir, exist_ok=True)
+            path = os.path.join(cfg.val_png_dir, "%s_step%07d.png" % (name, int(step)))
+            V.write_deform_png(path, images, warped, extra["seg_warped"][idx], extra["seg_template"],
+                               jac, title, fold, labels=labels, mean_col=bool(cfg.val_png_mean_col))
+            self.val_png_paths.append(path)
+        except Exception as e:  # noqa: BLE001  (a PNG must never stop training)
+            print("WARNING step %d: validation PNG for %s failed: %r" % (int(step), name, e),
+                  file=sys.stderr, flush=True)
+            if self.logger is not None:
+                self.logger.log_event(int(step), {"event": "val_png_failed", "task": name,
+                                                  "error": repr(e)})
+
+    def _validate_deform(self, name, vs, groups):
+        """Metrics of one deform validation set (module docstring)."""
+        out = {}
+        pre = "val_%s" % name
+        t0 = time.perf_counter()
+        errs, extras = self._val_deform_errors(vs, groups, False)
+        out.update(M.summarize(errs, pre))
+        out[pre + "/pair_dice_loss"] = M.deform_pair_dice_loss(out, pre)
+        out[pre + "/groups"] = len(groups)
+        out[pre + "/time_s"] = time.perf_counter() - t0
+        tm = M.summarize(self._val_deform_errors(vs, groups, True)[0], pre + "_trainmode")
+        for k in ("template_dice", "pair_dice"):
+            out["%s_trainmode/%s" % (pre, k)] = tm["%s_trainmode/%s" % (pre, k)]
+        out.update(self._identity_deform_metrics(name, vs, groups))
+        g = int(self.cfg.val_png_group)
+        if self.cfg.val_png_dir and 0 <= g < len(groups):
+            self._write_deform_png(name, groups[g], extras[g], out, int(self.step.numpy()))
+        return out
+
     def _write_val_png(self, task, grp, A, metrics, step):
         """One validation PNG (runtime.val_png). ``task`` is the validation-set name ('rigid',
         'rigid_g', ...): file ``<name>_step<step>.png``. Never raises: failures are logged and
@@ -454,16 +771,20 @@ class Trainer:
         qr_rot_deg} (`runtime.metrics.affine_matrix_errors`).
         ``val_<task>_trainmode/{center,pair}_rms_mm``: the same groups with training-mode BN (no
         statistics update, dropout off), to expose any train/eval gap.
-        ``val/mean_pair_rms_mm``: mean of ``val_<task>/pair_rms_mm`` over the trained tasks
-        (sets named exactly like the task, i.e. without G), when every one was validated.
+        ``val/mean_pair_rms_mm``: mean of ``val_<task>/pair_rms_mm`` over the trained LINEAR
+        tasks (sets named exactly like the task, i.e. without G), when every one was validated.
+        Deform sets (task 'deform'): `_validate_deform` (module docstring).
         """
         out = {}
         for name, vs in self.val_sets.items():
             task = vs.task
-            if task not in ("rigid", "affine"):
+            if task not in ("rigid", "affine", DEFORM):
                 continue
             groups = vs.groups if max_groups is None else vs.groups[:int(max_groups)]
             if not groups:
+                continue
+            if task == DEFORM:
+                out.update(self._validate_deform(name, vs, groups))
                 continue
             t0 = time.perf_counter()
             errs, mats = self._val_errors(task, vs, groups, False)
@@ -477,7 +798,7 @@ class Trainer:
             g = int(self.cfg.val_png_group)
             if self.cfg.val_png_dir and 0 <= g < len(groups):
                 self._write_val_png(name, groups[g], mats[g], out, int(self.step.numpy()))
-        mean_pair = M.mean_pair_rms(out, self.schedule.tasks)
+        mean_pair = M.mean_pair_rms(out, self.linear_tasks)
         if mean_pair is not None:
             out[MEAN_PAIR_METRIC] = mean_pair
         return out
@@ -493,6 +814,11 @@ class Trainer:
         self._log(step, val)
         if self.checkpoint is not None and self.best_metric in val:
             self.checkpoint.maybe_save_best(val[self.best_metric])
+        for name, key in self.extra_best.items():
+            # Only when the checkpoint was built with this extra best file (main.py wires it).
+            if (self.checkpoint is not None and key in val
+                    and name in getattr(self.checkpoint, "extra_best", {})):
+                self.checkpoint.maybe_save_best(val[key], name=name)
         return val
 
     def _update_collapse(self, step, task, res):
@@ -521,7 +847,7 @@ class Trainer:
         (None for a task with fewer steps)."""
         w = int(self.cfg.overfit_window)
         out = {}
-        for t in self.schedule.tasks:
+        for t in self.linear_tasks:
             vals = []
             for h in reversed(self.history):
                 if h["task"] == t and h["finite"]:
@@ -532,12 +858,43 @@ class Trainer:
         return out
 
     def _window_center_rms(self):
-        """Worst task's window mean (`window_center_rms_by_task`), None until every task has a
-        full window. Equals the plain window mean with a single task."""
+        """Worst linear task's window mean (`window_center_rms_by_task`), None until every linear
+        task has a full window (or without linear tasks). Equals the plain window mean with a
+        single linear task."""
         vals = list(self.window_center_rms_by_task().values())
-        if any(v is None for v in vals):
+        if not vals or any(v is None for v in vals):
             return None
         return max(vals)
+
+    def window_deform_by_task(self):
+        """{'deform': dict(soft_dice_tmpl, fold_frac) means of its last overfit_window finite
+        steps, or None with fewer steps} when deform is trained, else {}."""
+        if DEFORM not in self.schedule.tasks:
+            return {}
+        w = int(self.cfg.overfit_window)
+        recs = []
+        for h in reversed(self.history):
+            if h["task"] == DEFORM and h["finite"]:
+                recs.append(h)
+                if len(recs) == w:
+                    break
+        if len(recs) < w:
+            return {DEFORM: None}
+        return {DEFORM: {"soft_dice_tmpl": float(np.mean([h["soft_dice_tmpl"] for h in recs])),
+                         "fold_frac": float(np.mean([h["diag_fold_frac"] for h in recs]))}}
+
+    def overfit_status(self):
+        """{task: True / False / None (window not full yet)}: linear = window mean center RMS <
+        overfit_threshold_mm; deform = window mean soft template Dice >= overfit_dice_threshold
+        and window mean folding fraction < overfit_fold_max."""
+        cfg = self.cfg
+        out = {}
+        for t, v in self.window_center_rms_by_task().items():
+            out[t] = None if v is None else bool(v < float(cfg.overfit_threshold_mm))
+        for t, d in self.window_deform_by_task().items():
+            out[t] = None if d is None else bool(d["soft_dice_tmpl"] >= float(cfg.overfit_dice_threshold)
+                                                 and d["fold_frac"] < float(cfg.overfit_fold_max))
+        return out
 
     def fit(self, num_steps=None):
         """Train until step == cfg.steps (num_steps=None) or for `num_steps` more steps."""
@@ -550,6 +907,7 @@ class Trainer:
         saved_at = None
         last_val = {}
         best_window = None
+        best_window_dice = None
         while int(self.step.numpy()) < end:
             s = int(self.step.numpy())
             task = self.schedule.draw(s)
@@ -587,9 +945,14 @@ class Trainer:
             else:
                 consecutive = 0
                 pre = "train_%s/" % task
-                acc.update({pre + "loss": res["loss"], pre + "center": res["center"],
-                            pre + "pair": res["pair"], "train/grad_norm": res["grad_norm"]})
-                acc.update({pre + k: res[k] for k in DIAG_KEYS})
+                if task == DEFORM:
+                    acc.update({pre + k: res[k] for k in DEFORM_LOSS_KEYS})
+                    acc.update({"train/grad_norm": res["grad_norm"]})
+                    acc.update({pre + k: res[k] for k in DEFORM_DIAG_KEYS})
+                else:
+                    acc.update({pre + "loss": res["loss"], pre + "center": res["center"],
+                                pre + "pair": res["pair"], "train/grad_norm": res["grad_norm"]})
+                    acc.update({pre + k: res[k] for k in DIAG_KEYS})
                 self._update_collapse(done, task, res)
             if cfg.log_every and (done % int(cfg.log_every) == 0 or done == end):
                 m = acc.result()
@@ -618,9 +981,14 @@ class Trainer:
                 w = self._window_center_rms()
                 if w is not None:
                     best_window = w if best_window is None else min(best_window, w)
-                    if w < float(cfg.overfit_threshold_mm):
-                        self.reached = True
-                        break
+                wd = self.window_deform_by_task().get(DEFORM)
+                if wd is not None:
+                    best_window_dice = (wd["soft_dice_tmpl"] if best_window_dice is None
+                                        else max(best_window_dice, wd["soft_dice_tmpl"]))
+                status = self.overfit_status()
+                if status and all(v is True for v in status.values()):
+                    self.reached = True
+                    break
         final = int(self.step.numpy())
         # Validation PNGs also cover the final step: validate there unless that just happened.
         if (cfg.val_png_dir and self.val_sets and cfg.val_every and final > start
@@ -634,4 +1002,6 @@ class Trainer:
                 "collapse_warnings": self.collapse_warnings,
                 "trace_counts": dict(self.trace_counts), "reached": self.reached,
                 "best_window_center_rms_mm": best_window,
-                "window_center_rms_by_task": self.window_center_rms_by_task(), "last_val": last_val}
+                "window_center_rms_by_task": self.window_center_rms_by_task(),
+                "window_deform": self.window_deform_by_task().get(DEFORM),
+                "best_window_soft_dice_tmpl": best_window_dice, "last_val": last_val}

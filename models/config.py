@@ -57,12 +57,31 @@ class ModelConfig:
     translation_scale: float = 1.0
     # Optional seed of the Kaiming initializers (None = TF global seed).
     seed: Optional[int] = None
+    # Build the deformable U-Net decoder + SVF head (design 4.5-4.6, milestone 6). Off by default
+    # so linear-only models keep exactly the same variables and checkpoints.
+    deform_decoder: bool = False
+    # Deform decoder widths D5, D4, D3, D2, D1. None = half the matching encoder widths
+    # (f4, f3, f2, f1, f0) // 2 = (128, 96, 64, 32, 16) by default.
+    decoder_widths: Optional[Tuple[int, ...]] = None
+    # Scaling-and-squaring steps of the SVF integration (0 = use v as the displacement).
+    integration_steps: int = 7
 
     def __post_init__(self):
         self.filters = tuple(int(v) for v in self.filters)
         self.reductions = tuple(int(v) for v in self.reductions)
         self.dense = tuple(int(v) for v in self.dense)
+        if self.decoder_widths is not None:
+            self.decoder_widths = tuple(int(v) for v in self.decoder_widths)
+        self.deform_decoder = bool(self.deform_decoder)
+        self.integration_steps = int(self.integration_steps)
         self.validate()
+
+    def resolved_decoder_widths(self):
+        """Deform decoder widths D5..D1 (explicit, or half the matching encoder widths)."""
+        if self.decoder_widths is not None:
+            return tuple(self.decoder_widths)
+        f = self.filters
+        return (f[4] // 2, f[3] // 2, f[2] // 2, f[1] // 2, f[0] // 2)
 
     def validate(self):
         if len(self.filters) != 6:
@@ -83,6 +102,12 @@ class ModelConfig:
             raise ValueError("dropout must be in [0, 1)")
         if self.centering_iters < 1:
             raise ValueError("centering_iters must be >= 1")
+        if self.decoder_widths is not None and (
+                len(self.decoder_widths) != 5 or any(w < 1 for w in self.decoder_widths)):
+            raise ValueError("decoder_widths needs 5 positive entries (D5..D1), got {}".format(
+                self.decoder_widths))
+        if self.integration_steps < 0:
+            raise ValueError("integration_steps must be >= 0")
         return self
 
     def to_dict(self):

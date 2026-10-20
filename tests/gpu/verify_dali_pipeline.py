@@ -39,6 +39,16 @@ Control file (curriculum / global transform G, design 3.2 v3.5; real level-4 dat
       matches the TF-only one (criteria of (b)).
   (k) curriculum start values written: sampled rotation / translation / log-scale / shear
       magnitudes stay within them (and are not collapsed to 0).
+Deformable pipeline (milestone 6; real level-4 val cases with labels_train18_4.npy):
+  (l1) image/label alignment, residual OFF, shuffle on, 6 cases, batch 4, 4 batches (crosses
+      epoch boundaries), intensity aug OFF: every DALI image is matched to its source case
+      (min over cases of max |img - npy|, must be <= 1e-6) and its label map must EQUAL that
+      case's label file. INFO: mask Dice(labels > 0, image > 0) of the DALI samples equals that
+      of the numpy pairs and is lower for deliberately mismatched pairs.
+  (l2) residual ON, intensity aug OFF: from the emitted T_dali, TF transform_image(npy image,
+      T^-1) == DALI image (max |diff| < tol-direct) and transform_image(npy labels, T^-1,
+      'nearest') agrees with the DALI labels on >= 99% of the voxels (ties at half-voxel
+      boundaries); |T - I| within the residual ranges (params.DEFAULT_DEFORM_RESIDUAL_RANGES).
 Select checks with --checks (e.g. h,i,j,k). All temporary files go to a fresh folder under
 --scratch (never /tmp), removed at the end.
 """
@@ -805,13 +815,99 @@ def check_k(files, tmp, args):
               info["affine"]["max_abs_log_scale"], info["affine"]["max_abs_shear"]), **info)
 
 
+# ---------------------------------------------------------------------------- (l) deform pipeline
+def mask_dice(a, b):
+    a, b = np.asarray(a, bool), np.asarray(b, bool)
+    s = a.sum() + b.sum()
+    return float(2.0 * np.logical_and(a, b).sum() / s) if s else 1.0
+
+
+def check_l(args):
+    """DeformPipeline: image/label alignment (l1, residual off) and the residual re-warp (l2)."""
+    from runtime import fixed_data as fd
+    n_cases, batch, n_batches = 6, 4, 4
+    images, labels, files, lfiles = fd.load_level_images_and_labels(args.data, LEVEL, "val", n=n_cases,
+                                                                    seed=args.seed)
+    off = P.IntensityAugConfig.off()
+    # (l1) residual off, shuffled readers, several epochs.
+    pipe = dl.DeformPipeline(LEVEL, files, lfiles, batch, seed=args.seed + 61, file_root=args.data,
+                             shuffle=True, residual_affine=False, intensity_aug=off,
+                             num_threads=args.num_threads)
+    pipe.build()
+    outs = [run_next(pipe) for _ in range(n_batches)]
+    del pipe
+    gc.collect()
+    per, ok1 = [], True
+    for b, (imgs, labs) in enumerate(outs):
+        for s in range(imgs.shape[0]):
+            errs = [float(np.abs(imgs[s] - images[k]).max()) for k in range(n_cases)]
+            k = int(np.argmin(errs))
+            img_ok = errs[k] <= 1e-6
+            lab_ok = bool(labs[s].shape == labels[k].shape and np.array_equal(labs[s], labels[k]))
+            ok1 &= img_ok and lab_ok
+            per.append({"batch": b, "sample": s, "case": k, "image_max_abs": errs[k],
+                        "label_equal": lab_ok, "label_mismatch_voxels": int(np.sum(labs[s] != labels[k])),
+                        "dice_dali": mask_dice(labs[s] > 0, imgs[s] > 0),
+                        "dice_numpy": mask_dice(labels[k] > 0, images[k] > 0),
+                        "dice_mismatched": mask_dice(labels[(k + 1) % n_cases] > 0, images[k] > 0)})
+    order = [[p["case"] for p in per if p["batch"] == b] for b in range(n_batches)]
+    d_dali = float(np.mean([p["dice_dali"] for p in per]))
+    d_np = float(np.mean([p["dice_numpy"] for p in per]))
+    d_mis = float(np.mean([p["dice_mismatched"] for p in per]))
+    record("l1_deform_alignment", ok1,
+           "%d samples (%d batches of %d over %d cases, case order %s): image matched (max |diff| %.1e "
+           "<= 1e-6) and label EQUAL for all: %s; INFO mask Dice(labels>0, image>0) DALI %.4f, numpy "
+           "pairs %.4f, mismatched pairs %.4f"
+           % (len(per), n_batches, batch, n_cases, order, max(p["image_max_abs"] for p in per), ok1,
+              d_dali, d_np, d_mis),
+           case_order=order, mask_dice_dali=d_dali, mask_dice_numpy=d_np, mask_dice_mismatched=d_mis,
+           per_sample=per, label_files=lfiles)
+    # (l2) residual on: one pull matrix warps image (linear) and labels (nearest).
+    pipe = dl.DeformPipeline(LEVEL, files, lfiles, n_cases, seed=args.seed + 71, file_root=args.data,
+                             shuffle=False, residual_affine=True, intensity_aug=off,
+                             num_threads=args.num_threads)
+    pipe.build()
+    imgs, labs, t_d = run_next(pipe)
+    del pipe
+    gc.collect()
+    t_mm = pp.dali_to_mm(t_d, LEVEL).numpy().astype(np.float64)
+    t_inv = np.linalg.inv(t_mm).astype(np.float32)
+    render = layers.transform_image(images, t_inv, SPACING).numpy()
+    render_lab = layers.transform_image(labels.astype(np.float32), t_inv, SPACING,
+                                        interpolation="nearest").numpy()
+    render_lab = np.rint(render_lab).astype(np.int64)
+    direct = float(np.abs(render - imgs).max())
+    agree = [float(np.mean(render_lab[i] == labs[i].astype(np.int64))) for i in range(n_cases)]
+    changed = [float(np.mean(labs[i] != labels[i])) for i in range(n_cases)]
+    rng = P.DEFAULT_DEFORM_RESIDUAL_RANGES
+    rot = [rotation_angle_deg(m) for m in t_mm]
+    rot_bound = rng["rotation_deg"] + np.degrees(np.sqrt(3.0) * rng["shear"]) + 0.01
+    q = [qr_scale_shear(m[:3, :3]) for m in t_mm]
+    max_t = float(np.abs(t_mm[:, :3, 3]).max())
+    max_ls = float(max(np.abs(a).max() for a, _ in q))
+    max_sh = float(max(np.abs(b).max() for _, b in q))
+    dev = float(np.abs(t_mm[:, :3, :3] - np.eye(3)).max())      # linear part (translation: max_t)
+    in_range = (max(rot) <= rot_bound and max_t <= rng["translation_mm"] + 1e-3
+                and max_ls <= rng["log_scale"] + 1e-5 and max_sh <= rng["shear"] + 1e-5)
+    ok2 = direct < args.tol_direct and min(agree) >= 0.99 and in_range
+    record("l2_deform_residual", ok2,
+           "image DALI vs TF render max |diff| %.2e (< %g); label nearest agreement min %.5f (>= 0.99), "
+           "labels changed by the residual %.4f-%.4f; max rot %.3f deg (<= %.3f), max |t| %.3f mm (<= %g), "
+           "|log s| %.5f, |shear| %.5f, max |L - I| %.4f"
+           % (direct, args.tol_direct, min(agree), min(changed), max(changed), max(rot), rot_bound, max_t,
+              rng["translation_mm"], max_ls, max_sh, dev),
+           direct_max_abs=direct, label_agreement=agree, label_changed_fraction=changed,
+           rotation_deg=rot, max_translation_mm=max_t, max_abs_log_scale=max_ls, max_abs_shear=max_sh,
+           max_abs_linear_minus_I=dev, ranges=dict(rng), T_mm=t_mm)
+
+
 # ---------------------------------------------------------------------------- main
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--data", required=True, help="npy_v2 export root (export_manifest.csv, template/)")
     ap.add_argument("--scratch", required=True, help="writable folder for temporary files")
     ap.add_argument("--out", required=True, help="JSON summary path")
-    ap.add_argument("--checks", default="a,b,c,d,e,f,g,h,i,j,k")
+    ap.add_argument("--checks", default="a,b,c,d,e,f,g,h,i,j,k,l")
     ap.add_argument("--num-threads", type=int, default=4)
     ap.add_argument("--n-real", type=int, default=8)
     ap.add_argument("--n-throughput", type=int, default=48)
@@ -895,6 +991,9 @@ def main():
             guarded("j_targets_with_global", check_j, files, src, brain, s_mom, tmp, args)
         if "k" in checks:
             guarded("k_curriculum_magnitudes", check_k, files, tmp, args)
+        # (l): deformable pipeline (images + train18 labels, val split).
+        if "l" in checks:
+            guarded("l_deform_alignment", check_l, args)
     finally:
         if not args.keep_tmp:
             shutil.rmtree(tmp, ignore_errors=True)

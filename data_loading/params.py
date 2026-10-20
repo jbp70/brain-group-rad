@@ -38,6 +38,12 @@ LEVEL_SPACING = {4: 4.0, 2: 2.0, 1: 1.0}
 DALI_PIXEL_CENTER = 0.5
 
 TASKS = ("rigid", "affine")
+# Deformable task (milestone 6). Deliberately NOT part of TASKS: TASKS are the linear tasks
+# (LinearPostprocess, control files, curriculum, ValidationSet iterate it).
+DEFORM_TASK = "deform"
+ALL_TASKS = TASKS + (DEFORM_TASK,)
+# train18 label set: 18 foreground classes + background (preprocessing.luts TRAIN18_CLASSES).
+N_TRAIN_LABELS = 19
 
 # Design 3.2 (v3) defaults. log_scale and shear are half-widths of uniform ranges.
 DEFAULT_LINEAR_RANGES = {
@@ -84,8 +90,20 @@ def linear_ranges(task, level, rotation_deg=None, translation_mm=None, log_scale
     """
     if task not in TASKS:
         raise ValueError("task must be one of {}, got {!r}".format(TASKS, task))
+    return _resolve_ranges(task, level, DEFAULT_LINEAR_RANGES[task], rotation_deg, translation_mm,
+                           log_scale, shear)
+
+
+def deform_residual_ranges(level, rotation_deg=None, translation_mm=None, log_scale=None, shear=None):
+    """Ranges of the deformable pipeline's optional residual affine (None -> design default,
+    `DEFAULT_DEFORM_RESIDUAL_RANGES`). Same validation and fields as `linear_ranges`, with
+    ``task='deform'``."""
+    return _resolve_ranges(DEFORM_TASK, level, DEFAULT_DEFORM_RESIDUAL_RANGES, rotation_deg,
+                           translation_mm, log_scale, shear)
+
+
+def _resolve_ranges(task, level, d, rotation_deg, translation_mm, log_scale, shear):
     level = check_level(level)
-    d = DEFAULT_LINEAR_RANGES[task]
     vals = {
         "rotation_deg": d["rotation_deg"] if rotation_deg is None else float(rotation_deg),
         "translation_mm": d["translation_mm"] if translation_mm is None else float(translation_mm),

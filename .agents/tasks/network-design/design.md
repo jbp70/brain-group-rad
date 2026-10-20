@@ -1,6 +1,6 @@
 # Unified groupwise rigid / affine / deformable registration: design document
 
-Status: v3.6 (2026-10-19). Incorporates Jay's answers to the v1 and v2 open questions. Decisions that changed since v1 are marked *(v2)*, *(v3)* or *(v3.x)*. v3.4: the dense path uses LayerNorm by default (section 4.4). v3.5: opt-in augmentation curriculum and shared global transform G (section 3.2). v3.6: mixed rigid + affine task schedule with one shared optimizer, the combined best metric, affine metrics (sections 5.2, 7), the G angle sign, G warm-up and warm start (section 3.2). Remaining items are in section 12.
+Status: v3.7 (2026-10-20). Incorporates Jay's answers to the v1 and v2 open questions. Decisions that changed since v1 are marked *(v2)*, *(v3)* or *(v3.x)*. v3.4: the dense path uses LayerNorm by default (section 4.4). v3.5: opt-in augmentation curriculum and shared global transform G (section 3.2). v3.6: mixed rigid + affine task schedule with one shared optimizer, the combined best metric, affine metrics (sections 5.2, 7), the G angle sign, G warm-up and warm start (section 3.2). v3.7 (milestone 6): the deformable decoder as implemented (4.5: stage table, widths (128, 96, 64, 32, 16), pre-norm-act zero-init SVF head), the diffeomorphic conventions (4.6: voxel units, pull warps, border vs zero fill, composition order, inverse via −v, half-pixel ×2 upsampling, interior Jacobian), the deformable losses as implemented (6.2: masked soft Dice over present labels, forward-difference smoothness, fp32 one-hot), per-task best files (5.2) and measured level-4 memory (9). Remaining items are in section 12.
 
 Related documents:
 - Reference-code review: `.agents/tasks/reference-code-review/report.md` (local only)
@@ -104,7 +104,7 @@ Baselines: BrainMorph, KeyMorph, SynthMorph (affine/joint), MultiMorph, ANTs, Fr
    - μ* = barycenter{T_i⁻¹}, run to convergence (8–10 iterations).
    - A_i* = μ*⁻¹ T_i⁻¹.
    - Pair targets: T_j T_i⁻¹.
-4. **Deformable labels:** one-hot over the merged label set (3.4), fp16.
+4. **Deformable labels:** one-hot over the merged label set (3.4), float32 *(v3.7: 8.2 MB per image at 1/4, so fp16 brings nothing there; revisit at full resolution)*. `DeformPostprocess` flips images and labels with the same F (no L/R label swap, train18 is L/R-merged) and samples the pairs.
 
 ### 3.4 Training label set *(v2)*
 
@@ -184,9 +184,12 @@ Every level has identical trainable parameters, so every parameter is first trai
 
 ### 4.5 Deformable decoder (U-Net)
 
-- **One conv per stage** *(v2)*: trilinear ×2 upsample, concat the encoder skip, one block. These are group blocks in both configs.
-- **Decoder widths:** half the matching encoder widths by default (e.g. 192, 128, 96, 64, 32, 16), configurable to 1×.
-- **Parameter-free trilinear ×2 upsamples** are inserted at finer levels exactly where the encoder inserted pools, so every level has the same trainable decoder.
+- **One conv per stage** *(v2)*: trilinear ×2 upsample, concat the encoder skip, one block. These are group blocks (pre-activation norm → act → concat(group mean) → conv, 3×3×3, no residual) in **both** configs A and B.
+- **Decoder widths** *(v3.7, implemented)*: half the matching encoder widths, `ModelConfig.decoder_widths = None` → (f4, f3, f2, f1, f0) / 2 = **(128, 96, 64, 32, 16)** for stages D5 … D1 with the default encoder filters; any 5 positive widths via `--decoder-widths`. The decoder exists only with `ModelConfig.deform_decoder = True` (default False, so linear-only models and checkpoints are unchanged; `main.py --deform-decoder auto` turns it on when `deform` is in the task ratio).
+- **Parameter-free trilinear ×2 upsamples** are inserted at finer levels exactly where the encoder inserted pools, so every level has the same trainable decoder (verified: identical variable names and shapes at levels 4, 2, 1; `copy_weights_from` copies the decoder).
+- **Parameters** (default widths): D5 4.43 M, D4 1.66 M, D3 0.77 M, D2 0.22 M, D1 0.055 M, SVF head 1.3 k; decoder 7.14 M (of which 3.57 M are group-mean input channels); whole model with encoder + linear decoder 29.6 M.
+- **SVF head** *(v3.7)*: NormAct (the configured norm, then the activation) → Conv3D(3, 3×3×3, kernel and bias **zero-initialized**, float32 even under mixed precision). At initialization v = 0, so φ = id. `call` returns v_raw and the D1 features (used by the collapse diagnostic).
+- **Gradient checkpointing** (constructor flag, not part of `ModelConfig`): `--gradient-checkpointing none|integrator|decoder|both` wraps the integrator and/or the decoder in `tf.recompute_grad` (gradients verified equal to 1e-4). Recomputing the decoder in training mode applies its BN moving-statistic updates twice per step. Default none.
 
 | Stage | Skip | 1/4 level | 1/2 level | Full level |
 |---|---|---|---|---|
@@ -197,7 +200,7 @@ Every level has identical trainable parameters, so every parameter is first trai
 | D1 | stem | 40×56×48 | 80×112×96 | **↑** → 160×224×192 |
 | SVF head | — | 3-ch conv, zero-init | same | same |
 
-- Trilinear upsampling: a custom reshape-based implementation (the rigid project found TF's linear upsampling slow), unit-tested against `scipy.ndimage.zoom`.
+- Trilinear upsampling: a custom reshape-based implementation (`models.layers.upsample_trilinear2x`, layer `TrilinearUpsample2x`; no `tf.image`), with **half-pixel** semantics: coarse voxel q sits at fine coordinate 2q + 0.5, so out[2k] = 0.75 x[k] + 0.25 x[k−1], out[2k+1] = 0.75 x[k] + 0.25 x[k+1], edge-replicated. Unit-tested against `scipy.ndimage.map_coordinates(order=1, mode='nearest')` at (p − 0.5)/2 and `zoom(grid_mode=True, mode='nearest')` (not align-corners).
 - No deep supervision.
 
 ### 4.6 Velocity fields and integration
@@ -205,8 +208,23 @@ Every level has identical trainable parameters, so every parameter is first trai
 At level k, for each image i:
 1. v_i^(k) comes from the SVF head, in voxels of level k, in central space.
 2. **Centering:** v_i^(k) ← v_i^(k) − mean_j v_j^(k), at every voxel.
-3. **Integration:** scaling and squaring with T = 7 steps (configurable), at level k's resolution.
-4. **Inverse:** exp(−v_i^(k)).
+3. **Integration:** scaling and squaring with T = 7 steps (configurable, `--integration-steps`), at level k's resolution: u ← v / 2^T, then T times u ← compose(u, u). T = 0 returns v.
+4. **Inverse:** exp(−v_i^(k)), never a numerical inversion.
+
+Conventions as implemented *(v3.7, `models/diffeo.py`)*:
+
+| Item | Convention |
+|---|---|
+| Units | v, u in **voxel-index units of their level** (mm = voxels × level spacing). Fields act on voxel indices, so the grid center does not enter them. |
+| Pull warp | warp(vol, u)(x) = vol(x + u(x)). φ(x) = x + u(x) maps central-space points to image-i points; the warped image is I_i ∘ φ_i. |
+| Composition | compose(u_a, u_b) = displacement of φ_a ∘ φ_b (φ_b first) = u_b + warp_field(u_a, u_b). |
+| Boundaries | Fields are resampled with **border** clamping (edge replication; a constant field stays exactly constant). Images and one-hot labels use **zero** fill (the `transform_image` soft fall-off over the last voxel). Labels in nearest mode keep their integer dtype. |
+| Pairwise | image j → image i: φ_i ∘ φ_j⁻¹, displacement compose(u_i, u_inv_j); one label interpolation per pair. |
+| Cascade (milestone 8) | φ^(k) = up(φ^(k−1)) ∘ exp(v^(k)) → compose(up(u_prev), u_k); inverse compose(u_inv_k, up(u_inv_prev)); up = 2 × trilinear ×2 (half-pixel, so fine p ↔ coarse (p − 0.5)/2 maps to p + 2u). |
+| Jacobian | det(I + ∇u) by central differences on **interior voxels only** ([N, X−2, Y−2, Z−2]); folding fraction = mean(J ≤ 0). |
+| Dtypes | Grids, fields, integration and losses in float32 (float64 kept if given); float16 inputs are cast to float32; never float16 grids. |
+
+Measured (level-4 grid 40×56×48, smooth random v with max 2 voxels, T = 7, 3-voxel interior margin): |exp(v) ∘ exp(−v) − id| max 0.010 / mean 0.0019 voxels, both orders; a constant v gives the exact translation (1e-6).
 
 ### 4.7 Multi-level composition
 
@@ -257,6 +275,8 @@ N is finalized from measured memory. With N = 2–4 at full resolution, BN stati
 - **One shared optimizer** *(v2)*: SGDW with `global_clipnorm` from the rigid project, with its LR warmup/cycle schedule and file-backed range curriculum. Log per-task losses to catch interference. *(Milestone 4: the default is Adam 3e-4, since SGDW collapsed on real data.)*
 - **Mixed linear tasks** *(v3.6, milestone 5)*: `--task-ratio rigid:1,affine:1`. The task of step s is a stateless seeded draw from (seed, s), so a resumed run gets the same sequence. Each task has its own `tf.function`, traced once over the whole run (flips, curriculum and G on or off). The single optimizer is built on **all** trainable variables before the first step, so the affine-only scale/shear head has its Adam slots even when the run starts with rigid steps; rigid steps drop that head's None gradients at trace time, and the first affine step creates no variable and retraces nothing.
 - **Best checkpoint with several tasks** *(v3.6)*: `--best-metric` defaults to `mean_pair_rms_mm` (logged as `val/mean_pair_rms_mm`), the mean of `val_<task>/pair_rms_mm` over the trained tasks (the G = I sets only), when more than one task is trained, and to `val_<task>/pair_rms_mm` for a single task. Any explicit key still works.
+- **Best files with the deformable task** *(v3.7)*: `val/mean_pair_rms_mm` averages the **linear** tasks only. Deform only: `ckpt/best` on `val_deform/pair_dice_loss` (= 1 − mean pairwise hard Dice, lower is better). Deform + linear: `ckpt/best` keeps the linear criterion (single linear task's pair RMS, or the mean over rigid and affine) and a second file `ckpt/best_deform` tracks `val_deform/pair_dice_loss` (its own `best_metric_deform` variable, present only in such runs, so older checkpoints restore unchanged).
+- **Deform step** *(v3.7)*: `--task-ratio` accepts `deform` (e.g. `rigid:1,affine:1,deform:2`); one more `tf.function` traced once. Deform steps give None gradients to the whole linear decoder, linear steps to the whole deform decoder (filtered at trace time); the one optimizer covers all variables. Curriculum, G and control files stay linear-only. `--deform-group-size` (default = `--group-size`) sets the deform group size.
 - Mixed precision (`mixed_float16`) and XLA are optional flags. A custom training loop replaces Keras `fit`.
 
 ---
@@ -286,6 +306,13 @@ Labels: one-hot over the merged 19-channel set (3.4), warped with Ψ_i using lin
   - Options: first-order ‖∇u‖² (**default**) or second-order (bending energy).
   - Weight λ_smooth = 0.5 to start, tuned later.
 - **Total:** L_def = L_tmpl + λ_pdice · L_pdice + λ_smooth · L_smooth. Defaults *(v3)*: λ_pdice = 1, p_pdice = 0.1, λ_smooth = 0.5.
+
+As implemented *(v3.7, `runtime/losses.py`)*:
+- **Soft Dice** per image and channel (2Σab + ε) / (Σa + Σb + ε), ε = 1e-5, background excluded, then a **masked mean over present foreground channels** (present: Σa + Σb > 1e-3). Channels absent in both maps are excluded, so a group that contains only some labels is not inflated by empty channels. The same rule applies to the hard Dice metrics (NaN for absent labels, nanmean).
+- **One-hot** float32, 19 channels (train18 + background), warped linearly with zero fill (`diffeo.warp`).
+- **Template** P̄ = mean_i warped_i (no stop-gradient). **Pairs:** p_pdice of the ordered pairs (at least one), `warp(onehot_i, compose(u_i, u_inv_j))` vs onehot_j.
+- **Smoothness** on u (not v): order 1 (default) = forward differences, (1/3) Σ_axes mean((u[x + e_a] − u[x])²) over images, voxels and components (VoxelMorph Grad-l2); order 2 (`--smooth-order 2`) = bending energy (central second differences with 2× cross terms, interior crop, mean).
+- The objective is not rescaled (no mm² factor); mixed precision uses the same loss scaling as the linear steps.
 - **Deformable-batch inputs** *(v3, decided)*: LUMIR's existing affine alignment. In deformable steps A_i = I and Ψ_i = φ_i. Running the linear heads first would add compute for no clear gain during training.
 
 ---
@@ -322,6 +349,18 @@ Validation uses LUMIR val groups of fixed composition. Later: OASIS-2 (longitudi
 | Scaling and squaring, full res | ~0.5–1 GB per image (forward plus inverse) |
 | One-hot labels (19 ch) | ~260 MB per image fp16, plus warped copies |
 | **Full-res deformable step** | Plausibly 10–20 GB at N = 2–4. Gradient checkpointing (`tf.recompute_grad`) is the fallback |
+
+**Measured, level 4 deformable training step** *(v3.7, milestone 6)*: local GTX 1080 under WSL, TF logical-device limit 6000 MB, `TF_CUDNN_USE_AUTOTUNE=0`, workspace limit 512 MB, fp32, Adam, default losses (p_pdice 0.1 → 1 pair for N ≤ 4, 6 for N = 8), synthetic group; TF allocator peak of the measured steps (`tests/gpu/measure_deform_memory.py`, `.agents/tasks/milestone-6/memory.json`).
+
+| Widths | Checkpointing | N = 2 | N = 3 | N = 4 | N = 8 | Step (GTX 1080) |
+|---|---|---|---|---|---|---|
+| narrow (4.0 M params) | none | 2.09 GB | 3.01 GB | 4.01 GB | OOM (also N = 6) | 0.71 / 0.95 / 1.08 s |
+| narrow | both | | | 2.51 GB | 4.78 GB (N = 16 OOM) | 1.38 / 2.32 s |
+| default (29.6 M params) | none | 4.44 GB | OOM | OOM | | 1.92 s |
+| default | both | 3.91 GB | | OOM | | 2.29 s |
+
+- Slopes: narrow ≈ 0.96 GB per image without checkpointing, ≈ 0.57 GB with `both` (−40 %, +30–115 % step time). Default widths ≈ 2.0 GB per image (one point, minus the 0.41 GB of weights and Adam slots); `both` saves only ≈ 12 % there because the encoder is not recomputed.
+- **Estimate (not measured):** default widths at N = 32 need ≈ 32 × 2.0 GB + ~0.1 GB per sampled pair × 99 pairs ≈ 70+ GB, which does not fit 48 GB (RTX 8000) or 40 GB (A100). N = 16 (24 pairs) ≈ 35 GB is expected to fit 48 GB. Use `--deform-group-size 12-16` at level 4 (linear tasks can keep N = 32) or measure AMP / checkpointing on the cluster first (`measure_deform_memory.py` runs there unchanged, with memory growth).
 
 ---
 
@@ -361,7 +400,7 @@ Runtime environment: `tf10_nv.sif` (Python 3.8, TF 2.10, DALI 1.18). Available: 
 | 3 | Group block, encoder (with stem), linear decoder, rigid head, centering (configs A and B) | Permutation equivariance (1e-5); non-None gradient on every kernel |
 | 4 | Linear losses, custom loop, logging, checkpoint (rigid, 1/4) | Overfit one fixed group to < 1 mm; short real run (debug job approved by Jay) |
 | 5 | Affine pipeline and scale/shear branch; task schedule | No retracing across tasks; affine overfit; rigid metrics not degraded |
-| 6 | Deformable pipeline, U-Net decoder, `diffeo.py`, deformable losses (1/4) | Constant v gives an exact translation; exp(v) ∘ exp(−v) ≈ id; mean v = 0; overfit one group (Dice ↑, folding < 0.1%) |
+| 6 | Deformable pipeline, U-Net decoder, `diffeo.py`, deformable losses (1/4) | Constant v gives an exact translation; exp(v) ∘ exp(−v) ≈ id; mean v = 0; overfit one group (Dice ↑, folding < 0.1%). *(v3.7: implemented and verified locally: round trip max 0.010 voxel; synthetic overfit (narrow, N = 4) eval template / pair hard Dice 0.864 / 0.774 → 0.971 / 0.950 at step 306, 0 % folding; one trace per task with rigid:1,affine:1,deform:2. DALI `DeformPipeline` (check l) and real-data runs (`dryrun_deform`) are pending on glacier. Report: `.agents/tasks/milestone-6/report.md`.)* |
 | 7 | Three-task schedule at 1/4 | All per-task losses decrease; no collapse |
 | 8 | 1/2 level: weight copy, BN recalibration, frozen cascade, skip | Linear composition test; unrolled inverse over 2 levels; 1/2 error < 1/4 error |
 | 9 | Full level, mixed precision, checkpointing, memory profiling | Peak memory per N logged; full-res deformable step fits on 48 GB |

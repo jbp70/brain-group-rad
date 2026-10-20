@@ -4,8 +4,12 @@ per task with flips / curriculum / G on or off, Adam slots for the affine head b
 affine step, affine validation errors, the combined best metric and affine PNGs),
 rebuild_steps after a BN freeze, resume, validation (eval mode and the non-updating training-mode
 diagnostics), a mixed-precision smoke test and a forced float16 overflow (loss-scale skip).
+Milestone 6: the deform step (None-gradient routing between the linear and deform decoders, NaN
+guard, collapse diagnostics), three tasks with one optimizer (one trace per task), deform
+validation (identity baseline, PNG) and the deform best checkpoints.
 
-Narrow model, level 4, N = 4, synthetic phantom groups (tests.runtime_helpers).
+Narrow model, level 4, N = 4, synthetic phantom groups (tests.runtime_helpers) and the synthetic
+deform group (`fd.synthetic_deform_group`).
 """
 import json
 import os
@@ -27,7 +31,8 @@ from runtime import fixed_data as fd
 from runtime import metrics as M
 from runtime import optimizers as O
 from runtime.logging import RunLogger, make_run_dir
-from runtime.run import DIAG_KEYS, TaskSchedule, Trainer, TrainConfig, collapse_diagnostics
+from runtime.run import (DEFORM_BEST_METRIC, DEFORM_DIAG_KEYS, DEFORM_LOSS_KEYS, DIAG_KEYS, TaskSchedule,
+                         Trainer, TrainConfig, collapse_diagnostics)
 from runtime.schedulers import ScheduleConfig
 
 N = 4
@@ -73,8 +78,11 @@ class TestTaskSchedule(unittest.TestCase):
         self.assertEqual([rev[i] for i in range(500)], draws[:500])      # independent of call order
         self.assertNotEqual(draws[:200], [TaskSchedule({"rigid": 3, "affine": 1}, seed=6).draw(i) for i in range(200)])
         self.assertEqual({TaskSchedule({"rigid": 1}).draw(i) for i in range(50)}, {"rigid"})
-        with self.assertRaises(NotImplementedError):
-            TaskSchedule({"rigid": 1, "deform": 2})
+        # Milestone 6: deform is a schedulable task (was NotImplementedError before).
+        s3 = TaskSchedule({"rigid": 1, "deform": 2}, seed=1)
+        self.assertEqual(s3.tasks, ["rigid", "deform"])
+        d3 = [s3.draw(i) for i in range(6000)]
+        self.assertAlmostEqual(d3.count("deform") / 6000.0, 2.0 / 3.0, delta=0.03)
 
 
 class TestTrainStep(TrainerCase):
@@ -612,6 +620,234 @@ class TestControls(TrainerCase):
             self.assertIn(name + "/center_rms_mm", val)
         self.assertAlmostEqual(val["val_rigid/center_rms_mm"], val["val_rigid_g/center_rms_mm"], places=5)
         self.assertEqual(sorted(os.listdir(png)), ["rigid_g_step0000000.png", "rigid_step0000000.png"])
+
+
+# ============================================================================ milestone 6: deform
+def _vals(variables):
+    return [v.numpy().copy() for v in variables]
+
+
+def _all_equal(before, variables):
+    return all(np.array_equal(a, v.numpy()) for a, v in zip(before, variables))
+
+
+def _seed_with_all_tasks(ratio, n_steps):
+    """A schedule seed whose first n_steps draws contain every task of `ratio`."""
+    for seed in range(1000):
+        s = TaskSchedule(ratio, seed)
+        if {s.draw(i) for i in range(n_steps)} == set(ratio):
+            return seed
+    raise AssertionError("no seed found")
+
+
+class DeformCase(TrainerCase):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.dgroup = fd.synthetic_deform_group(4, N, seed=0)
+
+    def make_deform(self, cfg=None, sources=None, val_sets=None, logger=None, amp=False, **model_kw):
+        cfg = cfg or config(task_ratio={"deform": 1.0})
+        model = GroupRegLevelModel(4, narrow_config(dropout=0.0, seed=1, deform_decoder=True,
+                                                    **model_kw)).build_model(N)
+        if sources is None:
+            sources = {t: fd.FixedGroupSource(g["batch"]) for t, g in self.groups.items()}
+            sources["deform"] = fd.FixedGroupSource(self.dgroup["batch"])
+            sources = {t: s for t, s in sources.items() if t in cfg.task_ratio}
+        return Trainer(model, O.make_optimizer("adam", lr=1e-3, amp=amp), sources,
+                       self.groups["rigid"]["S"], cfg, logger=logger, val_sets=val_sets)
+
+
+class TestDeformStep(DeformCase):
+    def test_none_gradients_filtered(self):
+        tr = self.make_deform(config(task_ratio={"rigid": 1.0, "deform": 1.0}))
+        model = tr.model
+        lin, dfm = model.linear_decoder, model.deform_decoder
+        n_tv = len(model.trainable_variables)
+        lin_before, dfm_before = _vals(lin.variables), _vals(dfm.variables)
+        enc_before = model.encoder.l3.conv.kernel.numpy().copy()
+        head_before = dfm.svf_head.kernel.numpy().copy()
+        # Two steps: at init the SVF head kernel is zero, so step 1 only moves the head.
+        for _ in range(2):
+            res = tr.train_step("deform", self.dgroup["batch"])
+            self.assertTrue(res["finite"])
+            self.assertEqual(res["n_vars_updated"], n_tv - len(lin.trainable_variables))
+            for k in DEFORM_LOSS_KEYS + DEFORM_DIAG_KEYS:
+                self.assertTrue(np.isfinite(res[k]), k)
+        self.assertTrue(_all_equal(lin_before, lin.variables))        # whole linear decoder untouched
+        self.assertFalse(np.array_equal(head_before, dfm.svf_head.kernel.numpy()))
+        self.assertFalse(np.array_equal(enc_before, model.encoder.l3.conv.kernel.numpy()))
+        self.assertGreater(res["diag_u_max_vox"], 0.0)          # step 2 sees the updated head
+        self.assertGreaterEqual(res["diag_fold_frac"], 0.0)
+        self.assertLessEqual(res["diag_fold_frac"], 1.0)
+        dfm_after = _vals(dfm.variables)
+        self.assertFalse(_all_equal(dfm_before, dfm.variables))
+        res = tr.train_step("rigid", self.groups["rigid"]["batch"])
+        self.assertTrue(res["finite"])
+        self.assertEqual(res["n_vars_updated"], n_tv - 2 - len(dfm.trainable_variables))
+        self.assertTrue(_all_equal(dfm_after, dfm.variables))         # deform decoder untouched (BN too)
+        self.assertEqual(tr.trace_counts, {"rigid": 1, "deform": 1})
+
+    def test_nan_guard_skips_update(self):
+        imgs = self.dgroup["images"].copy()
+        imgs[0, 3, 4, 5, 0] = np.nan
+        nan_batch = fd.to_deform_batch(imgs, self.dgroup["labels"], level=4)
+        tr = self.make_deform()
+        self.assertTrue(tr.train_step("deform", self.dgroup["batch"])["finite"])
+        model, opt = tr.model, tr.optimizer
+        before_t, before_s, before_o = (_vals(model.trainable_variables), _vals(model.non_trainable_variables),
+                                        _vals(opt.variables()))
+        it = int(opt.iterations.numpy())
+        res = tr.train_step("deform", nan_batch)
+        self.assertFalse(res["finite"])
+        self.assertEqual(int(opt.iterations.numpy()), it)
+        self.assertTrue(_all_equal(before_t, model.trainable_variables))
+        self.assertTrue(_all_equal(before_s, model.non_trainable_variables))   # BN statistics restored
+        self.assertTrue(_all_equal(before_o, opt.variables()))
+        self.assertEqual(int(tr.step.numpy()), 2)
+        self.assertTrue(tr.train_step("deform", self.dgroup["batch"])["finite"])
+        self.assertEqual(tr.trace_counts, {"deform": 1})
+
+    def test_residual_affine_step(self):
+        # --deform-residual-affine: the DALI tuple carries T_dali [N, 3, 4] (FEAT-002 format);
+        # the deform step takes three inputs and split_batch keeps them, dropping later extras.
+        T = np.tile(np.eye(4), (N, 1, 1))
+        T[:, 0, 3] = 1.0
+        batch = fd.to_deform_batch(self.dgroup["images"], self.dgroup["labels"], T, level=4)
+        self.assertEqual(len(batch), 3)
+        tr = self.make_deform(config(task_ratio={"deform": 1.0}, deform_residual_affine=True),
+                              sources={"deform": fd.FixedGroupSource(batch)})
+        self.assertEqual(len(tr.split_batch("deform", tuple(batch) + ("extra",))[0]), 3)
+        tr.fit(2)
+        self.assertTrue(all(h["finite"] for h in tr.history))
+        self.assertEqual(tr.trace_counts, {"deform": 1})
+
+    def test_collapse_diag_deform(self):
+        rep = lambda a: np.repeat(a[:1], N, axis=0)  # noqa: E731
+        src = {"deform": fd.FixedGroupSource(fd.to_deform_batch(rep(self.dgroup["images"]),
+                                                                rep(self.dgroup["labels"]), level=4))}
+        paths = make_run_dir(self.tmp, "dcollapse")
+        logger = RunLogger(paths, backend="jsonl", tensorboard=False, quiet=True)
+        tr = self.make_deform(config(task_ratio={"deform": 1.0}, collapse_patience=3), sources=src, logger=logger)
+        tr.fit(4)
+        logger.close()
+        for h in tr.history:
+            self.assertTrue(h["finite"])
+            self.assertLess(h["diag_feat_rel_spread"], 1e-5)
+        self.assertEqual((tr.collapse_streak, tr.collapse_warnings), (4, 1))
+        with open(logger.metrics_path) as f:
+            recs = [json.loads(line)["data"] for line in f]
+        self.assertEqual([r["train/collapse_suspect"] for r in recs if "train/collapse_suspect" in r], [1, 2, 3, 4])
+        for k in DEFORM_LOSS_KEYS + DEFORM_DIAG_KEYS:
+            self.assertIn("train_deform/" + k, recs[-1])
+        self.assertNotIn("train_deform/center", recs[-1])
+        # A healthy (distinct) group has a clearly non-zero spread.
+        tr2 = self.make_deform()
+        self.assertGreater(tr2.train_step("deform", self.dgroup["batch"])["diag_feat_rel_spread"], 1e-3)
+
+
+class TestThreeTasks(DeformCase):
+    def test_trace_once_mixed(self):
+        ratio = {"rigid": 1.0, "affine": 1.0, "deform": 2.0}
+        n_steps = 16
+        seed = _seed_with_all_tasks(ratio, n_steps)
+        tr = self.make_deform(config(task_ratio=ratio, seed=seed, flip_prob=0.5))
+        tvars = tr.model.trainable_variables
+        n_opt = len(tr.optimizer.variables())
+        self.assertEqual(n_opt, 2 * len(tvars))         # slots for every variable before step 1
+        tr.fit(n_steps)
+        tasks = [h["task"] for h in tr.history]
+        self.assertEqual(tasks, [tr.schedule.draw(s) for s in range(n_steps)])
+        self.assertEqual(set(tasks), set(ratio))
+        self.assertEqual(tr.trace_counts, {"rigid": 1, "affine": 1, "deform": 1})
+        self.assertTrue(all(h["finite"] for h in tr.history))
+        self.assertEqual(len(tr.optimizer.variables()), n_opt)  # no slot created later
+        self.assertEqual(int(tr.optimizer.iterations.numpy()), n_steps)
+        n_lin = len(tr.model.linear_decoder.trainable_variables)
+        n_dfm = len(tr.model.deform_decoder.trainable_variables)
+        want = {"rigid": len(tvars) - 2 - n_dfm, "affine": len(tvars) - n_dfm, "deform": len(tvars) - n_lin}
+        for h in tr.history:
+            self.assertEqual(h["n_vars_updated"], want[h["task"]], h["task"])
+        # Flips are on: the deform postprocess draws a flip state from its own generator.
+        self.assertEqual(sorted(tr.postprocess), ["affine", "deform", "rigid"])
+
+
+class TestDeformValidation(DeformCase):
+    def test_deform_validation_and_pngs(self):
+        vs = fd.DeformValidationSet.from_group(self.dgroup["images"], self.dgroup["labels"], 4)
+        png = os.path.join(self.tmp, "png")
+        tr = self.make_deform(config(task_ratio={"deform": 1.0}, val_png_dir=png), val_sets={"deform": vs})
+        m = tr.validate()
+        for k in ("template_dice", "pair_dice", "neg_jac_pct", "inv_consistency_mm", "inv_consistency_max_mm",
+                  "centrality_mm", "raw_centrality_mm", "pair_dice_loss", "pair_dice_identity",
+                  "template_dice_identity", "groups", "time_s"):
+            self.assertTrue(np.isfinite(m["val_deform/" + k]), k)
+        for k in ("template_dice", "pair_dice"):
+            self.assertTrue(np.isfinite(m["val_deform_trainmode/" + k]), k)
+        self.assertNotIn("val/mean_pair_rms_mm", m)
+        # Identity model at init (zero SVF head): metrics equal the identity baseline.
+        self.assertAlmostEqual(m["val_deform/pair_dice"], m["val_deform/pair_dice_identity"], places=10)
+        self.assertAlmostEqual(m["val_deform/template_dice"], m["val_deform/template_dice_identity"], places=10)
+        self.assertAlmostEqual(m["val_deform/pair_dice_loss"], 1.0 - m["val_deform/pair_dice"], places=12)
+        self.assertGreater(m["val_deform/pair_dice"], 0.4)
+        self.assertLess(m["val_deform/pair_dice"], 0.9)
+        self.assertEqual(m["val_deform/neg_jac_pct"], 0.0)
+        self.assertEqual(m["val_deform/inv_consistency_mm"], 0.0)
+        self.assertEqual(m["val_deform/centrality_mm"], 0.0)
+        from runtime import val_png as V
+        path = os.path.join(png, "deform_step0000000.png")
+        self.assertEqual(os.listdir(png), ["deform_step0000000.png"])
+        from tests.test_val_png import png_size
+        self.assertEqual(png_size(path), V.figure_size_px(4, N + 1))
+        tr.fit(2)
+        m2 = tr.validate()
+        self.assertGreater(m2["val_deform/inv_consistency_mm"], 0.0)     # u != 0 after training steps
+        self.assertTrue(np.isfinite(m2["val_deform/pair_dice"]))
+        self.assertEqual(m2["val_deform/pair_dice_identity"], m["val_deform/pair_dice_identity"])
+        self.assertEqual(tr.val_trace_counts, {("deform", N, False): 1, ("deform", N, True): 1})
+        # Pair cap: N (N - 1) = 12 > 5 -> a fixed seeded subset of 5 pairs.
+        tr.cfg.val_deform_max_pairs = 5
+        i, j = tr._val_pairs(N, seed=0)
+        self.assertEqual(len(i), 5)
+        self.assertTrue(np.all(i != j))
+        np.testing.assert_array_equal(i, tr._val_pairs(N, seed=0)[0])
+        tr.cfg.val_deform_max_pairs = 64
+        self.assertEqual(len(tr._val_pairs(N, seed=0)[0]), 12)
+
+    def test_best_metrics_with_deform(self):
+        vs = fd.DeformValidationSet.from_group(self.dgroup["images"], self.dgroup["labels"], 4)
+        # deform-only: ckpt/best on val_deform/pair_dice_loss, no extra best file.
+        paths = make_run_dir(self.tmp, "donly")
+        tr = self.make_deform(config(task_ratio={"deform": 1.0}, val_every=2), val_sets={"deform": vs})
+        self.assertEqual(tr.best_metric, DEFORM_BEST_METRIC)
+        self.assertEqual(tr.extra_best, {})
+        tr.checkpoint = C.RunCheckpoint(paths["ckpt_last"], paths["ckpt_best"], tr.model, tr.optimizer, tr.step,
+                                        extra=tr.checkpoint_variables())
+        tr.fit(2)
+        self.assertTrue(tr.checkpoint.latest_best.endswith("best-2"))
+        self.assertAlmostEqual(float(tr.checkpoint.best_metric.numpy()),
+                               tr.val_history[-1][DEFORM_BEST_METRIC], places=10)
+        free_memory()
+        # rigid + deform: ckpt/best keeps the linear rule, ckpt/best_deform tracks the deform key.
+        g = self.groups["rigid"]
+        val_sets = {"rigid": fd.ValidationSet.from_group(g["images"], g["T"], g["T_target"], "rigid", 4),
+                    "deform": vs}
+        paths = make_run_dir(self.tmp, "mixed")
+        tr = self.make_deform(config(task_ratio={"rigid": 1.0, "deform": 1.0}, val_every=2), val_sets=val_sets)
+        self.assertEqual(tr.best_metric, "val_rigid/pair_rms_mm")
+        self.assertEqual(tr.extra_best, {"deform": DEFORM_BEST_METRIC})
+        best_deform = os.path.join(paths["root"], "ckpt", "best_deform")
+        tr.checkpoint = C.RunCheckpoint(paths["ckpt_last"], paths["ckpt_best"], tr.model, tr.optimizer, tr.step,
+                                        extra=tr.checkpoint_variables(), extra_best={"deform": best_deform})
+        tr.fit(2)
+        v = tr.val_history[-1]
+        self.assertIn("val/mean_pair_rms_mm", v)                 # over the linear task only
+        self.assertEqual(v["val/mean_pair_rms_mm"], v["val_rigid/pair_rms_mm"])
+        self.assertTrue(tr.checkpoint.latest_best.endswith("best-2"))
+        self.assertTrue(tr.checkpoint.latest_best_named("deform").endswith("best_deform-2"))
+        self.assertAlmostEqual(float(tr.checkpoint.best_metric.numpy()), v["val_rigid/pair_rms_mm"], places=6)
+        self.assertAlmostEqual(float(tr.checkpoint.extra_best_metric["deform"].numpy()), v[DEFORM_BEST_METRIC],
+                               places=10)
 
 
 if __name__ == "__main__":

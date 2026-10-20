@@ -1,0 +1,517 @@
+=== [1/2] py3.8 syntax check + numpy references (bgr_preproc38) ===
+Python 3.8.20
+numpy 1.21.1 | scipy 1.4.1
+py_compile OK
+ast feature_version=(3, 8) OK (51 files)
+np_reference self-check OK
+data_loading imports without TF/DALI; DALI_AVAILABLE = False
+runtime.args / runtime.schedulers import without TF
+main.py --help OK (no TF)
+bash -n tests/gpu/run_verify_glacier.sh OK
+bash -n tests/gpu/run_overfit_glacier.sh OK
+bash -n slurm/train_debug.sh OK
+=== [2/2] unittest suite (tf_gpu) ===
+python 3.9.13 | tf 2.10.0 | numpy 1.24.3 | scipy 1.13.0
+test_deform_nonfinite_val_and_missing_png_fail (tests.test_check_mixed_run.TestDeform) ... ok
+test_deform_only_pass (tests.test_check_mixed_run.TestDeform) ... ok
+test_mixed3_missing_best_deform_fails (tests.test_check_mixed_run.TestDeform) ... ok
+test_mixed3_pass (tests.test_check_mixed_run.TestDeform) ... ok
+test_retrace_fails (tests.test_check_mixed_run.TestDeform) ... ok
+test_rigid_deform_skips_mean (tests.test_check_mixed_run.TestDeform) ... ok
+test_main_exit_code (tests.test_check_mixed_run.TestLinear) ... ok
+test_missing_affine_metric_fails (tests.test_check_mixed_run.TestLinear) ... ok
+test_rigid_affine_pass (tests.test_check_mixed_run.TestLinear) ... ok
+test_rigid_affine_wrong_mean_fails (tests.test_check_mixed_run.TestLinear) ... ok
+test_layout_round_trip (tests.test_curriculum.TestControlFile) ... ok
+test_task_control (tests.test_curriculum.TestControlFile) ... ok
+test_writer_atomic_version_and_noop (tests.test_curriculum.TestControlFile) ... ok
+test_defaults_off (tests.test_curriculum.TestCurriculumArgs) ... ok
+test_task_controls (tests.test_curriculum.TestCurriculumArgs) ... ok
+test_validation (tests.test_curriculum.TestCurriculumArgs) ... ok
+test_initial_files (tests.test_curriculum.TestDataModuleControl) ... ok
+test_off_by_default (tests.test_curriculum.TestDataModuleControl) ... ok
+test_pipeline_with_control_file (tests.test_curriculum.TestDataModuleControl) ... skipped 'needs nvidia.dali and a GPU'
+test_signature_and_reader_kwargs (tests.test_curriculum.TestDataModuleControl) ... ok
+test_axis_and_ranges (tests.test_curriculum.TestGlobalTransformSampler) ... ok
+test_determinism_and_resample_interval (tests.test_curriculum.TestGlobalTransformSampler) ... ok
+test_global_matrix (tests.test_curriculum.TestGlobalTransformSampler) ... ok
+test_warmup_start_and_ramp (tests.test_curriculum.TestGlobalTransformSampler) ... ok
+test_endpoints_and_midpoint (tests.test_curriculum.TestLinearCurriculum) ... ok
+test_validation (tests.test_curriculum.TestLinearCurriculum) ... ok
+test_composition_and_conversion (tests.test_curriculum.TestNumpyMirrorWithG) ... ok
+test_g_angle_sign (tests.test_curriculum.TestNumpyMirrorWithG) ... ok
+test_targets_from_g_rt_and_flips (tests.test_curriculum.TestPostprocessWithG) ... ok
+test_deterministic_same_groups_and_shifted_barycenter (tests.test_curriculum.TestValidationWithG) ... ok
+test_deform_pipeline_aligned_on_synthetic_files (tests.test_data_loading.TestDaliGuard) ... skipped 'needs nvidia.dali and a GPU'
+test_pipeline_needs_dali (tests.test_data_loading.TestDaliGuard) ... ok
+test_pipeline_runs_on_synthetic_files (tests.test_data_loading.TestDaliGuard) ... skipped 'needs nvidia.dali and a GPU'
+test_dali_center (tests.test_data_loading.TestDaliMatrixFormulas) ... ok
+test_mirror_composition_and_conversion (tests.test_data_loading.TestDaliMatrixFormulas) ... ok
+test_rotation_about_center_has_no_mm_translation (tests.test_data_loading.TestDaliMatrixFormulas) ... ok
+test_scale_shear_rows (tests.test_data_loading.TestDaliMatrixFormulas) ... ok
+test_constants (tests.test_data_loading.TestDeformData) ... ok
+test_deform_residual_ranges (tests.test_data_loading.TestDeformData) ... ok
+test_paired_permutation_keeps_pairs (tests.test_data_loading.TestDeformData) ... ok
+test_paired_reader_kwargs (tests.test_data_loading.TestDeformData) ... ok
+test_pipeline_input_validation_without_dali (tests.test_data_loading.TestDeformData) ... ok
+test_signature_and_output_count (tests.test_data_loading.TestDeformData) ... ok
+test_auto_initial_fill (tests.test_data_loading.TestLevelsAndRanges) ... ok
+test_default_ranges (tests.test_data_loading.TestLevelsAndRanges) ... ok
+test_intensity_config (tests.test_data_loading.TestLevelsAndRanges) ... ok
+test_level_constants (tests.test_data_loading.TestLevelsAndRanges) ... ok
+test_translation_mm_to_voxels_per_level (tests.test_data_loading.TestLevelsAndRanges) ... ok
+test_data_module_without_building_pipelines (tests.test_data_loading.TestManifest) ... ok
+test_file_lists_per_split_and_level (tests.test_data_loading.TestManifest) ... ok
+test_label_files_aligned_and_deform_batch_size (tests.test_data_loading.TestManifest) ... ok
+test_memory_growth_helper (tests.test_data_loading.TestManifest) ... ok
+test_missing_label_and_column (tests.test_data_loading.TestManifest) ... ok
+test_missing_labels_raise_only_for_deform (tests.test_data_loading.TestManifest) ... ok
+test_output_signature (tests.test_data_loading.TestManifest) ... ok
+test_reader_kwargs_shuffle_modes (tests.test_data_loading.TestManifest) ... ok
+test_build_deterministic_and_seeded (tests.test_deform_data.TestDeformValidationSet) ... ok
+test_from_group (tests.test_deform_data.TestDeformValidationSet) ... ok
+test_labels_present_and_inside_ellipsoid (tests.test_deform_data.TestLabelPhantom) ... ok
+test_random_svf (tests.test_deform_data.TestLabelPhantom) ... ok
+test_aligned_images_and_labels (tests.test_deform_data.TestLoaderWithLabels) ... ok
+test_without_labels_column (tests.test_deform_data.TestLoaderWithLabels) ... ok
+test_deterministic_and_residual_batch (tests.test_deform_data.TestSyntheticDeformGroup) ... ok
+test_images_and_labels_aligned (tests.test_deform_data.TestSyntheticDeformGroup) ... ok
+test_initial_pairwise_dice_non_trivial (tests.test_deform_data.TestSyntheticDeformGroup) ... ok
+test_shapes_and_batch_format (tests.test_deform_data.TestSyntheticDeformGroup) ... ok
+test_synthetic_deform_overfit (tests.test_deform_overfit.TestDeformOverfit) ... 
+[deform overfit] steps 311, reached True, window {'soft_dice_tmpl': 0.9100229442119598, 'fold_frac': 0.0}, median step 1216 ms, gpu peak 4162.70849609375 MB
+  identity (initial val): template Dice 0.8635, pair Dice 0.7742
+  step    1  loss 0.3946  soft tmpl Dice 0.8307  soft pair Dice 0.7747  fold 0.00000
+  step   50  loss 0.2505  soft tmpl Dice 0.8707  soft pair Dice 0.8816  fold 0.00000
+  step  100  loss 0.2160  soft tmpl Dice 0.8860  soft pair Dice 0.9008  fold 0.00000
+  step  150  loss 0.1998  soft tmpl Dice 0.8955  soft pair Dice 0.9080  fold 0.00000
+  step  200  loss 0.1920  soft tmpl Dice 0.9009  soft pair Dice 0.9108  fold 0.00000
+  step  250  loss 0.1824  soft tmpl Dice 0.9050  soft pair Dice 0.9165  fold 0.00000
+  step  300  loss 0.1779  soft tmpl Dice 0.9093  soft pair Dice 0.9171  fold 0.00000
+  step  311  loss 0.1749  soft tmpl Dice 0.9103  soft pair Dice 0.9191  fold 0.00000
+[deform overfit val] step, template Dice, pair Dice, neg J %:
+   250  0.9683  0.9445  0.0000
+   311  0.9695  0.9472  0.0000
+ok
+test_dtypes (tests.test_diffeo.TestDtypes) ... ok
+test_centering_mean_zero (tests.test_diffeo.TestIntegration) ... ok
+test_constant_velocity_is_translation (tests.test_diffeo.TestIntegration) ... ok
+test_exp_inverse_round_trip (tests.test_diffeo.TestIntegration) ... ok
+test_gradients_finite (tests.test_diffeo.TestIntegration) ... ok
+test_folding_fraction (tests.test_diffeo.TestJacobian) ... ok
+test_jacobian_affine_field (tests.test_diffeo.TestJacobian) ... ok
+test_jacobian_vs_np_gradient (tests.test_diffeo.TestJacobian) ... ok
+test_cascade_inverse (tests.test_diffeo.TestUpsampleAndCascade) ... ok
+test_upsample_displacement_consistency (tests.test_diffeo.TestUpsampleAndCascade) ... ok
+test_border_keeps_constant_field (tests.test_diffeo.TestWarpCompose) ... ok
+test_compose_matches_scipy (tests.test_diffeo.TestWarpCompose) ... ok
+test_nearest_labels_keep_dtype (tests.test_diffeo.TestWarpCompose) ... ok
+test_pairwise_displacement (tests.test_diffeo.TestWarpCompose) ... ok
+test_to_mm (tests.test_diffeo.TestWarpCompose) ... ok
+test_warp_matches_scipy (tests.test_diffeo.TestWarpCompose) ... ok
+test_group_block_matches_manual (tests.test_group_layers.TestGroupConvBlock) ... ok
+test_kaiming_init_variance (tests.test_group_layers.TestGroupConvBlock) ... ok
+test_plain_block_and_stem (tests.test_group_layers.TestGroupConvBlock) ... ok
+test_strided (tests.test_group_layers.TestGroupConvBlock) ... ok
+test_layer_norm_mixed_precision (tests.test_group_layers.TestGroupDenseBlock) ... WARNING:tensorflow:Mixed precision compatibility check (mixed_float16): WARNING
+Your GPUs may run slowly with dtype policy mixed_float16 because they do not have compute capability of at least 7.0. Your GPUs:
+  NVIDIA GeForce GTX 1080, compute capability 6.1 (x2)
+See https://developer.nvidia.com/cuda-gpus for a list of GPUs and their compute capabilities.
+If you will use compatible GPU(s) not attached to this host, e.g. by running a multi-worker model, you can ignore this warning. This message will only be logged once
+ok
+test_layer_norm_per_sample (tests.test_group_layers.TestGroupDenseBlock) ... ok
+test_matches_numpy (tests.test_group_layers.TestGroupDenseBlock) ... ok
+test_no_group (tests.test_group_layers.TestGroupDenseBlock) ... ok
+test_dynamic_n_keeps_static_channels (tests.test_group_layers.TestGroupMeanConcat) ... ok
+test_matches_numpy (tests.test_group_layers.TestGroupMeanConcat) ... ok
+test_projection_and_identity_skip (tests.test_group_layers.TestGroupResBlock) ... ok
+test_bad_norm (tests.test_group_layers.TestNorms) ... ok
+test_bn_stats_freeze (tests.test_group_layers.TestNorms) ... ok
+test_bn_uses_group_statistics (tests.test_group_layers.TestNorms) ... ok
+test_instance_norm (tests.test_group_layers.TestNorms) ... ok
+test_bn_freeze (tests.test_group_net.TestBNFreezeAndDropout) ... ok
+test_dropout_training_only (tests.test_group_net.TestBNFreezeAndDropout) ... ok
+test_same_level_exact (tests.test_group_net.TestCopyRoundTrip) ... ok
+test_mean_zero (tests.test_group_net.TestDeformCentering) ... ok
+test_copy_4_to_2 (tests.test_group_net.TestDeformCopyWeights) ... ok
+test_gradient_routing (tests.test_group_net.TestDeformGradients) ... ok
+test_mixed_float16 (tests.test_group_net.TestDeformMixedPrecision) ... ok
+test_permutation_equivariance (tests.test_group_net.TestDeformPermutation) ... ok
+test_off_by_default (tests.test_group_net.TestDeformShapes) ... ok
+test_shapes_and_identity_at_init (tests.test_group_net.TestDeformShapes) ... ok
+test_no_retrace (tests.test_group_net.TestDynamicN) ... ok
+test_recompute_matches (tests.test_group_net.TestGradientCheckpointing) ... ok
+test_every_variable_gets_gradient (tests.test_group_net.TestGradients) ... ok
+test_group_information_flow (tests.test_group_net.TestGroupBehaviour) ... ok
+test_permutation_equivariance (tests.test_group_net.TestGroupBehaviour) ... ok
+test_mixed_float16 (tests.test_group_net.TestMixedPrecision) ... ok
+test_defaults_and_round_trip (tests.test_group_net.TestModelConfig) ... ok
+test_deform_fields (tests.test_group_net.TestModelConfig) ... ok
+test_translation_scale (tests.test_group_net.TestModelConfig) ... ok
+test_counts (tests.test_group_net.TestParameterCounts) ... ok
+test_copy_rejects_mismatch (tests.test_group_net.TestShapesAndLevels) ... ok
+test_copy_rejects_shape_neutral_config_difference (tests.test_group_net.TestShapesAndLevels) ... ok
+test_copy_weights_4_to_2 (tests.test_group_net.TestShapesAndLevels) ... ok
+test_identical_parameters_across_levels (tests.test_group_net.TestShapesAndLevels) ... ok
+test_identity_at_init_all_levels (tests.test_group_net.TestShapesAndLevels) ... ok
+test_shapes (tests.test_group_net.TestShapesAndLevels) ... ok
+test_overfit_one_group (tests.test_group_net.TestSmokeTraining) ... ok
+test_dali_data_wiring_with_deform (tests.test_main.TestDeformMain) ... ok
+test_deform_real_data_overfit_path (tests.test_main.TestDeformMain) ... ok
+test_mixed_three_task_dry_run (tests.test_main.TestDeformMain) ... ok
+test_synthetic_deform_dry_run (tests.test_main.TestDeformMain) ... WARNING:tensorflow:5 out of the last 318 calls to <function Trainer._make_deform_step.<locals>.<lambda> at 0x7f04d3640670> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:5 out of the last 10 calls to <function Trainer._val_deform_fn.<locals>.fwd at 0x7f04d3783c10> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:5 out of the last 10 calls to <function Trainer._val_deform_fn.<locals>.fwd_train_mode at 0x7f04d3783ee0> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+ok
+test_dry_run_without_dali_fails_clearly (tests.test_main.TestMain) ... ok
+test_real_data_overfit_path (tests.test_main.TestMain) ... WARNING:tensorflow:5 out of the last 9 calls to <function Trainer._val_fn.<locals>.fwd at 0x7f04d3303550> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:5 out of the last 9 calls to <function Trainer._val_fn.<locals>.fwd_train_mode at 0x7f054004b700> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:6 out of the last 11 calls to <function Trainer._val_fn.<locals>.fwd at 0x7f050c5ded30> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:6 out of the last 11 calls to <function Trainer._val_fn.<locals>.fwd_train_mode at 0x7f0514351700> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+ok
+test_synthetic_overfit_dry_run (tests.test_main.TestMain) ... ok
+test_overfit_affine_below_1mm (tests.test_main.TestOverfit) ... 
+[overfit affine:1] steps 1846, reached True, best worst-task 10-step mean 0.7949 mm, per task {'affine': 0.7948701500892639}, median step 619 ms
+[overfit affine:1 val] step, eval_center_rms_mm, trainmode_center_rms_mm:
+  250   23.593    1.644
+  500    3.037    2.126
+  750    1.650    1.655
+  1000    1.157    1.052
+  1250    2.406    2.412
+  1500    1.499    1.467
+  1750    1.020    0.985
+  1846    0.606    0.618
+[overfit affine:1 final] affine eval 0.6063 mm, train mode 0.6180 mm
+[overfit affine final] scale 0.499 %, shear 0.549 %, QR rotation 0.617 deg (centered)
+ok
+test_overfit_mixed_rigid_affine_below_1mm (tests.test_main.TestOverfit) ... WARNING:tensorflow:5 out of the last 30 calls to <function Trainer._make_train_step.<locals>.<lambda> at 0x7f059c18e040> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+
+[overfit rigid:1,affine:1] steps 2199, reached True, best worst-task 10-step mean 0.7903 mm, per task {'rigid': 0.6393289536237716, 'affine': 0.7903458118438721}, median step 615 ms
+[overfit rigid:1,affine:1 val] step, rigid_eval_center_rms_mm, rigid_trainmode_center_rms_mm, affine_eval_center_rms_mm, affine_trainmode_center_rms_mm:
+  250   18.503    8.116   22.480    7.458
+  500    2.304    1.967    4.195    3.922
+  750    1.394    1.404    3.642    3.649
+  1000    0.771    0.775    1.511    1.545
+  1250    1.215    1.204    1.585    1.530
+  1500    1.031    1.056    1.486    1.450
+  1750    0.767    0.781    1.048    1.007
+  2000    0.797    0.815    0.996    0.956
+  2199    0.318    0.336    0.605    0.620
+[overfit rigid:1,affine:1 final] rigid eval 0.3176 mm, train mode 0.3365 mm
+[overfit rigid:1,affine:1 final] affine eval 0.6053 mm, train mode 0.6201 mm
+ok
+test_overfit_synthetic_group_below_1mm (tests.test_main.TestOverfit) ... 
+[overfit curve] lr 3e-4, steps 593, reached True, best 10-step mean 0.7611 mm, median step 618 ms
+  step    1  center RMS  22.291 mm  pair RMS  41.478 mm
+  step   50  center RMS  12.744 mm  pair RMS  20.225 mm
+  step  100  center RMS  10.511 mm  pair RMS  19.724 mm
+  step  150  center RMS   8.059 mm  pair RMS   8.654 mm
+  step  200  center RMS   6.110 mm  pair RMS   5.501 mm
+  step  250  center RMS   4.789 mm  pair RMS   8.746 mm
+  step  300  center RMS   3.557 mm  pair RMS   5.931 mm
+  step  350  center RMS   1.938 mm  pair RMS   3.572 mm
+  step  400  center RMS   1.168 mm  pair RMS   2.522 mm
+  step  450  center RMS   2.033 mm  pair RMS   1.696 mm
+  step  500  center RMS   1.154 mm  pair RMS   0.858 mm
+  step  550  center RMS   0.884 mm  pair RMS   1.868 mm
+  step  593  center RMS   0.478 mm  pair RMS   1.063 mm
+[overfit val] step, eval-mode center RMS, train-mode center RMS (mm):
+   250   21.354    4.717
+   500    1.815    1.356
+   593    0.763    0.589
+ok
+test_init_weights_warm_start (tests.test_main.TestResumeControlsAndWarmStart) ... ok
+test_resumed_step_control_values_before_pipelines (tests.test_main.TestResumeControlsAndWarmStart) ... ok
+test_s_matrix_from_synthetic_mask (tests.test_postprocess.TestBrainS) ... ok
+test_flips_shared_and_onehot (tests.test_postprocess.TestDeformPostprocess) ... ok
+test_pairs_distinct_and_deterministic (tests.test_postprocess.TestDeformPostprocess) ... ok
+test_residual_t_conjugated (tests.test_postprocess.TestDeformPostprocess) ... ok
+test_tf_function_uint8_random_flips (tests.test_postprocess.TestDeformPostprocess) ... ok
+test_flip_sampling (tests.test_postprocess.TestFlips) ... ok
+test_image_and_matrix_flip_consistent (tests.test_postprocess.TestFlips) ... ok
+test_affine_target_is_full_t_and_flip_equivariant (tests.test_postprocess.TestLinearPostprocess) ... ok
+test_dali_to_mm_matches_models_transforms (tests.test_postprocess.TestLinearPostprocess) ... ok
+test_images_flipped_with_random_state_and_tf_function (tests.test_postprocess.TestLinearPostprocess) ... ok
+test_rigid_targets_use_rt_and_are_central (tests.test_postprocess.TestLinearPostprocess) ... ok
+test_counts (tests.test_postprocess.TestPairs) ... ok
+test_valid_unique_deterministic (tests.test_postprocess.TestPairs) ... ok
+test_configure_returns_state (tests.test_precision.TestPrecision) ... ok
+test_float32_matmul_is_full_precision (tests.test_precision.TestPrecision) ... ok
+test_tf32_disabled_by_test_setup (tests.test_precision.TestPrecision) ... ok
+test_best_metric_defaults (tests.test_runtime_infra.TestArgs) ... ok
+test_best_metric_with_deform (tests.test_runtime_infra.TestArgs) ... ok
+test_controls_skip_deform (tests.test_runtime_infra.TestArgs) ... ok
+test_deform_flag_defaults (tests.test_runtime_infra.TestArgs) ... ok
+test_level_defaults_and_overfit_dropout (tests.test_runtime_infra.TestArgs) ... ok
+test_loss_scale_and_head_activation_flags (tests.test_runtime_infra.TestArgs) ... ok
+test_model_config_round_trip (tests.test_runtime_infra.TestArgs) ... ok
+test_ratio_and_required_data (tests.test_runtime_infra.TestArgs) ... ok
+test_str2bool (tests.test_runtime_infra.TestArgs) ... ok
+test_best_and_keep_last (tests.test_runtime_infra.TestCheckpoint) ... ok
+test_config_json_and_compatibility (tests.test_runtime_infra.TestCheckpoint) ... ok
+test_extra_best (tests.test_runtime_infra.TestCheckpoint) ... WARNING:tensorflow:Detecting that an object or model or tf.train.Checkpoint is being deleted with unrestored values. See the following logs for the specific values in question. To silence these warnings, use `status.expect_partial()`. See https://www.tensorflow.org/api_docs/python/tf/train/Checkpoint#restorefor details about the status object returned by the restore function.
+WARNING:tensorflow:Value in checkpoint could not be found in the restored object: (root).best_metric_deform
+ok
+test_load_model_weights_warm_start (tests.test_runtime_infra.TestCheckpoint) ... ok
+test_peek_last_step (tests.test_runtime_infra.TestCheckpoint) ... ok
+test_round_trip_bit_exact (tests.test_runtime_infra.TestCheckpoint) ... ok
+test_dllogger_backend (tests.test_runtime_infra.TestDLLoggerBackend) ... skipped 'dllogger is not importable here (the container may have it)'
+test_dali_batch_round_trip (tests.test_runtime_infra.TestFixedData) ... ok
+test_load_level_images (tests.test_runtime_infra.TestFixedData) ... ok
+test_transform_ranges (tests.test_runtime_infra.TestFixedData) ... ok
+test_validation_set_deterministic (tests.test_runtime_infra.TestFixedData) ... ok
+test_validation_set_independent_of_task_order (tests.test_runtime_infra.TestFixedData) ... ok
+test_jsonl_and_tensorboard (tests.test_runtime_infra.TestLogging) ... ok
+test_affine_matrix_errors_reference (tests.test_runtime_losses_metrics.TestAffineMetrics) ... ok
+test_group_errors_affine_keys_and_pairs (tests.test_runtime_losses_metrics.TestAffineMetrics) ... ok
+test_mean_pair_rms (tests.test_runtime_losses_metrics.TestAffineMetrics) ... ok
+test_qr_factors_recover_known_factors (tests.test_runtime_losses_metrics.TestAffineMetrics) ... ok
+test_perfect_alignment_zero_and_shift (tests.test_runtime_losses_metrics.TestDeformLosses) ... ok
+test_smoothness_orders (tests.test_runtime_losses_metrics.TestDeformLosses) ... ok
+test_soft_dice_matches_numpy_and_excludes_absent (tests.test_runtime_losses_metrics.TestDeformLosses) ... ok
+test_template_gradient_flows_through_template (tests.test_runtime_losses_metrics.TestDeformLosses) ... ok
+test_total_loss (tests.test_runtime_losses_metrics.TestDeformLosses) ... ok
+test_deform_group_errors (tests.test_runtime_losses_metrics.TestDeformMetrics) ... ok
+test_hard_dice_hand_made (tests.test_runtime_losses_metrics.TestDeformMetrics) ... ok
+test_center_loss_matches_bruteforce (tests.test_runtime_losses_metrics.TestLosses) ... ok
+test_center_loss_units_mm2 (tests.test_runtime_losses_metrics.TestLosses) ... ok
+test_gradients_finite (tests.test_runtime_losses_metrics.TestLosses) ... ok
+test_pair_loss_matches_bruteforce (tests.test_runtime_losses_metrics.TestLosses) ... ok
+test_total_and_rms (tests.test_runtime_losses_metrics.TestLosses) ... ok
+test_cycle_error_zero (tests.test_runtime_losses_metrics.TestMetrics) ... ok
+test_group_metrics_keys_and_accumulator (tests.test_runtime_losses_metrics.TestMetrics) ... ok
+test_matrix_errors (tests.test_runtime_losses_metrics.TestMetrics) ... ok
+test_pairwise_all_ordered_pairs (tests.test_runtime_losses_metrics.TestMetrics) ... ok
+test_rotation_angle (tests.test_runtime_losses_metrics.TestMetrics) ... ok
+test_decoupled_decay_functional (tests.test_runtime_optim.TestOptimizers) ... ok
+test_default_clipnorm (tests.test_runtime_optim.TestOptimizers) ... ok
+test_every_optimizer_steps_and_lr_helpers (tests.test_runtime_optim.TestOptimizers) ... WARNING:tensorflow:You forgot to call LossScaleOptimizer.get_scaled_loss() and LossScaleOptimizer.get_unscaled_gradients() before calling LossScaleOptimizer.apply_gradients(). This will likely result in worse model quality, so please call them in the correct places! For example:
+    with tf.GradientTape() as tape:
+      loss = loss_fn()
+      scaled_loss = opt.get_scaled_loss(loss)
+    scaled_grads = tape.gradient(scaled_loss, vars)
+    grads = opt.get_unscaled_gradients(scaled_grads)
+    opt.apply_gradients([(grads, var)])
+For more information, see https://www.tensorflow.org/api_docs/python/tf/keras/mixed_precision/LossScaleOptimizer
+WARNING:tensorflow:You forgot to call LossScaleOptimizer.get_scaled_loss() and LossScaleOptimizer.get_unscaled_gradients() before calling LossScaleOptimizer.apply_gradients(). This will likely result in worse model quality, so please call them in the correct places! For example:
+    with tf.GradientTape() as tape:
+      loss = loss_fn()
+      scaled_loss = opt.get_scaled_loss(loss)
+    scaled_grads = tape.gradient(scaled_loss, vars)
+    grads = opt.get_unscaled_gradients(scaled_grads)
+    opt.apply_gradients([(grads, var)])
+For more information, see https://www.tensorflow.org/api_docs/python/tf/keras/mixed_precision/LossScaleOptimizer
+WARNING:tensorflow:You forgot to call LossScaleOptimizer.get_scaled_loss() and LossScaleOptimizer.get_unscaled_gradients() before calling LossScaleOptimizer.apply_gradients(). This will likely result in worse model quality, so please call them in the correct places! For example:
+    with tf.GradientTape() as tape:
+      loss = loss_fn()
+      scaled_loss = opt.get_scaled_loss(loss)
+    scaled_grads = tape.gradient(scaled_loss, vars)
+    grads = opt.get_unscaled_gradients(scaled_grads)
+    opt.apply_gradients([(grads, var)])
+For more information, see https://www.tensorflow.org/api_docs/python/tf/keras/mixed_precision/LossScaleOptimizer
+WARNING:tensorflow:You forgot to call LossScaleOptimizer.get_scaled_loss() and LossScaleOptimizer.get_unscaled_gradients() before calling LossScaleOptimizer.apply_gradients(). This will likely result in worse model quality, so please call them in the correct places! For example:
+    with tf.GradientTape() as tape:
+      loss = loss_fn()
+      scaled_loss = opt.get_scaled_loss(loss)
+    scaled_grads = tape.gradient(scaled_loss, vars)
+    grads = opt.get_unscaled_gradients(scaled_grads)
+    opt.apply_gradients([(grads, var)])
+For more information, see https://www.tensorflow.org/api_docs/python/tf/keras/mixed_precision/LossScaleOptimizer
+ok
+test_sgdw_matches_reference_update (tests.test_runtime_optim.TestOptimizers) ... ok
+test_weight_decay_exclusion (tests.test_runtime_optim.TestOptimizers) ... ok
+test_bad_name (tests.test_runtime_optim.TestSchedules) ... ok
+test_constant (tests.test_runtime_optim.TestSchedules) ... ok
+test_cosine_midpoint (tests.test_runtime_optim.TestSchedules) ... ok
+test_cycle_restarts (tests.test_runtime_optim.TestSchedules) ... ok
+test_warmup_and_endpoints (tests.test_runtime_optim.TestSchedules) ... ok
+test_a_matches_scipy_map_coordinates (tests.test_spatial_transformer.TestTransformImage) ... ok
+test_b_integer_translation_shifts_exactly (tests.test_spatial_transformer.TestTransformImage) ... ok
+test_c_round_trip (tests.test_spatial_transformer.TestTransformImage) ... ok
+test_d_nearest_preserves_labels (tests.test_spatial_transformer.TestTransformImage) ... ok
+test_e_cpu_out_of_bounds (tests.test_spatial_transformer.TestTransformImage) ... ok
+test_f_gradient_matches_finite_difference (tests.test_spatial_transformer.TestTransformImage) ... ok
+test_flip_commutes_with_conjugated_warp (tests.test_spatial_transformer.TestTransformImage) ... ok
+test_g_dynamic_group_size_in_tf_function (tests.test_spatial_transformer.TestTransformImage) ... ok
+test_h_mixed_float16_policy (tests.test_spatial_transformer.TestTransformImage) ... ok
+test_i_multilevel_consistency (tests.test_spatial_transformer.TestTransformImage) ... ok
+test_crafted_values (tests.test_trainer.TestCollapseDiagnostics) ... ok
+test_healthy_group_logs_diagnostics (tests.test_trainer.TestCollapseDiagnostics) ... ok
+test_identical_images_zero_spread_and_warning (tests.test_trainer.TestCollapseDiagnostics) ... WARNING:tensorflow:5 out of the last 601 calls to <function Trainer._make_train_step.<locals>.<lambda> at 0x7f05140acf70> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING step 3: possible group collapse (3 consecutive steps with relative pre-head feature spread < 0.001 or grad norm < 0.001; now rel_spread 0, grad_norm 0, dead_frac 0.480)
+ok
+test_controls_written_each_step_and_logged (tests.test_trainer.TestControls) ... ok
+test_g_warmup_logged (tests.test_trainer.TestControls) ... ok
+test_named_val_sets_and_pngs (tests.test_trainer.TestControls) ... ok
+test_off_is_unchanged (tests.test_trainer.TestControls) ... ok
+test_collapse_diag_deform (tests.test_trainer.TestDeformStep) ... WARNING:tensorflow:6 out of the last 320 calls to <function Trainer._make_deform_step.<locals>.<lambda> at 0x7f05b2442c10> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING step 3: possible group collapse (3 consecutive steps with relative pre-head feature spread < 0.001 or grad norm < 0.001; now rel_spread 0, grad_norm 3.39e-07, dead_frac 0.000)
+ok
+test_nan_guard_skips_update (tests.test_trainer.TestDeformStep) ... ok
+test_none_gradients_filtered (tests.test_trainer.TestDeformStep) ... ok
+test_residual_affine_step (tests.test_trainer.TestDeformStep) ... ok
+test_best_metrics_with_deform (tests.test_trainer.TestDeformValidation) ... WARNING:tensorflow:6 out of the last 11 calls to <function Trainer._val_deform_fn.<locals>.fwd at 0x7f050c5dd0d0> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:6 out of the last 11 calls to <function Trainer._val_deform_fn.<locals>.fwd_train_mode at 0x7f04d00239d0> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+ok
+test_deform_validation_and_pngs (tests.test_trainer.TestDeformValidation) ... ok
+test_build_and_run (tests.test_trainer.TestHeadActivation) ... ok
+test_gradient_scales_and_logged_terms_do_not (tests.test_trainer.TestLossScale) ... ok
+test_interleaving_starting_rigid (tests.test_trainer.TestMixedTasks) ... ok
+test_mixed_validation_best_metric_and_pngs (tests.test_trainer.TestMixedTasks) ... ok
+test_mixed_precision_overflow_skips (tests.test_trainer.TestResumeAndValidation) ... 
+[amp overflow] 33 skipped steps, first applied step at loss scale 2^7
+ok
+test_mixed_precision_smoke (tests.test_trainer.TestResumeAndValidation) ... WARNING:tensorflow:You forgot to call LossScaleOptimizer.get_scaled_loss() and LossScaleOptimizer.get_unscaled_gradients() before calling LossScaleOptimizer.apply_gradients(). This will likely result in worse model quality, so please call them in the correct places! For example:
+    with tf.GradientTape() as tape:
+      loss = loss_fn()
+      scaled_loss = opt.get_scaled_loss(loss)
+    scaled_grads = tape.gradient(scaled_loss, vars)
+    grads = opt.get_unscaled_gradients(scaled_grads)
+    opt.apply_gradients([(grads, var)])
+For more information, see https://www.tensorflow.org/api_docs/python/tf/keras/mixed_precision/LossScaleOptimizer
+ok
+test_resume_continues_step_count (tests.test_trainer.TestResumeAndValidation) ... ok
+test_trainmode_validation_keeps_bn_statistics (tests.test_trainer.TestResumeAndValidation) ... ok
+test_validation_identity_model (tests.test_trainer.TestResumeAndValidation) ... ok
+test_ratio_and_determinism (tests.test_trainer.TestTaskSchedule) ... ok
+test_trace_once_mixed (tests.test_trainer.TestThreeTasks) ... ok
+test_nan_guard_skips_update (tests.test_trainer.TestTrainStep) ... ok
+test_none_gradients_filtered (tests.test_trainer.TestTrainStep) ... ok
+test_rebuild_steps_after_bn_freeze (tests.test_trainer.TestTrainStep) ... ok
+test_trace_once_per_task (tests.test_trainer.TestTrainStep) ... WARNING:tensorflow:5 out of the last 26 calls to <function Trainer._make_train_step.<locals>.<lambda> at 0x7f05143d3d30> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+ok
+test_barycentric_targets (tests.test_transforms.TestBarycenter) ... ok
+test_batched_leading_axes (tests.test_transforms.TestBarycenter) ... ok
+test_centered_output_and_pairwise (tests.test_transforms.TestBarycenter) ... ok
+test_gradient_centering_plus_point_loss (tests.test_transforms.TestBarycenter) ... ok
+test_invariance_to_common_left_multiplication (tests.test_transforms.TestBarycenter) ... ok
+test_matches_demo_numpy (tests.test_transforms.TestBarycenter) ... ok
+test_affine_is_r_times_k (tests.test_transforms.TestBuilders) ... ok
+test_identity_params (tests.test_transforms.TestBuilders) ... ok
+test_qr_round_trip_recovers_scales (tests.test_transforms.TestBuilders) ... ok
+test_rigid_layout (tests.test_transforms.TestBuilders) ... ok
+test_dali_voxel_mm_round_trip_and_meaning (tests.test_transforms.TestDaliConversion) ... ok
+test_involution_and_composition (tests.test_transforms.TestDaliConversion) ... ok
+test_conjugated_rigid_stays_rotation (tests.test_transforms.TestFlipAlgebra) ... ok
+test_coarse_levels_share_centers (tests.test_transforms.TestMatrixHelpers) ... ok
+test_inverse_compose_layout (tests.test_transforms.TestMatrixHelpers) ... ok
+test_logm_expm (tests.test_transforms.TestMatrixHelpers) ... ok
+test_mm_voxel_conversion (tests.test_transforms.TestMatrixHelpers) ... ok
+test_second_moment_and_point_loss_bruteforce (tests.test_transforms.TestPointLoss) ... ok
+test_encode_decode_round_trip (tests.test_transforms.TestRotation10D) ... ok
+test_gradient_matches_finite_difference (tests.test_transforms.TestRotation10D) ... ok
+test_gradients_finite (tests.test_transforms.TestRotation10D) ... ok
+test_identity_encoding (tests.test_transforms.TestRotation10D) ... ok
+test_matches_numpy_rederivation (tests.test_transforms.TestRotation10D) ... ok
+test_matches_reference_implementation (tests.test_transforms.TestRotation10D) ... ok
+test_random_params_are_rotations (tests.test_transforms.TestRotation10D) ... ok
+test_dynamic_n_no_retrace (tests.test_upsample.TestUpsampleTrilinear2x) ... ok
+test_float16 (tests.test_upsample.TestUpsampleTrilinear2x) ... ok
+test_layer_and_gradient (tests.test_upsample.TestUpsampleTrilinear2x) ... ok
+test_matches_map_coordinates (tests.test_upsample.TestUpsampleTrilinear2x) ... ok
+test_matches_zoom_grid_mode (tests.test_upsample.TestUpsampleTrilinear2x) ... ok
+test_multichannel (tests.test_upsample.TestUpsampleTrilinear2x) ... ok
+test_ramp_exact_in_interior (tests.test_upsample.TestUpsampleTrilinear2x) ... ok
+test_identity_panels (tests.test_val_png.TestDeformPanels) ... ok
+test_jacobian_padding_and_file (tests.test_val_png.TestDeformPanels) ... ok
+test_axial_display_convention (tests.test_val_png.TestPanels) ... ok
+test_figure_layout (tests.test_val_png.TestPanels) ... ok
+test_identity_and_perfect_rows (tests.test_val_png.TestPanels) ... ok
+test_select_indices_fixed (tests.test_val_png.TestPanels) ... ok
+test_off_writes_nothing_and_failure_does_not_raise (tests.test_val_png.TestTrainerPng) ... WARNING step 0: validation PNG for rigid failed: IndexError('too many indices for array: array is 0-dimensional, but 1 were indexed')
+ok
+test_written_at_validation_and_final_step (tests.test_val_png.TestTrainerPng) ... ok
+
+----------------------------------------------------------------------
+Ran 284 tests in 5356.176s
+
+OK (skipped=4)
+PASS final_step             last logged step 20 (expected >= 20)
+PASS train_rigid            4 logged train_rigid/loss values, all finite
+PASS train_affine           4 logged train_affine/loss values, all finite
+PASS train_deform           4 logged train_deform/loss values, all finite
+PASS val_rigid              final-step validation complete
+PASS val_affine             final-step validation complete
+PASS val_deform             final-step validation complete
+PASS val_mean_pair_rms_mm   val/mean_pair_rms_mm = 6.5, linear task pair RMS [6.0, 7.0]
+PASS trace_once             trace counts {'rigid': 1, 'affine': 1, 'deform': 1} (1 per task)
+PASS finite_steps           non-finite steps: 0
+PASS val_png                PNGs ['rigid_step0000020.png', 'affine_step0000020.png', 'deform_step0000020.png'] present: [True, True, True]
+PASS best_checkpoint        ckpt/best has a checkpoint: True
+PASS best_deform_checkpoint ckpt/best_deform has a checkpoint: True
+check_mixed_run: PASS
+PASS final_step             last logged step 20 (expected >= 20)
+PASS train_rigid            4 logged train_rigid/loss values, all finite
+PASS train_affine           4 logged train_affine/loss values, all finite
+PASS val_rigid              final-step validation complete
+PASS val_affine             final-step validation complete
+PASS val_mean_pair_rms_mm   val/mean_pair_rms_mm = 6.5, linear task pair RMS [6.0, 7.0]
+PASS trace_once             trace counts {'rigid': 1, 'affine': 1} (1 per task)
+PASS finite_steps           non-finite steps: 0
+PASS val_png                PNGs ['rigid_step0000020.png', 'affine_step0000020.png'] present: [True, True]
+PASS best_checkpoint        ckpt/best has a checkpoint: True
+check_mixed_run: PASS
+FAIL final_step             last logged step 20 (expected >= 30)
+PASS train_rigid            4 logged train_rigid/loss values, all finite
+PASS train_affine           4 logged train_affine/loss values, all finite
+PASS val_rigid              final-step validation complete
+PASS val_affine             final-step validation complete
+PASS val_mean_pair_rms_mm   val/mean_pair_rms_mm = 6.5, linear task pair RMS [6.0, 7.0]
+PASS trace_once             trace counts {'rigid': 1, 'affine': 1} (1 per task)
+PASS finite_steps           non-finite steps: 0
+PASS val_png                PNGs ['rigid_step0000020.png', 'affine_step0000020.png'] present: [True, True]
+PASS best_checkpoint        ckpt/best has a checkpoint: True
+check_mixed_run: FAIL
+
+[m6] synthetic deform group (level 4, n 4, seed 0): identity pairwise hard Dice mean 0.7742 min 0.7527 max 0.7939, max|u| 3.844 vox
+overfit deform: reached=True after 311 steps; 10-step window soft template Dice 0.9100 (threshold 0.91), fold 0.00000 (max 0.001); final val template Dice 0.9695, pair Dice 0.9472 (identity 0.8635 / 0.7742), neg J 0.0000 %
+
+exp(v) o exp(-v) round trip (40x56x48, sigma 3, max|v| 2 vox, T=7, 3-voxel margin): u o u_inv max 0.01031 mean 0.001863 vox; u_inv o u max 0.01081 mean 0.001861 vox; max|u| 1.639
+
+cascade round trip (20x28x24 -> 40x56x48, 4-voxel margin): u o u_inv max 0.00462 mean 0.000963; u_inv o u max 0.01046 mean 0.002290 vox
+
+upsampled-field warp vs upsampled coarse warp: max 0.0327 mean 0.01003 (range 3)
+
+Parameter counts (trainable; level-independent):
+part                                                  A              B        A+first        B+first
+encoder/stem                                      1,760            896          1,760            896
+encoder/l2                                      110,720         55,424        110,720         55,424
+encoder/l3                                      442,624        221,440        442,624        221,440
+encoder/l4                                    1,327,552        664,000      1,327,552        664,000
+encoder/l5                                    2,654,848      1,327,744      2,654,848      1,327,744
+encoder/l6                                    5,309,312      2,655,104      5,309,312      2,655,104
+encoder                                       9,846,816      4,924,608      9,846,816      4,924,608
+linear_decoder/reduction_0                      148,416        148,416        148,416        148,416
+linear_decoder/reduction_1                       37,344         37,344         37,344         37,344
+linear_decoder/reduction_2                        9,456          9,456          9,456          9,456
+linear_decoder/reduction_3                        2,424          2,424          2,424          2,424
+linear_decoder/dense_0                       10,334,048     10,334,048     20,655,968     20,655,968
+linear_decoder/dense_0/dense                 10,323,968     10,323,968     20,645,888     20,645,888
+linear_decoder/dense_1                        2,101,760      2,101,760      2,101,760      2,101,760
+linear_decoder/dense_1/dense                  2,097,664      2,097,664      2,097,664      2,097,664
+linear_decoder/head_norm_act                      1,024          1,024          1,024          1,024
+linear_decoder/rigid_head                         6,669          6,669          6,669          6,669
+linear_decoder/scale_shear_head                   3,078          3,078          3,078          3,078
+linear_decoder                               12,644,219     12,644,219     22,966,139     22,966,139
+group_overhead/encoder                        4,922,208              0      4,922,208              0
+group_overhead/linear_decoder                 1,146,496      1,146,496     11,468,416     11,468,416
+trainable                                    22,491,035     17,568,827     32,812,955     27,890,747
+non_trainable                                     2,784          2,784          2,784          2,784
+
+smoke training (level 4, N=4, rigid) RMS mm per step: 7.85 7.88 7.82 7.81 7.83 7.71 7.79 8.01 7.76 7.73 7.41 8.23 7.76 7.80 7.43 8.07 8.03 8.37 8.07 7.66 7.78 7.96 7.93 7.76 7.87 8.52 7.51 7.87 7.99 8.38 8.04 7.97 7.43 7.88 7.37 8.09 7.45 7.88 6.63 7.76 7.39 6.85 6.40 6.08 5.78 5.91 5.77 5.77 5.82 5.56 5.24 5.32 5.83 5.43 5.16 5.30 5.90 5.30 5.35 5.14
+overfit deform: reached=False after 3 steps; 10-step window soft template Dice nan (threshold 0.9), fold nan (max 0.001); final val template Dice 0.3991, pair Dice 0.1164 (identity 0.4001 / 0.1164), neg J 0.0000 %
+dry run: steps 0 -> 2, trace counts {'rigid': 1, 'affine': 0, 'deform': 1}, finite True
+overfit: reached=False best 10-step mean center RMS (worst task) nan mm after 4 steps; final val center RMS: rigid eval 22.1609 mm, train mode 22.1605 mm; affine eval 26.3739 mm, train mode 26.3739 mm
+overfit deform: reached=False after 4 steps; 10-step window soft template Dice nan (threshold 0.9), fold nan (max 0.001); final val template Dice 0.8643, pair Dice 0.7742 (identity 0.8635 / 0.7742), neg J 0.0000 %
+dry run: steps 0 -> 2, trace counts {'deform': 1}, finite True
+overfit: reached=False best 10-step mean center RMS (worst task) 14.8880 mm after 20 steps; final val center RMS: rigid eval 18.3573 mm, train mode 13.7494 mm
+overfit: reached=False best 10-step mean center RMS (worst task) nan mm after 5 steps; final val center RMS: rigid eval 18.3149 mm, train mode 12.9966 mm
+dry run: steps 0 -> 2, trace counts {'rigid': 1}, finite True
+dry run: steps 0 -> 2, trace counts {'rigid': 1}, finite True
+overfit: reached=True best 10-step mean center RMS (worst task) 0.7949 mm after 1846 steps; final val center RMS: affine eval 0.6063 mm, train mode 0.6180 mm
+overfit: reached=True best 10-step mean center RMS (worst task) 0.7903 mm after 2199 steps; final val center RMS: rigid eval 0.3176 mm, train mode 0.3365 mm; affine eval 0.6053 mm, train mode 0.6201 mm
+overfit: reached=True best 10-step mean center RMS (worst task) 0.7611 mm after 593 steps; final val center RMS: rigid eval 0.7629 mm, train mode 0.5886 mm
+dry run: steps 0 -> 2, trace counts {'rigid': 1}, finite True
+dry run: steps 0 -> 2, trace counts {'rigid': 1}, finite True
+unittest exit code: 0, wall time: 5366 s
+SUITE_EXIT 0
