@@ -18,7 +18,7 @@
 # (validation: 2 linear groups of 32, 3 deform groups of 16, deform pairs capped at 64; do NOT
 # pass --val-group-size, it would apply to both). G (group-shared global transform) at
 # 45 deg / 10 mm from step 0, curriculum off (warm start, milestone-5 result). Linear losses are
-# divided by LOSS_SCALE_MM2 (default 1) and TASK_LOSS_WEIGHTS (default empty = all 1) are the
+# divided by LOSS_SCALE_MM2 (default 1) and TASK_LOSS_WEIGHTS (default deform:64; 'none' = all 1) are the
 # balance knobs against the deform Dice loss (milestone-7 report: train_<task>/diag_enc_grad_norm_eff). After main.py, check_mixed_run.py
 # checks the run dir (validation, PNGs, both best checkpoints, warm start, grad-norm keys) and
 # prints the linear/deform encoder-gradient ratio. Exit code: main.py's if non-zero, else the
@@ -33,6 +33,7 @@
 #   RUN_NAME=m7_three_task_long sbatch --job-name=m7long --time=12:00:00 --mem=64G slurm/m7_three_task.sh
 # LNCC A/B (design 6.2 v3.9; LNCC weights default 0 = this recipe unchanged), Dice+LNCC arm:
 #   RUN_NAME=m7_three_task_lncc EXTRA_ARGS="--lambda-ncc-template 1 --lambda-ncc-pair 1" sbatch --job-name=m7lncc --time=14:00:00 --mem=64G slurm/m7_three_task.sh
+# On an A100 (fits: 34.3 GB peak; ~1.6 s/step measured): add -p dgx-a100 to the sbatch line.
 # Time estimates (not measured for this recipe): linear step ~1.4 s at N = 32 (m5, RTX 8000),
 # deform step ~3 s at N = 16 (extrapolated from 1.6 s at N = 8). Memory: linear N 32 ~34 GB,
 # deform N 16 ~33.8 GB on the 48 GB cards; the peak is the larger of the two, not the sum. On
@@ -57,7 +58,12 @@ INIT="${INIT:-$RESULTS/m5_mixed_long_curr_dG_20261019-205526/ckpt/best}"
 # applied encoder-gradient ratio linear/deform was ~1.4-1.7 for every S in 1..1000; confirm with
 # the checker's enc_grad_ratio line after the smoke run, P2 in the milestone-7 report).
 LOSS_SCALE_MM2="${LOSS_SCALE_MM2:-1}"
-TASK_LOSS_WEIGHTS="${TASK_LOSS_WEIGHTS:-}"
+# deform:64 (2026-10-21 A/B, jobs 10493712 vs 10493723): the unweighted deform encoder gradient
+# was ~70x below the clipped linear ones; with deform:64 the deform steps are clipped too (per-task
+# normalisation) and val deform template / pair Dice at step 8000 rose 0.704 / 0.608 -> 0.723 /
+# 0.638 with linear errors unchanged. Set TASK_LOSS_WEIGHTS=none for the unweighted recipe.
+TASK_LOSS_WEIGHTS="${TASK_LOSS_WEIGHTS:-deform:64}"
+if [ "$TASK_LOSS_WEIGHTS" = "none" ]; then TASK_LOSS_WEIGHTS=""; fi
 G_ROT="${G_ROT:-45}"
 G_TRANS="${G_TRANS:-10}"
 AMP="${AMP:-false}"

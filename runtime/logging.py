@@ -157,6 +157,7 @@ class RunLogger:
     def log_metrics(self, step, metrics):
         step = int(step)
         self._backend.log(step, metrics)
+        self._backend.flush()   # so metrics.jsonl can be read while the run is going
         self._echo(step, metrics)
         if self._writer is not None:
             import tensorflow as tf
@@ -168,6 +169,7 @@ class RunLogger:
     def log_event(self, step, data):
         """Non-scalar records (warnings such as skipped non-finite steps); no TensorBoard."""
         self._backend.log(int(step), data)
+        self._backend.flush()
         self._echo(step, data)
 
     def flush(self):
