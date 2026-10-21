@@ -29,6 +29,9 @@ Deformable metrics (design 7, milestone 6), from hard label maps (argmax of warp
 * inv_consistency_mm / _max_mm [N]: mean / max over voxels of |compose(u, u_inv)| * spacing;
 * centrality_mm / raw_centrality_mm [1]: mean over voxels of |mean_i v_i| * spacing for the
   centred v (~0 by construction) and for the raw head output v_raw.
+* ncc_template [N] / ncc_pair [P] (v3.9, added by the Trainer from the images, not by
+  `deform_group_errors`): masked mean squared LNCC of each warped image vs the leave-one-out
+  intensity template, and of image i moved into j's space vs image j (`runtime.losses`).
 `deform_group_errors` returns per-item arrays (poolable with `concat_errors`, `summarize`).
 """
 import numpy as np

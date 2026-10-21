@@ -58,6 +58,9 @@ DEFAULT_LINEAR_RANGES = {
 DEFAULT_DEFORM_RESIDUAL_RANGES = {"rotation_deg": 1.0, "translation_mm": 1.0,
                                   "log_scale": math.log(1.005), "shear": 0.0025}
 DEFAULT_DEFORM_RESIDUAL_AFFINE = False
+# LNCC box-window side in voxels per level (design 6.2 v3.9): 20 mm at level 4, 14 mm at
+# level 2, 9 mm at level 1 (the VoxelMorph / reference value at 1 mm). --ncc-window overrides.
+NCC_WINDOW_DEFAULT = {4: 5, 2: 7, 1: 9}
 
 LinearRanges = collections.namedtuple(
     "LinearRanges", ["task", "level", "rotation_deg", "translation_mm", "translation_vox",
@@ -69,6 +72,11 @@ def check_level(level):
     if level not in LEVEL_SHAPE:
         raise ValueError("level must be one of {}, got {!r}".format(LEVELS, level))
     return level
+
+
+def ncc_window_for_level(level):
+    """Default LNCC window (odd voxel count) of a level (`NCC_WINDOW_DEFAULT`)."""
+    return NCC_WINDOW_DEFAULT[check_level(level)]
 
 
 def level_suffix(level):

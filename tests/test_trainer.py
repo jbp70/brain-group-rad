@@ -31,7 +31,8 @@ from runtime import fixed_data as fd
 from runtime import metrics as M
 from runtime import optimizers as O
 from runtime.logging import RunLogger, make_run_dir
-from runtime.run import (DEFORM_BEST_METRIC, DEFORM_DIAG_KEYS, DEFORM_LOSS_KEYS, DIAG_KEYS, ENC_GRAD_KEYS,
+from runtime.run import (DEFORM_BEST_METRIC, DEFORM_DIAG_KEYS, DEFORM_LOSS_KEYS, DEFORM_NCC_KEYS, DIAG_KEYS,
+                         ENC_GRAD_KEYS,
                          TaskSchedule, Trainer, TrainConfig, collapse_diagnostics)
 from runtime.schedulers import ScheduleConfig
 
@@ -956,6 +957,167 @@ class TestTaskLossWeightDeform(DeformCase):
                                    rc["diag_enc_grad_norm_raw"] * 1e-4 / rc["grad_norm"], rtol=1e-4)
 
 
+class TestDeformNCC(DeformCase):
+    """v3.9: LNCC terms in the deform step (weights > 0)."""
+
+    def make_ncc(self, like=None, **kw):
+        cfg = config(task_ratio={"deform": 1.0}, **kw)
+        tr = self.make_deform(cfg)
+        if like is None:
+            head = tr.model.deform_decoder.svf_head
+            head.kernel.assign(np.random.default_rng(0).normal(0, 1e-3, head.kernel.shape).astype(np.float32))
+        else:
+            tr.model.set_weights(like.get_weights())
+        return tr
+
+    def test_ncc_step(self):
+        batch = self.dgroup["batch"]
+        tr0 = self.make_ncc()
+        tr1 = self.make_ncc(like=tr0.model, lambda_ncc_tmpl=1.0, lambda_ncc_pair=1.0)
+        self.assertEqual(tr1.ncc_window, P.ncc_window_for_level(4))
+        r0 = tr0.train_step("deform", batch)
+        for _ in range(2):
+            r1 = tr1.train_step("deform", batch)
+            self.assertTrue(r1["finite"])
+            for k in DEFORM_NCC_KEYS + DEFORM_LOSS_KEYS:
+                self.assertTrue(np.isfinite(r1[k]), k)
+            for k in ("ncc_tmpl", "ncc_pair", "ncc_tmpl_loss", "ncc_pair_loss"):
+                self.assertGreaterEqual(r1[k], 0.0, k)
+                self.assertLessEqual(r1[k], 1.0, k)
+        for k in DEFORM_NCC_KEYS:
+            self.assertNotIn(k, r0)
+        self.assertEqual(r1["n_vars_updated"], r0["n_vars_updated"])
+        self.assertEqual(len(tr1.model.variables), len(tr0.model.variables))
+        self.assertEqual(tr1.trace_counts, {"deform": 1})
+        # From the same weights: the LNCC terms add to the loss and change the gradient.
+        tr2 = self.make_ncc(like=tr0.model, lambda_ncc_tmpl=1.0, lambda_ncc_pair=1.0)
+        tr0b = self.make_ncc(like=tr0.model)
+        r2 = tr2.train_step("deform", batch)
+        np.testing.assert_allclose(r2["loss"], r2["tmpl"] + r2["pdice"] + 0.5 * r2["smooth"]
+                                   + r2["ncc_tmpl_loss"] + r2["ncc_pair_loss"], rtol=1e-5)
+        self.assertNotEqual(r2["grad_norm"], tr0b.train_step("deform", batch)["grad_norm"])
+
+    def test_lncc_only_and_validation_errors(self):
+        tr = self.make_ncc(lambda_dice_tmpl=0.0, lambda_pdice=0.0, lambda_ncc_tmpl=1.0, lambda_ncc_pair=1.0)
+        r = tr.train_step("deform", self.dgroup["batch"])
+        self.assertTrue(r["finite"])
+        self.assertTrue(np.isfinite(r["soft_dice_tmpl"]))
+        np.testing.assert_allclose(r["loss"], 0.5 * r["smooth"] + r["ncc_tmpl_loss"] + r["ncc_pair_loss"],
+                                   rtol=1e-5)
+        for bad in (dict(lambda_ncc_tmpl=-1.0), dict(lambda_ncc_pair=float("nan")),
+                    dict(lambda_dice_tmpl=float("inf")), dict(ncc_window=4), dict(ncc_window=41)):
+            with self.assertRaises(ValueError, msg=str(bad)):
+                self.make_deform(config(task_ratio={"deform": 1.0}, **bad))
+
+    def test_three_task_logs_ncc(self):
+        ratio = {"rigid": 1.0, "affine": 1.0, "deform": 2.0}
+        seed = _seed_with_all_tasks(ratio, 8)
+        paths = make_run_dir(self.tmp, "ncc3")
+        logger = RunLogger(paths, backend="jsonl", tensorboard=False, quiet=True)
+        tr = self.make_deform(config(task_ratio=ratio, seed=seed, log_every=1, lambda_ncc_tmpl=1.0,
+                                     lambda_ncc_pair=1.0), logger=logger)
+        tr.fit(8)
+        logger.close()
+        self.assertEqual(tr.trace_counts, {"rigid": 1, "affine": 1, "deform": 1})
+        self.assertTrue(all(h["finite"] for h in tr.history))
+        with open(logger.metrics_path) as f:
+            recs = [json.loads(line)["data"] for line in f]
+        got = [r for r in recs if "train_deform/loss" in r]
+        self.assertTrue(got)
+        for r in got:
+            for k in DEFORM_NCC_KEYS:
+                self.assertTrue(np.isfinite(r["train_deform/" + k]), k)
+        self.assertFalse(any("train_rigid/ncc_tmpl" in r for r in recs))
+
+
+DEFORM_GOLDEN_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures",
+                                  "lncc_deform_golden.json")
+DEFORM_GOLDEN_STEPS = 8
+
+
+def _deform_golden_run():
+    """8 seeded three-task steps (rigid:1, affine:1, deform:2, flips on) of a narrow deform model
+    (dropout 0, SVF head kernel N(0, 1e-3) so deform gradients reach the encoder): tasks, per-step
+    loss, per-step deform terms and per-variable (float64 sum, max |v|)."""
+    ratio = {"rigid": 1.0, "affine": 1.0, "deform": 2.0}
+    seed = _seed_with_all_tasks(ratio, DEFORM_GOLDEN_STEPS)
+    groups = {t: synthetic_group(4, N, t, seed=i) for i, t in enumerate(("rigid", "affine"))}
+    dgroup = fd.synthetic_deform_group(4, N, seed=0)
+    model = GroupRegLevelModel(4, narrow_config(dropout=0.0, seed=1, deform_decoder=True)).build_model(N)
+    head = model.deform_decoder.svf_head
+    head.kernel.assign(np.random.default_rng(0).normal(0, 1e-3, head.kernel.shape).astype(np.float32))
+    sources = {t: fd.FixedGroupSource(g["batch"]) for t, g in groups.items()}
+    sources["deform"] = fd.FixedGroupSource(dgroup["batch"])
+    tr = Trainer(model, O.make_optimizer("adam", lr=1e-3), sources, groups["rigid"]["S"],
+                 config(task_ratio=ratio, seed=seed, flip_prob=0.5))
+    tr.fit(DEFORM_GOLDEN_STEPS)
+    deform = [[float(h[k]) for k in ("tmpl", "pdice", "smooth")] for h in tr.history if h["task"] == "deform"]
+    return {"seed": seed, "tasks": [h["task"] for h in tr.history],
+            "loss": [float(h["loss"]) for h in tr.history], "deform_terms": deform,
+            "variables": {GroupRegLevelModel._local_name(v): [float(np.sum(v.numpy().astype(np.float64))),
+                                                              float(np.max(np.abs(v.numpy())))]
+                          for v in model.variables}}
+
+
+class _OpDeterminism:
+    """Op determinism on GPU for the duration of a block, restored afterwards.
+
+    Without it the deform golden run is not reproducible: the gradients of the warp's gathers are
+    GPU segment sums with nondeterministic accumulation order; Adam amplifies the ~1e-7 noise of
+    step 2 to max |diff| ~100-300 over 8 steps (variable sums incl. BN statistics, measured on
+    the GTX 1080). With determinism on, reruns are bit-identical."""
+
+    def __enter__(self):
+        from tensorflow.python.framework import config as tf_config
+        self._cfg = tf_config
+        self._was = tf_config.is_op_determinism_enabled()
+        tf_config.enable_op_determinism()
+        return self
+
+    def __exit__(self, *exc):
+        if not self._was:
+            self._cfg.disable_op_determinism()
+        return False
+
+
+class TestDeformUnchanged(unittest.TestCase):
+    """LNCC guard: three-task training with the LNCC weights at their defaults (0) is unchanged.
+    The fixture was written on the milestone-7 code (commit b35bb54, before any LNCC change) with
+    BGR_WRITE_GOLDEN=1, under `_OpDeterminism` (tolerance 0: reruns are bit-identical)."""
+
+    def tearDown(self):
+        free_memory()
+
+    def test_matches_golden(self):
+        with _OpDeterminism():
+            got = _deform_golden_run()
+        if os.environ.get("BGR_WRITE_GOLDEN") == "1":
+            os.makedirs(os.path.dirname(DEFORM_GOLDEN_PATH), exist_ok=True)
+            with open(DEFORM_GOLDEN_PATH, "w") as f:
+                json.dump(dict(got, tolerance=0.0), f, indent=1, sort_keys=True)
+            sys.stderr.write("\n[golden] wrote %s\n" % DEFORM_GOLDEN_PATH)
+        with open(DEFORM_GOLDEN_PATH) as f:
+            want = json.load(f)
+        tol = float(want.get("tolerance", 0.0))
+        self.assertEqual(got["seed"], want["seed"])
+        self.assertEqual(got["tasks"], want["tasks"])
+        self.assertEqual(set(got["tasks"]), {"rigid", "affine", "deform"})
+        self.assertEqual(sorted(got["variables"]), sorted(want["variables"]))
+        diffs = [abs(a - b) for a, b in zip(got["loss"], want["loss"])]
+        for a, b in zip(got["deform_terms"], want["deform_terms"]):
+            diffs += [abs(x - y) for x, y in zip(a, b)]
+        for name, (s, m) in want["variables"].items():
+            gs, gm = got["variables"][name]
+            diffs += [abs(gs - s), abs(gm - m)]
+        sys.stderr.write("\n[golden deform] max |diff| %.3g (tolerance %.3g)\n" % (max(diffs), tol))
+        if tol == 0.0:
+            self.assertEqual(got["loss"], want["loss"])
+            self.assertEqual(got["deform_terms"], want["deform_terms"])
+            self.assertEqual(got["variables"], want["variables"])
+        else:
+            self.assertLessEqual(max(diffs), tol)
+
+
 class TestDeformValidation(DeformCase):
     def test_deform_validation_and_pngs(self):
         vs = fd.DeformValidationSet.from_group(self.dgroup["images"], self.dgroup["labels"], 4)
@@ -978,6 +1140,13 @@ class TestDeformValidation(DeformCase):
         self.assertEqual(m["val_deform/neg_jac_pct"], 0.0)
         self.assertEqual(m["val_deform/inv_consistency_mm"], 0.0)
         self.assertEqual(m["val_deform/centrality_mm"], 0.0)
+        # v3.9 LNCC metrics (always computed): identity model = identity baseline.
+        for k in ("ncc_template", "ncc_pair", "ncc_template_identity", "ncc_pair_identity"):
+            self.assertTrue(np.isfinite(m["val_deform/" + k]), k)
+            self.assertGreater(m["val_deform/" + k], 0.0, k)
+            self.assertLessEqual(m["val_deform/" + k], 1.0, k)
+        self.assertAlmostEqual(m["val_deform/ncc_template"], m["val_deform/ncc_template_identity"], places=10)
+        self.assertAlmostEqual(m["val_deform/ncc_pair"], m["val_deform/ncc_pair_identity"], places=10)
         from runtime import val_png as V
         path = os.path.join(png, "deform_step0000000.png")
         self.assertEqual(os.listdir(png), ["deform_step0000000.png"])
@@ -988,6 +1157,9 @@ class TestDeformValidation(DeformCase):
         self.assertGreater(m2["val_deform/inv_consistency_mm"], 0.0)     # u != 0 after training steps
         self.assertTrue(np.isfinite(m2["val_deform/pair_dice"]))
         self.assertEqual(m2["val_deform/pair_dice_identity"], m["val_deform/pair_dice_identity"])
+        for k in ("ncc_template_identity", "ncc_pair_identity"):
+            self.assertEqual(m2["val_deform/" + k], m["val_deform/" + k], k)
+        self.assertTrue(np.isfinite(m2["val_deform/ncc_template"]))
         self.assertEqual(tr.val_trace_counts, {("deform", N, False): 1, ("deform", N, True): 1})
         # Pair cap: N (N - 1) = 12 > 5 -> a fixed seeded subset of 5 pairs.
         tr.cfg.val_deform_max_pairs = 5

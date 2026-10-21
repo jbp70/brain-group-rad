@@ -31,6 +31,8 @@
 #   RUN_NAME=m7_smoke STEPS=200 VAL_EVERY=100 WARMUP=50 sbatch --job-name=m7smoke --time=00:45:00 --mem=64G slurm/m7_three_task.sh
 # Long run (12000 steps, ~2.2 s/step average estimated + 48 validations, ~9 h):
 #   RUN_NAME=m7_three_task_long sbatch --job-name=m7long --time=12:00:00 --mem=64G slurm/m7_three_task.sh
+# LNCC A/B (design 6.2 v3.9; LNCC weights default 0 = this recipe unchanged), Dice+LNCC arm:
+#   RUN_NAME=m7_three_task_lncc EXTRA_ARGS="--lambda-ncc-template 1 --lambda-ncc-pair 1" sbatch --job-name=m7lncc --time=14:00:00 --mem=64G slurm/m7_three_task.sh
 # Time estimates (not measured for this recipe): linear step ~1.4 s at N = 32 (m5, RTX 8000),
 # deform step ~3 s at N = 16 (extrapolated from 1.6 s at N = 8). Memory: linear N 32 ~34 GB,
 # deform N 16 ~33.8 GB on the 48 GB cards; the peak is the larger of the two, not the sum. On

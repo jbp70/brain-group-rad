@@ -17,8 +17,11 @@ statistics (`tf.config.experimental.get_memory_info('GPU:0')`, reset before the 
 steps) give the peak; DALI is not involved. An OOM (ResourceExhaustedError) is caught and
 recorded per configuration; larger N of the same widths / checkpointing are then skipped.
 
+--lambda-ncc-template / --lambda-ncc-pair (default 0) add the LNCC terms (design 6.2 v3.9) to
+the measured loss; both are recorded per result and part of the configuration key.
+
 JSON (``--out``): {"environment": {...}, "results": [{n, widths, gradient_checkpointing,
-params, status ('ok' | 'oom' | 'error' | 'skipped'), peak_mb (measured steps), warmup_peak_mb,
+lambda_ncc_tmpl, lambda_ncc_pair, params, status ('ok' | 'oom' | 'error' | 'skipped'), peak_mb (measured steps), warmup_peak_mb,
 resident_mb (allocated before the measured steps: weights, optimizer slots, batch), step_ms
 (median), step_ms_all, loss, error}]}. With an existing --out file the new results are merged
 (same configuration replaced), so several invocations build one table.
@@ -66,7 +69,7 @@ def model_config(widths):
     raise ValueError("widths must be 'narrow' or 'default', got %r" % (widths,))
 
 
-def measure(n, widths, ckpt, steps, seed=0):
+def measure(n, widths, ckpt, steps, seed=0, lambda_ncc_tmpl=0.0, lambda_ncc_pair=0.0):
     from data_loading import params as P
     from models import transforms as tfm
     from models.group_net import GroupRegLevelModel
@@ -75,12 +78,14 @@ def measure(n, widths, ckpt, steps, seed=0):
     from runtime.run import Trainer, TrainConfig
     from runtime.schedulers import ScheduleConfig
 
-    res = {"n": int(n), "widths": widths, "gradient_checkpointing": ckpt}
+    res = {"n": int(n), "widths": widths, "gradient_checkpointing": ckpt,
+           "lambda_ncc_tmpl": float(lambda_ncc_tmpl), "lambda_ncc_pair": float(lambda_ncc_pair)}
     group = fd.synthetic_deform_group(LEVEL, int(n), seed=seed)
     mask = np.asarray(group["base_labels"]).reshape(P.LEVEL_SHAPE[LEVEL]) > 0
     S = tfm.brain_second_moment(mask, P.LEVEL_SPACING[LEVEL])
     cfg = TrainConfig(level=LEVEL, group_size=int(n), steps=steps + 1, val_every=0, log_every=1,
-                      task_ratio={"deform": 1.0}, seed=seed,
+                      task_ratio={"deform": 1.0}, seed=seed, lambda_ncc_tmpl=float(lambda_ncc_tmpl),
+                      lambda_ncc_pair=float(lambda_ncc_pair),
                       schedule=ScheduleConfig("constant", base_lr=3e-4, total_steps=steps + 1,
                                               warmup_steps=0))
     model = GroupRegLevelModel(LEVEL, model_config(widths), gradient_checkpointing=ckpt).build_model(int(n))
@@ -117,7 +122,8 @@ def free_memory():
 
 
 def config_key(r):
-    return (r["n"], r["widths"], r["gradient_checkpointing"])
+    return (r["n"], r["widths"], r["gradient_checkpointing"], float(r.get("lambda_ncc_tmpl", 0.0)),
+            float(r.get("lambda_ncc_pair", 0.0)))
 
 
 def main(argv=None):
@@ -130,6 +136,9 @@ def main(argv=None):
     ap.add_argument("--gpu-memory-limit-mb", type=int, default=0,
                     help="fixed TF logical-device limit (0: memory growth, e.g. on the cluster)")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--lambda-ncc-template", type=float, default=0.0,
+                    help="LNCC template weight of the measured deform loss (design 6.2 v3.9; 0 = off)")
+    ap.add_argument("--lambda-ncc-pair", type=float, default=0.0, help="LNCC pairwise weight (0 = off)")
     ap.add_argument("--out", required=True, help="JSON output (merged with an existing file)")
     a = ap.parse_args(argv)
     configure_gpu(a.gpu_memory_limit_mb)
@@ -157,28 +166,28 @@ def main(argv=None):
         for c in ckpts:
             oom_at = None
             for n in ns:
+                base = {"n": n, "widths": w, "gradient_checkpointing": c,
+                        "lambda_ncc_tmpl": a.lambda_ncc_template, "lambda_ncc_pair": a.lambda_ncc_pair}
                 if oom_at is not None:
-                    results.append({"n": n, "widths": w, "gradient_checkpointing": c, "status": "skipped",
-                                    "error": "OOM at N = %d" % oom_at})
+                    results.append(dict(base, status="skipped", error="OOM at N = %d" % oom_at))
                     continue
                 t0 = time.time()
                 try:
-                    r = measure(n, w, c, a.steps, a.seed)
+                    r = measure(n, w, c, a.steps, a.seed, a.lambda_ncc_template, a.lambda_ncc_pair)
                 except tf.errors.ResourceExhaustedError as e:
-                    r = {"n": n, "widths": w, "gradient_checkpointing": c, "status": "oom",
-                         "error": str(e).strip().splitlines()[0][:300]}
+                    r = dict(base, status="oom", error=str(e).strip().splitlines()[0][:300])
                     oom_at = n
                 except Exception as e:  # noqa: BLE001
                     traceback.print_exc()
-                    r = {"n": n, "widths": w, "gradient_checkpointing": c, "status": "error",
-                         "error": repr(e)[:300]}
+                    r = dict(base, status="error", error=repr(e)[:300])
                 r["wall_s"] = time.time() - t0
                 free_memory()
                 results.append(r)
                 if r["status"] == "ok":
-                    print("N=%-3d %-7s ckpt=%-10s peak %8.1f MB (warm-up %8.1f, resident %7.1f)  step %7.1f ms  "
-                          "loss %.4f" % (n, w, c, r["peak_mb"], r["warmup_peak_mb"], r["resident_mb"],
-                                         r["step_ms"], r["loss"]), flush=True)
+                    print("N=%-3d %-7s ckpt=%-10s ncc %g/%g peak %8.1f MB (warm-up %8.1f, resident %7.1f)  "
+                          "step %7.1f ms  loss %.4f" % (n, w, c, a.lambda_ncc_template, a.lambda_ncc_pair,
+                                                        r["peak_mb"], r["warmup_peak_mb"], r["resident_mb"],
+                                                        r["step_ms"], r["loss"]), flush=True)
                 else:
                     print("N=%-3d %-7s ckpt=%-10s %s: %s" % (n, w, c, r["status"].upper(), r.get("error")),
                           flush=True)
@@ -192,7 +201,9 @@ def main(argv=None):
     for r in results:
         merged[config_key(r)] = r
     out = {"environment": env,
-           "results": sorted(merged.values(), key=lambda r: (r["widths"], r["gradient_checkpointing"], r["n"]))}
+           "results": sorted(merged.values(), key=lambda r: (r["widths"], r["gradient_checkpointing"],
+                                                             float(r.get("lambda_ncc_tmpl", 0.0)),
+                                                             float(r.get("lambda_ncc_pair", 0.0)), r["n"]))}
     os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
     with open(a.out, "w") as f:
         json.dump(out, f, indent=2)

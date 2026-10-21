@@ -28,6 +28,10 @@ Pattern from the rigid project's ``runtime/args.py`` (argparse + ``str2bool``). 
   linear-only. Best checkpoint: the linear rule over the linear tasks; deform-only runs use
   val_deform/pair_dice_loss (1 - mean pairwise hard Dice); deform + linear runs also keep
   ckpt/best_deform on that key.
+* LNCC (design 6.2 v3.9): --lambda-ncc-template / --lambda-ncc-pair default 0 (off, the
+  milestone-6/7 deform loss unchanged), --lambda-dice-template 1, --ncc-window per level
+  (`data_loading.params.NCC_WINDOW_DEFAULT`: 5 / 7 / 9 at levels 4 / 2 / 1). A deform run needs
+  at least one similarity weight > 0.
 """
 import argparse
 import collections
@@ -210,6 +214,16 @@ def build_parser():
     g.add_argument("--lambda-pdice", type=float, default=1.0, help="weight of the pairwise soft Dice loss")
     g.add_argument("--p-pdice", type=float, default=0.1,
                    help="fraction of the ordered pairs of a group in the pairwise Dice loss (>= 1 pair)")
+    g.add_argument("--lambda-dice-template", type=float, default=1.0,
+                   help="weight of the template soft Dice loss (0 with --lambda-pdice 0: LNCC-only ablation)")
+    g.add_argument("--lambda-ncc-template", type=float, default=0.0,
+                   help="weight of 1 - LNCC of each warped image vs the leave-one-out intensity template "
+                   "(design 6.2 v3.9; 0 = off)")
+    g.add_argument("--lambda-ncc-pair", type=float, default=0.0,
+                   help="weight of 1 - LNCC on the pairwise-Dice pairs (0 = off)")
+    g.add_argument("--ncc-window", type=int, default=None,
+                   help="LNCC box window in level voxels (odd, >= 3; default per level: %s)"
+                   % ", ".join("%d at level %d" % (P.NCC_WINDOW_DEFAULT[lv], lv) for lv in P.LEVELS))
     g.add_argument("--lambda-smooth", type=float, default=0.5, help="weight of the displacement smoothness loss")
     g.add_argument("--smooth-order", type=int, default=1, choices=[1, 2],
                    help="1: mean squared forward differences of u; 2: bending energy")
@@ -360,6 +374,20 @@ def parse_args(argv=None):
         parser.error("--val-deform-max-pairs must be >= 1, got %d" % args.val_deform_max_pairs)
     if not (0.0 < args.p_pdice <= 1.0):
         parser.error("--p-pdice must be in (0, 1], got %r" % args.p_pdice)
+    sim = ("lambda_dice_template", "lambda_pdice", "lambda_ncc_template", "lambda_ncc_pair")
+    for name in sim:
+        v = getattr(args, name)
+        if not (math.isfinite(v) and v >= 0):
+            parser.error("--%s must be finite and >= 0, got %r" % (name.replace("_", "-"), v))
+    if deform and all(getattr(args, name) == 0 for name in sim):
+        parser.error("'deform' is trained but every similarity weight (--lambda-dice-template, "
+                     "--lambda-pdice, --lambda-ncc-template, --lambda-ncc-pair) is 0")
+    if args.ncc_window is None:
+        args.ncc_window = P.ncc_window_for_level(args.level)
+    if (args.ncc_window < 3 or args.ncc_window % 2 == 0
+            or args.ncc_window > min(P.LEVEL_SHAPE[args.level])):
+        parser.error("--ncc-window must be odd, >= 3 and <= %d at level %d, got %d"
+                     % (min(P.LEVEL_SHAPE[args.level]), args.level, args.ncc_window))
     if args.dropout is None:
         args.dropout = 0.0 if args.overfit_one_group else _MC.dropout
     if args.ckpt_every is None:
@@ -500,6 +528,8 @@ def train_config_from_args(args):
                        val_png_gt_row=args.val_png_gt_row, val_png_mean_col=args.val_png_mean_col,
                        lambda_pdice=args.lambda_pdice, p_pdice=args.p_pdice,
                        lambda_smooth=args.lambda_smooth, smooth_order=args.smooth_order,
+                       lambda_dice_tmpl=args.lambda_dice_template, lambda_ncc_tmpl=args.lambda_ncc_template,
+                       lambda_ncc_pair=args.lambda_ncc_pair, ncc_window=args.ncc_window,
                        deform_residual_affine=args.deform_residual_affine,
                        deform_group_size=args.deform_group_size,
                        overfit_dice_threshold=args.overfit_dice_threshold,

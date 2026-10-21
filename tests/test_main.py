@@ -124,15 +124,30 @@ class TestDeformMain(MainCase):
         self.assertEqual((mc["deform_decoder"], mc["decoder_widths"], mc["integration_steps"]), (True, None, 7))
         for k in ("lambda_pdice", "p_pdice", "lambda_smooth", "smooth_order", "integration_steps",
                   "decoder_widths", "deform_decoder", "deform_residual_affine", "deform_group_size",
-                  "gradient_checkpointing", "overfit_dice_threshold", "overfit_fold_max", "val_deform_max_pairs"):
+                  "gradient_checkpointing", "overfit_dice_threshold", "overfit_fold_max", "val_deform_max_pairs",
+                  "lambda_dice_template", "lambda_ncc_template", "lambda_ncc_pair", "ncc_window"):
             self.assertIn(k, cfg["args"])
         self.assertEqual(cfg["args"]["best_metric"], "val_deform/pair_dice_loss")
         self.assertIn("deform_decoder", cfg["param_counts"])
         lines = self.read_metrics("ddry")
         self.assertTrue(any("val_deform/pair_dice" in r["data"] for r in lines[1:]))
         self.assertTrue(any("train_deform/soft_dice_tmpl" in r["data"] for r in lines[1:]))
+        self.assertFalse(any("train_deform/ncc_tmpl" in r["data"] for r in lines[1:]))     # LNCC off
+        self.assertTrue(any("val_deform/ncc_template" in r["data"] for r in lines[1:]))   # always validated
         self.assertEqual(os.listdir(os.path.join(d, "val_png")), ["deform_step0000002.png"])
         self.assertFalse(os.path.exists(os.path.join(d, "control")))
+
+    def test_synthetic_deform_ncc_dry_run(self):
+        # v3.9: Dice + LNCC through main.py.
+        rc = M.main(["--overfit-one-group", "--overfit-synthetic", "--dry-run", "--group-size", "4",
+                     "--task-ratio", "deform:1", "--results", os.path.join(self.tmp, "results"),
+                     "--run-name", "dncc", "--lambda-ncc-template", "1", "--lambda-ncc-pair", "1",
+                     "--val-png", "false"] + NARROW_ARGS + COMMON)
+        self.assertEqual(rc, 0)
+        lines = self.read_metrics("dncc")
+        for k in ("train_deform/ncc_tmpl", "train_deform/ncc_pair", "train_deform/ncc_tmpl_loss",
+                  "val_deform/ncc_template", "val_deform/ncc_pair", "val_deform/ncc_template_identity"):
+            self.assertTrue(any(k in r["data"] for r in lines[1:]), k)
 
     def test_deform_real_data_overfit_path(self):
         root = write_fake_export(self.tmp, n_train=5, n_val=2, labels=True)

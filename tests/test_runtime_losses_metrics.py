@@ -439,6 +439,264 @@ class TestDeformLosses(unittest.TestCase):
         np.testing.assert_allclose(float(terms["pdice"]), float(pd), rtol=1e-6)
         np.testing.assert_allclose(float(terms["soft_dice_pair"]), 1.0 - float(pd), rtol=1e-6)
 
+    # ---------------------------------------------------------------- LNCC wiring (v3.9)
+    def ncc_case(self, c=4, n=3):
+        labs = [block_labels(self.SHAPE, c, self.rng) for _ in range(n)]
+        oh = np.stack([self.onehot(l, c) for l in labs])
+        # Intensities: a per-label value + noise (zero background), so LNCC sees edges.
+        levels = np.concatenate([[0.0], self.rng.uniform(0.3, 1.0, c - 1)])
+        imgs = (levels[np.stack(labs)] + 0.05 * self.rng.normal(size=(n,) + self.SHAPE))[..., None]
+        imgs = np.where(np.stack(labs)[..., None] > 0, imgs, 0.0).astype(np.float32)
+        v = tf.constant(self.rng.normal(scale=0.3, size=(n,) + self.SHAPE + (3,)).astype(np.float32))
+        u, u_inv = diffeo.exp_and_inverse(v, 4)
+        batch = {"onehot": oh, "images": imgs, "pair_i": tf.constant([0, 2]), "pair_j": tf.constant([1, 0])}
+        return {"u": u, "u_inv": u_inv}, batch
+
+    def test_ncc_defaults_unchanged(self):
+        out, batch = self.ncc_case()
+        ref = losses.deform_loss(out, batch)
+        same = losses.deform_loss(out, batch, 1.0, 0.5, 1, lambda_dice_tmpl=1.0, lambda_ncc_tmpl=0.0,
+                                  lambda_ncc_pair=0.0, ncc_window=3)
+        self.assertEqual(sorted(ref), sorted(same))
+        self.assertEqual(sorted(ref), sorted(("loss", "tmpl", "pdice", "smooth", "soft_dice_tmpl",
+                                              "soft_dice_pair")))
+        for k in ref:
+            self.assertEqual(float(ref[k]), float(same[k]), k)        # bit-identical
+        no_img = {k: v for k, v in batch.items() if k != "images"}
+        self.assertEqual(float(losses.deform_loss(out, no_img)["loss"]), float(ref["loss"]))
+        with self.assertRaisesRegex(ValueError, "images"):
+            losses.deform_loss(out, no_img, lambda_ncc_pair=1.0)
+
+    def test_ncc_total_and_keys(self):
+        out, batch = self.ncc_case()
+        t = losses.deform_loss(out, batch, lambda_pdice=0.7, lambda_smooth=0.3, smooth_order=1,
+                               lambda_dice_tmpl=0.5, lambda_ncc_tmpl=0.4, lambda_ncc_pair=0.6, ncc_window=3)
+        for k in ("loss", "tmpl", "pdice", "smooth", "soft_dice_tmpl", "soft_dice_pair", "ncc_tmpl",
+                  "ncc_pair", "ncc_tmpl_loss", "ncc_pair_loss"):
+            self.assertEqual(t[k].dtype, tf.float32, k)
+            self.assertTrue(np.isfinite(float(t[k])), k)
+        f = {k: float(v) for k, v in t.items()}
+        np.testing.assert_allclose(f["loss"], 0.5 * f["tmpl"] + 0.7 * f["pdice"] + 0.3 * f["smooth"]
+                                   + 0.4 * f["ncc_tmpl_loss"] + 0.6 * f["ncc_pair_loss"], rtol=1e-6)
+        for k in ("ncc_tmpl", "ncc_pair"):
+            self.assertGreater(f[k], 0.0)
+            self.assertLessEqual(f[k], 1.0)
+            np.testing.assert_allclose(f[k + "_loss"], 1.0 - f[k], rtol=1e-6)
+        # Only the active term's keys.
+        only_t = losses.deform_loss(out, batch, lambda_ncc_tmpl=1.0, ncc_window=3)
+        self.assertIn("ncc_tmpl", only_t)
+        self.assertNotIn("ncc_pair", only_t)
+        # The pair term with the shared displacement equals a separate recomputation.
+        oh = tf.constant(batch["onehot"])
+        disp = diffeo.pairwise_displacement(out["u"], out["u_inv"], batch["pair_i"], batch["pair_j"])
+        moved = diffeo.warp(tf.gather(oh, batch["pair_i"]), disp)
+        _, ncc_p = losses.pair_ncc_loss(batch["images"], disp, batch["pair_i"], batch["pair_j"],
+                                        losses.foreground(moved), losses.foreground(tf.gather(oh, batch["pair_j"])), 3)
+        np.testing.assert_allclose(f["ncc_pair"], float(np.mean(ncc_p)), rtol=1e-6)
+        w = diffeo.warp(oh, out["u"])
+        _, ncc_t = losses.template_ncc_loss(diffeo.warp(batch["images"], out["u"]),
+                                            losses.foreground(tf.reduce_mean(w, axis=0, keepdims=True)), 3)
+        np.testing.assert_allclose(f["ncc_tmpl"], float(np.mean(ncc_t)), rtol=1e-6)
+
+    def test_dice_template_weight_zero(self):
+        out, batch = self.ncc_case()
+        u = tf.Variable(out["u"])
+        u_inv = tf.constant(out["u_inv"])
+        with tf.GradientTape(persistent=True) as tape:
+            t0 = losses.deform_loss({"u": u, "u_inv": u_inv}, batch, lambda_dice_tmpl=0.0)
+            ref = (losses.pair_dice_loss(batch["onehot"], u, u_inv, batch["pair_i"], batch["pair_j"])[0]
+                   + 0.5 * losses.smoothness_loss(u, 1))
+        g0, gr = tape.gradient(t0["loss"], u).numpy(), tape.gradient(ref, u).numpy()
+        np.testing.assert_allclose(g0, gr, rtol=1e-5, atol=1e-9)
+        self.assertGreater(float(t0["soft_dice_tmpl"]), 0.0)          # still computed and logged
+
+
+def np_local_ncc(a, b, k, eps=losses.NCC_EPS, signed=False):
+    """float64 numpy reference of losses.local_ncc for one [X, Y, Z] pair (zero padding, true
+    window counts)."""
+    from scipy import ndimage
+    a, b = np.asarray(a, np.float64), np.asarray(b, np.float64)
+    cnt = ndimage.uniform_filter(np.ones_like(a), k, mode="constant")
+    m = lambda x: ndimage.uniform_filter(x, k, mode="constant") / cnt  # noqa: E731
+    ma, mb = m(a), m(b)
+    cov = m(a * b) - ma * mb
+    va, vb = np.maximum(m(a * a) - ma ** 2, 0.0), np.maximum(m(b * b) - mb ** 2, 0.0)
+    return cov / np.sqrt(va * vb + eps) if signed else cov ** 2 / (va * vb + eps)
+
+
+def smooth_noise(rng, shape, sigma=1.0):
+    from scipy import ndimage
+    x = ndimage.gaussian_filter(rng.normal(size=shape), sigma)
+    return (x - x.mean()) / x.std()
+
+
+class TestLNCC(unittest.TestCase):
+    SHAPE = (12, 14, 10)
+
+    def setUp(self):
+        self.rng = np.random.default_rng(11)
+
+    def test_box_sum_and_counts(self):
+        from scipy import ndimage
+        x = self.rng.uniform(size=(2,) + self.SHAPE + (2,)).astype(np.float32)
+        for k in (3, 5):
+            s = losses.box_sum(tf.constant(x), k).numpy()
+            self.assertEqual(s.shape, x.shape)
+            cnt = losses.window_count(self.SHAPE, k)
+            np.testing.assert_allclose(losses.box_sum(tf.ones((1,) + self.SHAPE + (1,)), k).numpy()[0, ..., 0],
+                                       cnt, rtol=1e-6)
+            ones = ndimage.uniform_filter(np.ones(self.SHAPE), k, mode="constant")
+            for b in range(2):
+                for c in range(2):
+                    want = ndimage.uniform_filter(x[b, ..., c].astype(np.float64), k, mode="constant") / ones
+                    np.testing.assert_allclose(s[b, ..., c] / cnt, want, rtol=1e-5, err_msg="k %d" % k)
+            self.assertEqual(cnt[0, 0, 0], (k // 2 + 1) ** 3)                  # corner
+            self.assertEqual(cnt[6, 7, 5], k ** 3)                             # interior
+
+    def test_local_ncc_matches_numpy(self):
+        a = smooth_noise(self.rng, (2,) + self.SHAPE, 0.7)
+        b = 0.6 * a + 0.8 * smooth_noise(self.rng, (2,) + self.SHAPE, 0.7)
+        for k in (3, 5):
+            for signed in (False, True):
+                got = losses.local_ncc(tf.constant(a, tf.float32), tf.constant(b, tf.float32), k,
+                                       signed=signed).numpy()
+                self.assertEqual(got.shape, (2,) + self.SHAPE)
+                for i in range(2):
+                    np.testing.assert_allclose(got[i], np_local_ncc(a[i], b[i], k, signed=signed),
+                                               rtol=1e-4, atol=1e-5, err_msg="k %d signed %s" % (k, signed))
+
+    def test_affine_intensity_invariance(self):
+        a = self.rng.uniform(size=(1,) + self.SHAPE).astype(np.float32)
+        from scipy import ndimage
+        cnt = ndimage.uniform_filter(np.ones(self.SHAPE), 5, mode="constant")
+        m = lambda x: ndimage.uniform_filter(x, 5, mode="constant") / cnt  # noqa: E731
+        var = m(a[0].astype(np.float64) ** 2) - m(a[0].astype(np.float64)) ** 2
+        mask = var > 1e-4
+        self.assertGreater(mask.mean(), 0.9)
+        for b, sq, sg in ((2.0 * a + 0.3, 1.0, 1.0), (-a, 1.0, -1.0)):
+            cc = losses.local_ncc(a, b, 5).numpy()[0]
+            cs = losses.local_ncc(a, b, 5, signed=True).numpy()[0]
+            np.testing.assert_allclose(cc[mask], sq, atol=1e-4)
+            np.testing.assert_allclose(cs[mask], sg, atol=1e-4)
+        # Self-similarity = 1 in the masked mean.
+        roi = np.ones((1,) + self.SHAPE, np.float32)
+        self.assertGreater(float(losses.masked_mean(losses.local_ncc(a, a, 5), roi)[0]), 1.0 - 1e-4)
+        # Independent noise ~ 0.
+        b = self.rng.uniform(size=(1,) + self.SHAPE).astype(np.float32)
+        self.assertLess(float(losses.masked_mean(losses.local_ncc(a, b, 5), roi)[0]), 0.05)
+
+    def blocks(self, n=2):
+        """Constant blocks (value per image) on a zero background, and their foreground."""
+        imgs = np.zeros((n,) + self.SHAPE + (1,), np.float32)
+        imgs[:, 3:9, 4:10, 3:7] = np.linspace(0.3, 0.9, n)[:, None, None, None, None]
+        fg = (imgs[..., 0] > 0).astype(np.float32)
+        return imgs, fg
+
+    def test_flat_regions_finite(self):
+        imgs, fg = self.blocks(3)
+        cc = losses.local_ncc(imgs[:1], imgs[1:2], 3).numpy()[0]
+        self.assertTrue(np.all(np.isfinite(cc)))
+        self.assertLess(float(np.abs(cc[5, 6, 4])), 1e-3)          # both flat (block interior)
+        self.assertLess(float(np.abs(cc[0, 0, 0])), 1e-3)          # both flat (background)
+        self.assertGreater(float(cc[3, 6, 4]), 0.9)                 # at the block edge: aligned
+        u = tf.Variable(0.2 * self.rng.normal(size=(3,) + self.SHAPE + (3,)).astype(np.float32))
+        x = tf.Variable(imgs)
+        with tf.GradientTape(persistent=True) as tape:
+            lt, _ = losses.template_ncc_loss(diffeo.warp(x, u), fg[:1], 3)
+            disp = diffeo.pairwise_displacement(u, -u, [0, 1], [1, 2])
+            lp, _ = losses.pair_ncc_loss(x, disp, [0, 1], [1, 2], fg[:2], fg[1:], 3)
+            total = lt + lp
+        for g in (tape.gradient(total, u), tape.gradient(total, x)):
+            self.assertTrue(np.all(np.isfinite(g.numpy())))
+            self.assertGreater(float(np.abs(g.numpy()).sum()), 0.0)
+        # All-zero images: finite loss (cc = 0 -> loss 1) and finite gradients.
+        z = tf.Variable(np.zeros_like(imgs))
+        with tf.GradientTape() as tape:
+            lz, ncc = losses.template_ncc_loss(diffeo.warp(z, u), fg[:1], 3)
+        self.assertAlmostEqual(float(lz), 1.0, places=6)
+        self.assertTrue(np.all(np.isfinite(tape.gradient(lz, [z, u])[1].numpy())))
+
+    def test_roi_excludes_far_background_and_border(self):
+        imgs, fg = self.blocks(3)
+        imgs = imgs + 0.1 * self.rng.uniform(size=imgs.shape).astype(np.float32) * (imgs > 0)
+        roi = losses.ncc_roi(fg[:1], 3).numpy()[0]
+        np.testing.assert_array_equal(roi[2:10, 3:11, 2:8], 1.0)    # dilated by k // 2 = 1
+        self.assertEqual(float(roi.sum()), 8 * 8 * 6)
+        loss0, _ = losses.template_ncc_loss(imgs, fg[:1], 3)
+        # Noise more than 2 * (k // 2) voxels from the foreground never enters an ROI window.
+        far = np.ones(self.SHAPE, bool)
+        far[1:11, 2:12, 1:9] = False
+        noisy = imgs + (self.rng.uniform(size=imgs.shape) * far[None, ..., None]).astype(np.float32)
+        loss1, _ = losses.template_ncc_loss(noisy, fg[:1], 3)
+        np.testing.assert_allclose(float(loss1), float(loss0), rtol=1e-6)
+        # Foreground touching the volume border: finite.
+        edge = np.zeros_like(imgs)
+        edge[:, :4] = self.rng.uniform(size=edge[:, :4].shape)
+        lb, nb = losses.template_ncc_loss(edge, (edge[:1, ..., 0] > 0).astype(np.float32), 5)
+        self.assertTrue(np.isfinite(float(lb)))
+        self.assertTrue(np.all(np.isfinite(nb.numpy())))
+
+    def test_leave_one_out(self):
+        roi = np.ones((1,) + self.SHAPE, np.float32)
+        noise = self.rng.uniform(size=(4,) + self.SHAPE + (1,)).astype(np.float32)
+        _, loo = losses.template_ncc_loss(noise, roi, 5)
+        _, inc = losses.template_ncc_loss(noise, roi, 5, leave_one_out=False)
+        self.assertLess(float(np.mean(loo)), 0.05)
+        self.assertGreater(float(np.mean(inc)), 0.15)                # the ~1/N self-term floor
+        same = np.repeat(noise[:1], 4, axis=0)
+        _, one = losses.template_ncc_loss(same, roi, 5)
+        np.testing.assert_allclose(one.numpy(), 1.0, atol=1e-4)
+
+    def test_template_gradient_flows_through_template(self):
+        imgs, fg = self.blocks(3)
+        imgs = imgs + 0.1 * self.rng.uniform(size=imgs.shape).astype(np.float32)
+        u = tf.Variable(0.3 * self.rng.normal(size=(3,) + self.SHAPE + (3,)).astype(np.float32))
+        roi = losses.ncc_roi(fg[:1], 3)
+
+        def grads(stop):
+            with tf.GradientTape() as tape:
+                w = diffeo.warp(imgs, u)
+                if stop:
+                    t = tf.stop_gradient((tf.reduce_sum(w, axis=0, keepdims=True) - w) / 2.0)
+                    loss = tf.reduce_mean(1.0 - losses.masked_mean(losses.local_ncc(w, t, 3), roi))
+                else:
+                    loss = losses.template_ncc_loss(w, fg[:1], 3)[0]
+            return tape.gradient(loss, u).numpy()
+
+        g, g_stop = grads(False), grads(True)
+        self.assertTrue(np.all(np.isfinite(g)))
+        self.assertGreater(float(np.abs(g - g_stop).max()), 1e-6)
+
+    def test_pair_shift(self):
+        img0 = smooth_noise(self.rng, self.SHAPE, 1.0)
+        img1 = np.zeros_like(img0)
+        img1[:-1] = img0[1:]                          # img1(x) = img0(x + 1)
+        imgs = np.stack([img0, img1])[..., None].astype(np.float32)
+        fg = np.ones((1,) + self.SHAPE, np.float32)
+        z = tf.zeros((2,) + self.SHAPE + (3,))
+        u_inv = np.zeros((2,) + self.SHAPE + (3,), np.float32)
+        u_inv[1, ..., 0] = 1.0
+        _, aligned = losses.pair_ncc_loss(imgs, diffeo.pairwise_displacement(z, u_inv, [0], [1]), [0], [1],
+                                          fg, fg, 5)
+        _, ident = losses.pair_ncc_loss(imgs, diffeo.pairwise_displacement(z, z, [0], [1]), [0], [1],
+                                        fg, fg, 5)
+        self.assertGreater(float(aligned[0]), 0.999)
+        self.assertLess(float(ident[0]), 0.99)
+
+    def test_dtypes_and_window_validation(self):
+        a = self.rng.uniform(size=(1,) + self.SHAPE + (1,))
+        out = losses.local_ncc(tf.constant(a, tf.float16), tf.constant(a, tf.float16), 3)
+        self.assertEqual(out.dtype, tf.float32)
+        loss, ncc = losses.template_ncc_loss(tf.constant(np.repeat(a, 2, 0), tf.float16),
+                                             np.ones((1,) + self.SHAPE, np.float16), 3)
+        self.assertEqual((loss.dtype, ncc.dtype), (tf.float32, tf.float32))
+        for bad in (4, 1, 11, 2.5):
+            with self.assertRaises(ValueError, msg=str(bad)):
+                losses.local_ncc(a, a, bad)
+        with self.assertRaises(ValueError):
+            losses.box_sum(tf.constant(a), 13)                      # larger than the volume (10)
+        self.assertEqual(losses.check_ncc_window(5.0), 5)
+
 
 class TestDeformMetrics(unittest.TestCase):
     def test_hard_dice_hand_made(self):

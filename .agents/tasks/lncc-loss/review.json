@@ -1,0 +1,10 @@
+{
+  "verdict": "APPROVED",
+  "findings": [
+    "Discarded train-mode LNCC (non-blocking, confirmed): _val_deform_errors(vs, groups, True) passes images, so the train-mode validation pass computes image/pair warps and box filters for LNCC and discards them (only template_dice/pair_dice are kept, run.py ~832). Pass images=None when train_mode is True.",
+    "N = 16 memory unmeasured (non-blocking): the local measurement shows no slope at N <= 4; the +0.5 GB at default widths N = 16 is an estimate. Confirm gpu_peak_mb in the LNCC smoke before the 14 h run, especially on the 40 GB A100.",
+    "Gradient imbalance unchanged (non-blocking, informational): LNCC raises the deform encoder gradient only ~2-3x on synthetic data, still orders of magnitude below the clipped linear steps; keep --task-loss-weights available for the real-data A/B.",
+    "Golden provenance by assertion (non-blocking): tests/fixtures/lncc_deform_golden.json is untracked and 'written on b35bb54' rests on the report/docstring; commit the fixture together with the code."
+  ],
+  "reviewDoc": "d:\\Research\\Brain_Registration_Projects\\brain-group-rad\\.agents\\tasks\\lncc-loss\\review.md"
+}

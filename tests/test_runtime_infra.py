@@ -167,6 +167,36 @@ class TestArgs(unittest.TestCase):
                 with self.assertRaises(SystemExit, msg=str(bad)):
                     A.parse_args(["--data", "x"] + bad)
 
+    def test_ncc_flags(self):
+        # v3.9 LNCC: defaults off (Dice weights 1), window per level; values reach TrainConfig.
+        a = A.parse_args(["--data", "x"])
+        self.assertEqual((a.lambda_dice_template, a.lambda_ncc_template, a.lambda_ncc_pair, a.ncc_window),
+                         (1.0, 0.0, 0.0, 5))
+        tc = A.train_config_from_args(a)
+        self.assertEqual((tc.lambda_dice_tmpl, tc.lambda_ncc_tmpl, tc.lambda_ncc_pair, tc.ncc_window),
+                         (1.0, 0.0, 0.0, 5))
+        for k in ("lambda_dice_template", "lambda_ncc_template", "lambda_ncc_pair", "ncc_window"):
+            self.assertIn(k, A.args_to_dict(a))
+        self.assertEqual(A.parse_args(["--data", "x", "--level", "2"]).ncc_window, 7)
+        self.assertEqual(A.parse_args(["--data", "x", "--level", "1"]).ncc_window, 9)
+        a = A.parse_args(["--data", "x", "--task-ratio", "deform:1", "--lambda-dice-template", "0",
+                          "--lambda-pdice", "0", "--lambda-ncc-template", "1.5", "--lambda-ncc-pair", "0.5",
+                          "--ncc-window", "3"])
+        tc = A.train_config_from_args(a)
+        self.assertEqual((tc.lambda_dice_tmpl, tc.lambda_pdice, tc.lambda_ncc_tmpl, tc.lambda_ncc_pair,
+                          tc.ncc_window), (0.0, 0.0, 1.5, 0.5, 3))
+        # All Dice weights 0 is fine for a linear-only run (deform not trained).
+        self.assertEqual(A.parse_args(["--data", "x", "--lambda-dice-template", "0", "--lambda-pdice",
+                                       "0"]).lambda_pdice, 0.0)
+        import contextlib
+        with open(os.devnull, "w") as devnull, contextlib.redirect_stderr(devnull):
+            for bad in (["--lambda-ncc-template", "-1"], ["--lambda-ncc-pair", "nan"],
+                        ["--lambda-dice-template", "inf"], ["--ncc-window", "4"], ["--ncc-window", "1"],
+                        ["--ncc-window", "41"],
+                        ["--task-ratio", "deform:1", "--lambda-dice-template", "0", "--lambda-pdice", "0"]):
+                with self.assertRaises(SystemExit, msg=str(bad)):
+                    A.parse_args(["--data", "x"] + bad)
+
     def test_task_loss_weights_flag(self):
         # Milestone 7: default all 1 (linear-only runs unchanged), missing tasks = 1.
         a = A.parse_args(["--data", "x"])

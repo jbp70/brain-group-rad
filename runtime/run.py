@@ -69,9 +69,15 @@ Deformable step (milestone 6, traced once; input_signature =
       batch = DeformPostprocess(...)            # flips (images and labels), one-hot, pairs
       non-finite images -> zeroed and the step skipped (as linear); backup BN statistics
       with GradientTape: out = model(images, "deform", training=True)
-        terms = deform_loss(out, batch)   # template soft Dice + lambda_pdice pairwise soft Dice
-                                          # + lambda_smooth smoothness (no mm^2 scaling)
+        terms = deform_loss(out, batch)   # lambda_dice_tmpl template soft Dice + lambda_pdice
+                                          # pairwise soft Dice + lambda_smooth smoothness
+                                          # [+ lambda_ncc_tmpl (1 - template LNCC)
+                                          #  + lambda_ncc_pair (1 - pairwise LNCC)] (v3.9; LNCC
+                                          # terms only when their weight > 0; no mm^2 scaling)
         objective = w_deform * terms["loss"]   (task_loss_weights, default 1)
+      logged: train_deform/{loss, tmpl, pdice, smooth, soft_dice_tmpl, soft_dice_pair} and, per
+        active LNCC term, train_deform/{ncc_tmpl, ncc_tmpl_loss} / {ncc_pair, ncc_pair_loss}
+        (ncc_* = mean squared LNCC, higher is better)
       diag = deform_diagnostics(out)      # same diag_feat_* / diag_dead_frac keys as linear on
                                           # the D1 decoder features, + v / u / folding stats
       static None filter, finite flag, tf.cond apply, BN rollback, step += 1 (as linear)
@@ -89,8 +95,10 @@ did not run are untouched):
 Deformable validation (`DeformValidationSet`, ``val_deform/...``, eval mode = source of truth):
 template_dice / pair_dice (hard Dice of argmax-warped one-hots; pairs: all ordered pairs, or a
 fixed seeded subset of ``val_deform_max_pairs``), neg_jac_pct, inv_consistency(_max)_mm,
-centrality_mm, raw_centrality_mm, pair_dice_loss = 1 - pair_dice (deform best metric), the
-cached identity baseline pair_dice_identity / template_dice_identity, and
+centrality_mm, raw_centrality_mm, pair_dice_loss = 1 - pair_dice (deform best metric),
+ncc_template / ncc_pair (v3.9: mean squared LNCC on the images with the training definition,
+always computed, whatever the LNCC weights), the cached identity baseline pair_dice_identity /
+template_dice_identity / ncc_template_identity / ncc_pair_identity, and
 ``val_deform_trainmode/{template_dice, pair_dice}``. ``val/mean_pair_rms_mm`` covers the linear
 tasks only. Best files: linear tasks -> ``ckpt/best`` keeps the linear rule; deform-only ->
 ``ckpt/best`` on ``val_deform/pair_dice_loss``; deform + linear -> also ``extra_best`` (main.py
@@ -151,6 +159,8 @@ def resolve_best_metric(best_metric, tasks):
 DIAG_KEYS = ("diag_feat_spread", "diag_feat_rel_spread", "diag_dead_frac", "diag_rot10_norm",
              "diag_head_spread")
 DEFORM_LOSS_KEYS = ("loss", "tmpl", "pdice", "smooth", "soft_dice_tmpl", "soft_dice_pair")
+# LNCC terms (v3.9), present in a deform step's results only when their weight is > 0.
+DEFORM_NCC_KEYS = ("ncc_tmpl", "ncc_pair", "ncc_tmpl_loss", "ncc_pair_loss")
 # Per-task encoder gradient norms (milestone 7, `Trainer._enc_grad_diagnostics`), logged as
 # train_<task>/<key> window means next to train_<task>/grad_norm (the task's pre-clip norm).
 ENC_GRAD_KEYS = ("diag_enc_grad_norm_raw", "diag_enc_grad_norm_eff")
@@ -295,6 +305,13 @@ class TrainConfig:
     overfit_fold_max: float = 0.001
     # Deform validation: all ordered pairs of a group if at most this many, else a fixed subset.
     val_deform_max_pairs: int = 64
+    # LNCC (design 6.2 v3.9): deform loss = lambda_dice_tmpl * template Dice + ... +
+    # lambda_ncc_tmpl * (1 - template LNCC) + lambda_ncc_pair * (1 - pairwise LNCC). The LNCC
+    # weights default to 0 (terms not built); ncc_window None = P.ncc_window_for_level(level).
+    lambda_dice_tmpl: float = 1.0
+    lambda_ncc_tmpl: float = 0.0
+    lambda_ncc_pair: float = 0.0
+    ncc_window: Optional[int] = None
 
 
 def _peak_gpu_mb():
@@ -348,6 +365,13 @@ class Trainer:
                 raise ValueError("task_loss_weights: unknown task %r" % t)
             if not (math.isfinite(float(w)) and float(w) > 0):
                 raise ValueError("task_loss_weights[%r] must be finite and > 0, got %r" % (t, w))
+        for k in ("lambda_dice_tmpl", "lambda_ncc_tmpl", "lambda_ncc_pair"):
+            val = float(getattr(cfg, k))
+            if not (math.isfinite(val) and val >= 0):
+                raise ValueError("%s must be finite and >= 0, got %r" % (k, getattr(cfg, k)))
+        self.ncc_window = losses.check_ncc_window(
+            P.ncc_window_for_level(self.level) if cfg.ncc_window is None else cfg.ncc_window,
+            P.LEVEL_SHAPE[self.level])
         self.best_metric = resolve_best_metric(cfg.best_metric, self.schedule.tasks)
         self.linear_tasks = [t for t in self.schedule.tasks if t in LINEAR_TASKS]
         # Deform + linear: 'best' keeps the linear rule, the deform best goes to an extra file.
@@ -427,6 +451,8 @@ class Trainer:
         pp = self.postprocess[task]
         amp = bool(cfg.amp)
         lam_p, lam_s, order = float(cfg.lambda_pdice), float(cfg.lambda_smooth), int(cfg.smooth_order)
+        ncc_kw = dict(lambda_dice_tmpl=float(cfg.lambda_dice_tmpl), lambda_ncc_tmpl=float(cfg.lambda_ncc_tmpl),
+                      lambda_ncc_pair=float(cfg.lambda_ncc_pair), ncc_window=self.ncc_window)
         w = self._task_weight(task)
 
         def body(images, labels, t_dali=None):
@@ -440,7 +466,7 @@ class Trainer:
             tvars = model.trainable_variables
             with tf.GradientTape() as tape:
                 out = model(batch["images"], task=task, training=True)
-                terms = losses.deform_loss(out, batch, lam_p, lam_s, order)
+                terms = losses.deform_loss(out, batch, lam_p, lam_s, order, **ncc_kw)
                 objective = terms["loss"]
                 if w != 1.0:
                     objective = objective * tf.constant(w, objective.dtype)
@@ -689,10 +715,14 @@ class Trainer:
             i, j = i[sel], j[sel]
         return np.asarray(i, np.int32), np.asarray(j, np.int32)
 
-    def _deform_errors(self, labels, u, u_inv, v, v_raw, seed, chunk=16):
+    def _deform_errors(self, labels, u, u_inv, v, v_raw, seed, chunk=16, images=None):
         """`M.deform_group_errors` of one group (eager TF warps, numpy metrics). labels uint8
         [N, X, Y, Z(, 1)]; fields float32 [N, X, Y, Z, 3]. Also returns the warped one-hot hard
-        segmentation [N, X, Y, Z] and the label template [X, Y, Z] (for the PNG)."""
+        segmentation [N, X, Y, Z] and the label template [X, Y, Z] (for the PNG).
+
+        ``images`` float32 [N, X, Y, Z, 1] (optional): also ncc_template [N] and ncc_pair [P]
+        (squared LNCC with the training definition: leave-one-out template, label ROI, window
+        ``self.ncc_window``)."""
         n_cls = int(self.cfg.n_classes)
         lab = np.asarray(labels).astype(np.int32)
         if lab.ndim == 5:
@@ -702,18 +732,32 @@ class Trainer:
         warped = diffeo.warp(onehot, u)
         seg_warped = tf.argmax(warped, axis=-1).numpy()
         seg_template = tf.argmax(tf.reduce_mean(warped, axis=0), axis=-1).numpy()
+        ncc = {}
+        if images is not None:
+            images = tf.convert_to_tensor(np.asarray(images, np.float32))
+            fg_tmpl = losses.foreground(tf.reduce_mean(warped, axis=0, keepdims=True))
+            ncc["ncc_template"] = losses.template_ncc_loss(diffeo.warp(images, u), fg_tmpl,
+                                                           self.ncc_window)[1].numpy()
         del warped
         i, j = self._val_pairs(lab.shape[0], seed)
-        pred = []
+        pred, ncc_pair = [], []
         for s in range(0, len(i), int(chunk)):
             ii, jj = i[s:s + chunk], j[s:s + chunk]
             disp = diffeo.pairwise_displacement(u, u_inv, ii, jj)
-            pred.append(tf.argmax(diffeo.warp(tf.gather(onehot, ii), disp), axis=-1).numpy())
+            moved = diffeo.warp(tf.gather(onehot, ii), disp)
+            pred.append(tf.argmax(moved, axis=-1).numpy())
+            if images is not None:
+                ncc_pair.append(losses.pair_ncc_loss(images, disp, ii, jj, losses.foreground(moved),
+                                                     losses.foreground(tf.gather(onehot, jj)),
+                                                     self.ncc_window)[1].numpy())
         seg_pair_pred = np.concatenate(pred, axis=0)
         jac = diffeo.jacobian_determinant(u).numpy()
         inv = diffeo.compose(u, u_inv).numpy()
         errs = M.deform_group_errors(seg_warped, seg_template, seg_pair_pred, lab[j], jac, inv,
                                      np.asarray(v), np.asarray(v_raw), P.LEVEL_SPACING[self.level], n_cls)
+        if images is not None:
+            ncc["ncc_pair"] = np.concatenate(ncc_pair, axis=0)
+            errs.update(ncc)
         return errs, {"seg_warped": seg_warped, "seg_template": seg_template, "jac": jac}
 
     def _val_deform_errors(self, vs, groups, train_mode):
@@ -723,25 +767,27 @@ class Trainer:
         for g, grp in enumerate(groups):
             out = fn(tf.constant(grp["images"]))
             e, ex = self._deform_errors(grp["labels"], out["u"], out["u_inv"], out["v"].numpy(),
-                                        out["v_raw"].numpy(), seed=g)
+                                        out["v_raw"].numpy(), seed=g, images=grp["images"])
             ex["u"] = out["u"].numpy()
             errs.append(e)
             extras.append(ex)
         return M.concat_errors(errs), extras
 
     def _identity_deform_metrics(self, name, vs, groups):
-        """Identity baseline (u = 0) of a deform validation set: pair / template hard Dice,
-        computed once per (set name, number of groups) and cached."""
+        """Identity baseline (u = 0) of a deform validation set: pair / template hard Dice and
+        LNCC, computed once per (set name, number of groups) and cached."""
         key = (name, len(groups))
         if key not in self._identity_cache:
             errs = []
             for g, grp in enumerate(groups):
                 z = np.zeros(tuple(grp["images"].shape[:4]) + (3,), np.float32)
-                errs.append(self._deform_errors(grp["labels"], z, z, z, z, seed=g)[0])
+                errs.append(self._deform_errors(grp["labels"], z, z, z, z, seed=g, images=grp["images"])[0])
             pooled = M.concat_errors(errs)
             self._identity_cache[key] = {
                 "val_%s/pair_dice_identity" % name: float(np.mean(pooled["pair_dice"])),
-                "val_%s/template_dice_identity" % name: float(np.mean(pooled["template_dice"]))}
+                "val_%s/template_dice_identity" % name: float(np.mean(pooled["template_dice"])),
+                "val_%s/ncc_template_identity" % name: float(np.mean(pooled["ncc_template"])),
+                "val_%s/ncc_pair_identity" % name: float(np.mean(pooled["ncc_pair"]))}
         return dict(self._identity_cache[key])
 
     def _write_deform_png(self, name, grp, extra, metrics, step):
@@ -1005,6 +1051,7 @@ class Trainer:
                 acc.update({pre + "grad_norm": res["grad_norm"]})
                 if task == DEFORM:
                     acc.update({pre + k: res[k] for k in DEFORM_LOSS_KEYS})
+                    acc.update({pre + k: res[k] for k in DEFORM_NCC_KEYS if k in res})
                     acc.update({"train/grad_norm": res["grad_norm"]})
                     acc.update({pre + k: res[k] for k in DEFORM_DIAG_KEYS})
                 else:

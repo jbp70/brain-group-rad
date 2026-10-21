@@ -24,7 +24,25 @@ Deformable losses (design 6.2, milestone 6), float32, on one-hot train18 labels 
   u[x])^2) (VoxelMorph Grad-l2); order 2 = bending energy (central second differences with
   2x cross terms on the interior, the reference `deformation_field_gradient_loss`).
 * Total: L = L_tmpl + lambda_pdice L_pdice + lambda_smooth L_smooth (defaults 1, 0.5).
+
+LNCC (design 6.2 v3.9), float32, on intensities [N, X, Y, Z, 1], window k (odd, level voxels):
+* Local means over a k^3 box (zero padded, divided by the true per-voxel window count):
+  mu_a, mu_b, cov = <ab> - mu_a mu_b, var_a = max(<a^2> - mu_a^2, 0) (same for b).
+  Squared LNCC (default) cc = cov^2 / (var_a var_b + eps), in [0, 1]; signed (tests only)
+  cov / sqrt(var_a var_b + eps). eps = `NCC_EPS` (local std product ~3e-4 for [0, 1] intensities).
+  Box sums: separable `tf.nn.conv3d` with ones kernels (no variables).
+* ROI: fg = sum_{c >= 1} onehot (zero fill gives 0 outside the FOV), ROI = box_sum(fg) > 1e-3
+  (the foreground dilated by k // 2, no gradient); per-image masked mean, then mean over images.
+* Template: W_i = warp(image_i, u_i); leave-one-out template T_-i = (sum_j W_j - W_i) / (N - 1)
+  with gradients through it; ROI from the warped one-hot template's fg;
+  L_ncc_tmpl = mean_i (1 - lncc(W_i, T_-i)).
+* Pairwise, on the pairwise-Dice pairs and displacements: warp(image_i, disp_p) vs image_j, ROI
+  from max(fg(moved one-hot_i), fg(one-hot_j)); L_ncc_pair = mean_p (1 - lncc).
+* Total (each extra term only when its weight is > 0, so the default graph is unchanged):
+  L = lambda_dice_tmpl L_tmpl + lambda_pdice L_pdice + lambda_smooth L_smooth
+      + lambda_ncc_tmpl L_ncc_tmpl + lambda_ncc_pair L_ncc_pair.
 """
+import numpy as np
 import tensorflow as tf
 
 from models import diffeo
@@ -104,13 +122,21 @@ def template_dice_loss(warped, eps=1e-5):
     return tf.reduce_mean(1.0 - dice), dice, template
 
 
-def pair_dice_loss(onehot, u, u_inv, pair_i, pair_j, eps=1e-5):
-    """(loss, dice [P]): warp(onehot_i, compose(u_i, u_inv_j)) vs onehot_j over the pairs."""
+def pair_dice_loss(onehot, u, u_inv, pair_i, pair_j, eps=1e-5, disp=None, return_moved=False):
+    """(loss, dice [P]): warp(onehot_i, compose(u_i, u_inv_j)) vs onehot_j over the pairs.
+
+    ``disp`` (optional): the pairwise displacements [P, X, Y, Z, 3] if already computed
+    (`diffeo.pairwise_displacement`, shared with the pairwise LNCC). ``return_moved``: also
+    return the moved and target one-hots, (loss, dice, moved, target).
+    """
     onehot = _float(onehot)
-    disp = diffeo.pairwise_displacement(u, u_inv, pair_i, pair_j)
+    if disp is None:
+        disp = diffeo.pairwise_displacement(u, u_inv, pair_i, pair_j)
     moved = diffeo.warp(tf.gather(onehot, tf.reshape(pair_i, [-1])), disp)
     target = tf.gather(onehot, tf.reshape(pair_j, [-1]))
     dice = soft_dice(moved, target, eps)
+    if return_moved:
+        return tf.reduce_mean(1.0 - dice), dice, moved, target
     return tf.reduce_mean(1.0 - dice), dice
 
 
@@ -143,20 +169,184 @@ def smoothness_loss(u, order=1):
     return tf.reduce_mean(be)
 
 
-def deform_loss(out, batch, lambda_pdice=1.0, lambda_smooth=0.5, smooth_order=1):
-    """Total deformable loss from a model output (``u``, ``u_inv``) and a `DeformPostprocess`
-    batch (``onehot``, ``pair_i``, ``pair_j``).
+# ============================================================================ LNCC
+NCC_EPS = 1e-7
+NCC_ROI_THRESHOLD = 1e-3
 
-    Returns dict(loss, tmpl, pdice, smooth, soft_dice_tmpl (mean), soft_dice_pair (mean)).
+
+def check_ncc_window(window, spatial=None):
+    """``window`` as an int: odd, >= 3 and (with ``spatial``) <= every spatial dim; ValueError
+    otherwise."""
+    if isinstance(window, bool) or int(window) != window:
+        raise ValueError("LNCC window must be an integer, got {!r}".format(window))
+    window = int(window)
+    if window < 3 or window % 2 == 0:
+        raise ValueError("LNCC window must be odd and >= 3, got {}".format(window))
+    if spatial is not None and any(window > int(n) for n in spatial):
+        raise ValueError("LNCC window {} larger than the volume {}".format(window, list(spatial)))
+    return window
+
+
+def _spatial(x):
+    dims = x.shape[1:4].as_list()
+    if x.shape.rank != 5 or any(d is None for d in dims):
+        raise ValueError("expected [B, X, Y, Z, C] with static spatial dims, got {}".format(x.shape))
+    return dims
+
+
+def box_sum(x, window):
+    """k^3 box sum (zero padded, same size) of x [B, X, Y, Z, C], per channel: separable
+    `tf.nn.conv3d` with constant ones kernels (channels are folded into the batch axis)."""
+    x = _float(x)
+    spatial = _spatial(x)
+    window = check_ncc_window(window, spatial)
+    c = x.shape[-1]
+    flat = x
+    if c != 1:
+        flat = tf.reshape(tf.transpose(x, [4, 0, 1, 2, 3]), [-1] + spatial + [1])
+    for axis in range(3):
+        k = [1, 1, 1, 1, 1]
+        k[axis] = window
+        flat = tf.nn.conv3d(flat, tf.ones(k, flat.dtype), strides=[1, 1, 1, 1, 1], padding="SAME")
+    if c != 1:
+        flat = tf.transpose(tf.reshape(flat, [c, -1] + spatial), [1, 2, 3, 4, 0])
+    return flat
+
+
+def window_count(spatial, window):
+    """Number of in-volume voxels of the k^3 window at every voxel: float64 numpy [X, Y, Z]
+    (= box_sum of ones; a constant of the shape and window)."""
+    r = int(window) // 2
+    axes = []
+    for n in spatial:
+        i = np.arange(int(n))
+        axes.append((np.minimum(i + r, int(n) - 1) - np.maximum(i - r, 0) + 1).astype(np.float64))
+    return axes[0][:, None, None] * axes[1][None, :, None] * axes[2][None, None, :]
+
+
+def _as_volume(x):
+    x = _float(x)
+    return x[..., None] if x.shape.rank == 4 else x
+
+
+def local_ncc(a, b, window, eps=NCC_EPS, signed=False):
+    """LNCC map [B, X, Y, Z] of single-channel volumes a, b ([B, X, Y, Z] or [B, X, Y, Z, 1];
+    broadcast over B). Local means over the k^3 window (true count at the borders); squared
+    cc = cov^2 / (var_a var_b + eps) (default) or signed cov / sqrt(var_a var_b + eps)."""
+    a = _as_volume(a)
+    b = tf.cast(_as_volume(b), a.dtype)
+    if a.shape[-1] != 1 or b.shape[-1] != 1:
+        raise ValueError("local_ncc expects single-channel volumes, got {} / {}".format(a.shape, b.shape))
+    if a.shape.as_list() != b.shape.as_list():
+        a, b = a + tf.zeros_like(b), b + tf.zeros_like(a)     # broadcast (static shapes kept)
+    spatial = _spatial(a)
+    window = check_ncc_window(window, spatial)
+    # The five quantities stacked along the batch axis: one separable box filter pass.
+    s = box_sum(tf.concat([a, b, a * a, b * b, a * b], axis=0), window)
+    inv = tf.constant(1.0 / window_count(spatial, window)[None, ..., None], a.dtype)
+    s_a, s_b, s_aa, s_bb, s_ab = tf.split(s * inv, 5, axis=0)
+    cov = s_ab - s_a * s_b
+    var_a = tf.maximum(s_aa - s_a * s_a, 0.0)
+    var_b = tf.maximum(s_bb - s_b * s_b, 0.0)
+    eps = tf.constant(float(eps), a.dtype)
+    if signed:
+        cc = cov / tf.sqrt(var_a * var_b + eps)
+    else:
+        cc = cov * cov / (var_a * var_b + eps)
+    return cc[..., 0]
+
+
+def foreground(onehot):
+    """Foreground probability sum_{c >= 1} onehot: [B, X, Y, Z]. Zero fill makes every channel 0
+    outside the FOV, so out-of-FOV voxels read as background (unlike 1 - onehot[..., 0])."""
+    return tf.reduce_sum(_float(onehot)[..., 1:], axis=-1)
+
+
+def ncc_roi(fg, window):
+    """LNCC region: the foreground dilated by the window radius, box_sum(fg) > 1e-3, as a float
+    mask [B, X, Y, Z] without gradient."""
+    fg = _as_volume(fg)
+    return tf.stop_gradient(tf.cast(box_sum(fg, window)[..., 0] > NCC_ROI_THRESHOLD, fg.dtype))
+
+
+def masked_mean(m, w):
+    """Per-image mean of m [B, X, Y, Z] over the mask w (broadcast): [B]."""
+    m = _float(m)
+    w = tf.broadcast_to(tf.cast(w, m.dtype), tf.shape(m))
+    axes = [1, 2, 3]
+    return tf.reduce_sum(m * w, axis=axes) / tf.maximum(tf.reduce_sum(w, axis=axes), 1.0)
+
+
+def template_ncc_loss(warped_img, fg_tmpl, window, leave_one_out=True, eps=NCC_EPS):
+    """(loss, ncc [N]) of the warped images [N, X, Y, Z(, 1)] vs the intensity template, with
+    gradients through the template. ``leave_one_out``: T_-i = (sum_j W_j - W_i) / (N - 1) (the
+    inclusive mean's self term gives a ~1/N floor even for unrelated images); else the mean of
+    all N. ROI from ``fg_tmpl`` [1 | N, X, Y, Z] (the warped one-hot template's foreground)."""
+    w = _as_volume(warped_img)
+    total = tf.reduce_sum(w, axis=0, keepdims=True)
+    n = tf.cast(tf.shape(w)[0], w.dtype)
+    if leave_one_out:
+        template = (total - w) / tf.maximum(n - 1.0, 1.0)
+    else:
+        template = total / n
+    roi = ncc_roi(tf.cast(_float(fg_tmpl), w.dtype), window)
+    ncc = masked_mean(local_ncc(w, template, window, eps), roi)
+    return tf.reduce_mean(1.0 - ncc), ncc
+
+
+def pair_ncc_loss(images, disp, pair_i, pair_j, fg_moved, fg_target, window, eps=NCC_EPS):
+    """(loss, ncc [P]): warp(image_i, disp_p) vs image_j over the pairs (``disp`` from
+    `diffeo.pairwise_displacement`, shared with the pairwise Dice). ROI from
+    max(fg_moved, fg_target) [P, X, Y, Z] (foreground of the moved one-hot_i and of one-hot_j)."""
+    images = _as_volume(images)
+    moved = diffeo.warp(tf.gather(images, tf.reshape(pair_i, [-1])), tf.cast(disp, images.dtype))
+    target = tf.gather(images, tf.reshape(pair_j, [-1]))
+    fg = tf.maximum(tf.cast(_float(fg_moved), images.dtype), tf.cast(_float(fg_target), images.dtype))
+    roi = ncc_roi(fg, window)
+    ncc = masked_mean(local_ncc(moved, target, window, eps), roi)
+    return tf.reduce_mean(1.0 - ncc), ncc
+
+
+def deform_loss(out, batch, lambda_pdice=1.0, lambda_smooth=0.5, smooth_order=1,
+                lambda_dice_tmpl=1.0, lambda_ncc_tmpl=0.0, lambda_ncc_pair=0.0, ncc_window=5):
+    """Total deformable loss from a model output (``u``, ``u_inv``) and a `DeformPostprocess`
+    batch (``onehot``, ``pair_i``, ``pair_j``; ``images`` only when an LNCC weight is > 0).
+
+    Returns dict(loss, tmpl, pdice, smooth, soft_dice_tmpl (mean), soft_dice_pair (mean)) and,
+    per active LNCC term, ncc_tmpl / ncc_pair (mean LNCC) and ncc_tmpl_loss / ncc_pair_loss.
+    With the default weights the graph is the milestone-6 one (extra terms are static Python
+    choices).
     """
+    lam_dt, lam_nt, lam_np = float(lambda_dice_tmpl), float(lambda_ncc_tmpl), float(lambda_ncc_pair)
+    if (lam_nt > 0 or lam_np > 0) and "images" not in batch:
+        raise ValueError("deform_loss: an LNCC weight is > 0 but the batch has no 'images'")
     u = _float(out["u"])
     u_inv = tf.cast(out["u_inv"], u.dtype)
     onehot = tf.cast(batch["onehot"], u.dtype)
     warped = diffeo.warp(onehot, u)
-    tmpl, dice_t, _ = template_dice_loss(warped)
-    pdice, dice_p = pair_dice_loss(onehot, u, u_inv, batch["pair_i"], batch["pair_j"])
+    tmpl, dice_t, template = template_dice_loss(warped)
+    if lam_np > 0:
+        disp = diffeo.pairwise_displacement(u, u_inv, batch["pair_i"], batch["pair_j"])
+        pdice, dice_p, moved_oh, target_oh = pair_dice_loss(onehot, u, u_inv, batch["pair_i"], batch["pair_j"],
+                                                            disp=disp, return_moved=True)
+    else:
+        pdice, dice_p = pair_dice_loss(onehot, u, u_inv, batch["pair_i"], batch["pair_j"])
     smooth = smoothness_loss(u, smooth_order)
-    loss = (tmpl + tf.constant(float(lambda_pdice), u.dtype) * pdice
+    tmpl_term = tmpl if lam_dt == 1.0 else tf.constant(lam_dt, u.dtype) * tmpl
+    loss = (tmpl_term + tf.constant(float(lambda_pdice), u.dtype) * pdice
             + tf.constant(float(lambda_smooth), u.dtype) * smooth)
-    return {"loss": loss, "tmpl": tmpl, "pdice": pdice, "smooth": smooth,
-            "soft_dice_tmpl": tf.reduce_mean(dice_t), "soft_dice_pair": tf.reduce_mean(dice_p)}
+    res = {"tmpl": tmpl, "pdice": pdice, "smooth": smooth,
+           "soft_dice_tmpl": tf.reduce_mean(dice_t), "soft_dice_pair": tf.reduce_mean(dice_p)}
+    if lam_nt > 0 or lam_np > 0:
+        images = tf.cast(_float(batch["images"]), u.dtype)
+    if lam_nt > 0:
+        nt_loss, ncc_t = template_ncc_loss(diffeo.warp(images, u), foreground(template), ncc_window)
+        loss = loss + tf.constant(lam_nt, u.dtype) * nt_loss
+        res.update(ncc_tmpl=tf.reduce_mean(ncc_t), ncc_tmpl_loss=nt_loss)
+    if lam_np > 0:
+        np_loss, ncc_p = pair_ncc_loss(images, disp, batch["pair_i"], batch["pair_j"], foreground(moved_oh),
+                                       foreground(target_oh), ncc_window)
+        loss = loss + tf.constant(lam_np, u.dtype) * np_loss
+        res.update(ncc_pair=tf.reduce_mean(ncc_p), ncc_pair_loss=np_loss)
+    res["loss"] = loss
+    return res
