@@ -30,10 +30,11 @@ def deform_val():
 
 
 def make_run(root, tasks, val_overrides=None, drop_pngs=(), best_dirs=None, trace=None, init_weights=None,
-             enc_grad=False, enc_grad_bad=None):
+             enc_grad=False, enc_grad_bad=None, grad_norm_keys=False):
     """Fabricated run dir: metrics.jsonl with train/val records, fit_summary.json, PNGs, ckpts;
     optional config.json init_weights record and train_<task>/diag_enc_grad_norm_* keys
-    (``enc_grad_bad``: a task whose _eff values are NaN)."""
+    (``enc_grad_bad``: a task whose _eff values are NaN); ``grad_norm_keys``: the v3.10
+    --task-grad-norm keys train_<task>/grad_norm_scale 0.5 and grad_norm_gated_frac 0."""
     os.makedirs(os.path.join(root, "logs"))
     os.makedirs(os.path.join(root, "val_png"))
     recs = []
@@ -44,6 +45,9 @@ def make_run(root, tasks, val_overrides=None, drop_pngs=(), best_dirs=None, trac
                 eff = float("nan") if t == enc_grad_bad else (2.0 if t == "deform" else 1.0)
                 data.update({"train_%s/diag_enc_grad_norm_raw" % t: 10.0, "train_%s/diag_enc_grad_norm_eff" % t: eff,
                              "train_%s/grad_norm" % t: 5.0})
+        if grad_norm_keys:
+            for t in tasks:
+                data.update({"train_%s/grad_norm_scale" % t: 0.5, "train_%s/grad_norm_gated_frac" % t: 0.0})
         recs.append({"step": step, "data": data})
     if init_weights is not None:
         with open(os.path.join(root, "config.json"), "w") as f:
@@ -186,6 +190,14 @@ class TestDeform(CheckMixedRunCase):
         ok, res = cmr.check(d4, lin, STEPS, expect_init_weights="partial", expect_enc_grad=True)
         self.assertTrue(ok, self.failed(res))
         self.assertNotIn("enc_grad_ratio", [n for n, _, _ in res])
+        self.assertNotIn("grad_norm_scale", dict((n, x) for n, _, x in res)["enc_grad_rigid"])
+        # v3.10 --task-grad-norm keys: info appended to the detail, same result names
+        d5 = self.run_dir("gn", tasks, init_weights=partial, enc_grad=True, grad_norm_keys=True)
+        ok, res5 = cmr.check(d5, tasks, STEPS, expect_init_weights="partial", expect_enc_grad=True)
+        self.assertTrue(ok, self.failed(res5))
+        self.assertEqual([n for n, _, _ in res5], names)
+        for t in tasks:
+            self.assertIn("grad_norm_scale median 0.5, gated frac 0", dict((n, x) for n, _, x in res5)["enc_grad_" + t])
 
     def test_retrace_fails(self):
         tasks = ["rigid", "affine", "deform"]

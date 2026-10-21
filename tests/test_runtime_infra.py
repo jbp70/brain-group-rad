@@ -214,6 +214,23 @@ class TestArgs(unittest.TestCase):
                 with self.assertRaises(SystemExit, msg=bad):
                     A.parse_args(["--data", "x", "--task-loss-weights", bad])
 
+    def test_task_grad_norm_flag(self):
+        # v3.10: per-task gradient normalisation, default off (0) with minimum raw norm 1e-3.
+        a = A.parse_args(["--data", "x"])
+        self.assertEqual((a.task_grad_norm, a.task_grad_norm_min), (0.0, 1e-3))
+        tc = A.train_config_from_args(a)
+        self.assertEqual((tc.task_grad_norm, tc.task_grad_norm_min), (0.0, 1e-3))
+        a = A.parse_args(["--data", "x", "--task-grad-norm", "12", "--task-grad-norm-min", "0"])
+        tc = A.train_config_from_args(a)
+        self.assertEqual((tc.task_grad_norm, tc.task_grad_norm_min), (12.0, 0.0))
+        json.dumps(A.args_to_dict(a))
+        import contextlib
+        with open(os.devnull, "w") as devnull, contextlib.redirect_stderr(devnull):
+            for flag in ("--task-grad-norm", "--task-grad-norm-min"):
+                for bad in ("-1", "nan", "inf"):
+                    with self.assertRaises(SystemExit, msg="%s %s" % (flag, bad)):
+                        A.parse_args(["--data", "x", flag, bad])
+
     def test_best_metric_with_deform(self):
         from runtime.run import DEFORM_BEST_METRIC, MEAN_PAIR_METRIC, resolve_best_metric
         self.assertEqual(A.DEFORM_BEST_METRIC, DEFORM_BEST_METRIC)

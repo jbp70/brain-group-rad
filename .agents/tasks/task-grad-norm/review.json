@@ -1,0 +1,8 @@
+{
+  "verdict": "APPROVED",
+  "findings": [
+    "Non-blocking: for linear tasks the --task-grad-norm-min gate sees the gradient of loss / loss_scale_mm2 (documented in design.md); consider noting it in the flag help.",
+    "Non-blocking: check_mixed_run.py gated fraction is an unweighted mean of per-window means; weight by step counts if it ever becomes a pass/fail criterion."
+  ],
+  "reviewDoc": "d:\\Research\\Brain_Registration_Projects\\brain-group-rad\\.agents\\tasks\\task-grad-norm/review.md"
+}

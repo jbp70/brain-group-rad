@@ -32,8 +32,9 @@ from runtime import metrics as M
 from runtime import optimizers as O
 from runtime.logging import RunLogger, make_run_dir
 from runtime.run import (DEFORM_BEST_METRIC, DEFORM_DIAG_KEYS, DEFORM_LOSS_KEYS, DEFORM_NCC_KEYS, DIAG_KEYS,
-                         ENC_GRAD_KEYS,
-                         TaskSchedule, Trainer, TrainConfig, collapse_diagnostics)
+                         ENC_GRAD_KEYS, TASK_GRAD_NORM_EPS, TASK_GRAD_NORM_KEYS,
+                         TaskSchedule, Trainer, TrainConfig, collapse_diagnostics, scale_gradients,
+                         task_grad_norm_scale)
 from runtime.schedulers import ScheduleConfig
 
 N = 4
@@ -1035,12 +1036,13 @@ DEFORM_GOLDEN_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "f
 DEFORM_GOLDEN_STEPS = 8
 
 
-def _deform_golden_run():
-    """8 seeded three-task steps (rigid:1, affine:1, deform:2, flips on) of a narrow deform model
-    (dropout 0, SVF head kernel N(0, 1e-3) so deform gradients reach the encoder): tasks, per-step
-    loss, per-step deform terms and per-variable (float64 sum, max |v|)."""
+def _three_task_run(steps=DEFORM_GOLDEN_STEPS, clipnorm=12.0, **cfg_kw):
+    """`steps` seeded three-task steps (rigid:1, affine:1, deform:2, flips on) of a narrow deform
+    model (dropout 0, SVF head kernel N(0, 1e-3) so deform gradients reach the encoder), Adam lr
+    1e-3 with global clip `clipnorm`, extra TrainConfig fields `cfg_kw`. Returns ({seed, tasks,
+    per-step loss, per-step deform terms, per-variable (float64 sum, max |v|)}, history)."""
     ratio = {"rigid": 1.0, "affine": 1.0, "deform": 2.0}
-    seed = _seed_with_all_tasks(ratio, DEFORM_GOLDEN_STEPS)
+    seed = _seed_with_all_tasks(ratio, steps)
     groups = {t: synthetic_group(4, N, t, seed=i) for i, t in enumerate(("rigid", "affine"))}
     dgroup = fd.synthetic_deform_group(4, N, seed=0)
     model = GroupRegLevelModel(4, narrow_config(dropout=0.0, seed=1, deform_decoder=True)).build_model(N)
@@ -1048,15 +1050,21 @@ def _deform_golden_run():
     head.kernel.assign(np.random.default_rng(0).normal(0, 1e-3, head.kernel.shape).astype(np.float32))
     sources = {t: fd.FixedGroupSource(g["batch"]) for t, g in groups.items()}
     sources["deform"] = fd.FixedGroupSource(dgroup["batch"])
-    tr = Trainer(model, O.make_optimizer("adam", lr=1e-3), sources, groups["rigid"]["S"],
-                 config(task_ratio=ratio, seed=seed, flip_prob=0.5))
-    tr.fit(DEFORM_GOLDEN_STEPS)
+    tr = Trainer(model, O.make_optimizer("adam", lr=1e-3, clipnorm=clipnorm), sources, groups["rigid"]["S"],
+                 config(task_ratio=ratio, seed=seed, flip_prob=0.5, **cfg_kw))
+    tr.fit(steps)
     deform = [[float(h[k]) for k in ("tmpl", "pdice", "smooth")] for h in tr.history if h["task"] == "deform"]
-    return {"seed": seed, "tasks": [h["task"] for h in tr.history],
-            "loss": [float(h["loss"]) for h in tr.history], "deform_terms": deform,
-            "variables": {GroupRegLevelModel._local_name(v): [float(np.sum(v.numpy().astype(np.float64))),
-                                                              float(np.max(np.abs(v.numpy())))]
-                          for v in model.variables}}
+    out = {"seed": seed, "tasks": [h["task"] for h in tr.history],
+           "loss": [float(h["loss"]) for h in tr.history], "deform_terms": deform,
+           "variables": {GroupRegLevelModel._local_name(v): [float(np.sum(v.numpy().astype(np.float64))),
+                                                             float(np.max(np.abs(v.numpy())))]
+                         for v in model.variables}}
+    return out, list(tr.history)
+
+
+def _deform_golden_run():
+    """The golden three-task run: `_three_task_run` with its defaults (clip 12, no extra config)."""
+    return _three_task_run()[0]
 
 
 class _OpDeterminism:
@@ -1116,6 +1124,313 @@ class TestDeformUnchanged(unittest.TestCase):
             self.assertEqual(got["variables"], want["variables"])
         else:
             self.assertLessEqual(max(diffs), tol)
+
+
+# ============================================================ per-task gradient normalisation (v3.10)
+class TestTaskGradNormHelpers(unittest.TestCase):
+    """`task_grad_norm_scale` / `scale_gradients` on crafted values (eager)."""
+
+    def scale(self, g, target=12.0, min_norm=1e-3):
+        s, gated = task_grad_norm_scale(tf.constant(g, tf.float32), target, min_norm)
+        return float(s.numpy()), float(gated.numpy())
+
+    def test_scale_and_gate(self):
+        self.assertEqual(self.scale(24.0), (0.5, 0.0))
+        self.assertEqual(self.scale(5e-4), (1.0, 1.0))          # below the minimum: unscaled, gated
+        self.assertEqual(self.scale(1e-3), (np.float32(12.0) * (np.float32(1.0) / np.float32(1e-3)), 0.0))
+        for bad in (float("nan"), float("inf")):                # non-finite: never rescaled, not gated
+            self.assertEqual(self.scale(bad), (1.0, 0.0), bad)
+
+    def test_eps_zero_gradients(self):
+        s, gated = self.scale(0.0, min_norm=0.0)
+        self.assertTrue(np.isfinite(s))
+        self.assertAlmostEqual(s, 12.0 / TASK_GRAD_NORM_EPS, delta=1e-6 * 12.0 / TASK_GRAD_NORM_EPS)
+        self.assertEqual(gated, 0.0)
+        out = scale_gradients([tf.zeros((3, 2))], tf.constant(s))
+        self.assertTrue(np.all(out[0].numpy() == 0.0))
+        self.assertEqual(self.scale(0.0), (1.0, 1.0))           # default minimum: gated
+
+    def test_indexed_slices(self):
+        g = tf.IndexedSlices(tf.constant([[1.0, 2.0], [3.0, 4.0]]), tf.constant([0, 2]), tf.constant([3, 2]))
+        d = tf.constant([1.0, -2.0])
+        out = scale_gradients([g, d], tf.constant(0.5))
+        self.assertIsInstance(out[0], tf.IndexedSlices)
+        np.testing.assert_array_equal(out[0].values.numpy(), [[0.5, 1.0], [1.5, 2.0]])
+        np.testing.assert_array_equal(out[0].indices.numpy(), [0, 2])
+        np.testing.assert_array_equal(out[1].numpy(), [0.5, -1.0])
+
+
+class TestTaskGradNorm(DeformCase):
+    """--task-grad-norm: normalise each task's raw gradient to the target (gated below the
+    minimum), then multiply by the task weight; raw grad_norm logged, _eff = applied encoder norm."""
+
+    RATIO = {"rigid": 1.0, "affine": 1.0, "deform": 2.0}
+
+    def make3(self, like=None, clipnorm=None, opt=None, amp=False, logger=None, sources=None, **cfg_kw):
+        """Three-task trainer on a narrow deform model; fresh models get random rigid and SVF head
+        kernels N(0, 1e-3) so every task's gradient reaches the encoder."""
+        model = GroupRegLevelModel(4, narrow_config(dropout=0.0, seed=1, deform_decoder=True)).build_model(N)
+        if like is None:
+            rng = np.random.default_rng(0)
+            for head in (model.linear_decoder.rigid_head, model.deform_decoder.svf_head):
+                head.kernel.assign(rng.normal(0, 1e-3, head.kernel.shape).astype(np.float32))
+        else:
+            model.set_weights(like.get_weights())
+        if sources is None:
+            sources = {t: fd.FixedGroupSource(g["batch"]) for t, g in self.groups.items()}
+            sources["deform"] = fd.FixedGroupSource(self.dgroup["batch"])
+        cfg_kw.setdefault("task_ratio", dict(self.RATIO))
+        optimizer = opt or O.make_optimizer("adam", lr=1e-3, clipnorm=clipnorm, amp=amp)
+        return Trainer(model, optimizer, sources, self.groups["rigid"]["S"], config(amp=amp, **cfg_kw),
+                       logger=logger)
+
+    def batch(self, task):
+        return self.dgroup["batch"] if task == "deform" else self.groups[task]["batch"]
+
+    def test_off_no_new_keys(self):
+        tr = self.make3()
+        self.assertEqual(tr.task_grad_norm, 0.0)
+        for t in ("rigid", "affine", "deform"):
+            res = tr.train_step(t, self.batch(t))
+            self.assertTrue(res["finite"])
+            for k in TASK_GRAD_NORM_KEYS:
+                self.assertNotIn(k, res)
+        self.assertEqual(tr.trace_counts, {"rigid": 1, "affine": 1, "deform": 1})
+
+    def test_linear_and_deform_normalised(self):
+        target, lr = 5.0, 1e-2
+        base = self.make3().model
+        rel_err = {}
+        for t in ("rigid", "affine", "deform"):
+            on = self.make3(like=base, task_grad_norm=target)
+            off = self.make3(like=base)
+            with _OpDeterminism():          # deform gathers: nondeterministic gradient sums otherwise
+                r_on, r_off = on.train_step(t, self.batch(t)), off.train_step(t, self.batch(t))
+            self.assertTrue(r_on["finite"] and r_off["finite"], t)
+            self.assertNotAlmostEqual(r_on["grad_norm"], target, places=2)    # really rescaled
+            np.testing.assert_allclose(r_on["grad_norm_normed"], target, rtol=1e-5, err_msg=t)
+            np.testing.assert_allclose(r_on["grad_norm"] * r_on["grad_norm_scale"], target, rtol=1e-5, err_msg=t)
+            self.assertEqual(r_on["grad_norm_gated_frac"], 0.0)
+            np.testing.assert_allclose(r_on["grad_norm"], r_off["grad_norm"], rtol=1e-6, err_msg=t)
+            for k in (DEFORM_LOSS_KEYS if t == "deform" else ("loss", "center", "pair")):
+                np.testing.assert_allclose(r_on[k], r_off[k], rtol=1e-6, err_msg=k)
+            # Independent check of the applied update: plain SGD moves the variables by lr * g.
+            sgd = self.make3(like=base, task_grad_norm=target,
+                             opt=O.make_optimizer("sgd", lr=lr, momentum=0.0, nesterov=False, clipnorm=None))
+            tv = sgd.model.trainable_variables
+            before = _vals(tv)
+            self.assertTrue(sgd.train_step(t, self.batch(t))["finite"])
+            step_norm = np.sqrt(sum(np.sum((b.astype(np.float64) - v.numpy()) ** 2) for b, v in zip(before, tv)))
+            rel_err[t] = abs(step_norm / lr - target) / target
+            self.assertLess(rel_err[t], 1e-4, t)
+        sys.stderr.write("\n[grad-norm] SGD |delta| / lr vs target rel. error %s\n"
+                         % ", ".join("%s %.2g" % kv for kv in sorted(rel_err.items())))
+
+    def test_gate_below_min(self):
+        base = self.make3().model
+        with _OpDeterminism():
+            on = self.make3(like=base, task_grad_norm=12.0, task_grad_norm_min=1e9)
+            off = self.make3(like=base)
+            for t in ("rigid", "deform"):
+                r_on, r_off = on.train_step(t, self.batch(t)), off.train_step(t, self.batch(t))
+                self.assertEqual((r_on["grad_norm_scale"], r_on["grad_norm_gated_frac"]), (1.0, 1.0), t)
+                self.assertEqual(r_on["grad_norm_normed"], r_on["grad_norm"], t)
+                self.assertEqual(r_on["grad_norm"], r_off["grad_norm"], t)
+                self.assertEqual(r_on["diag_enc_grad_norm_eff"], r_off["diag_enc_grad_norm_eff"], t)
+                for a, b in zip(on.model.trainable_variables, off.model.trainable_variables):
+                    self.assertTrue(np.array_equal(a.numpy(), b.numpy()), (t, a.name))
+
+    def test_eps_zero_grads(self):
+        # Identical images, zero head kernels: GroupCentering cancels everything -> (near) zero
+        # gradient. With min 0 the eps path keeps the step finite; with the default min it is gated.
+        g = self.groups["rigid"]
+        rep = lambda a: np.repeat(a[:1], N, axis=0)  # noqa: E731
+        batch = fd.to_dali_batch(rep(g["images"]), rep(g["T"]), rep(g["T_target"]), "rigid", 4)
+        src = {"rigid": fd.FixedGroupSource(batch)}
+        for min_norm in (0.0, 1e-3):
+            tr = self.make(config(task_grad_norm=12.0, task_grad_norm_min=min_norm), sources=src)
+            res = tr.train_step("rigid", batch)
+            self.assertTrue(res["finite"], min_norm)
+            self.assertLess(res["grad_norm"], 1e-3)
+            for k in TASK_GRAD_NORM_KEYS:
+                self.assertTrue(np.isfinite(res[k]), k)
+            for v in tr.model.variables:
+                self.assertTrue(np.all(np.isfinite(v.numpy())), v.name)
+            if min_norm == 0.0:
+                self.assertEqual(res["grad_norm_gated_frac"], 0.0)
+                if res["grad_norm"] == 0.0:
+                    # The global norm underflows to 0 (squares of ~1e-20 residues), so the eps path
+                    # applies 12 / eps = 1.2e13: finite, but the residues are amplified to a
+                    # normed value ~1e-6 (measured 3.9e-6) -> the reason for the default minimum.
+                    np.testing.assert_allclose(res["grad_norm_scale"], 12.0 / TASK_GRAD_NORM_EPS, rtol=1e-6)
+                    self.assertLess(res["grad_norm_normed"], 1e-3)
+            else:
+                self.assertEqual((res["grad_norm_scale"], res["grad_norm_gated_frac"]), (1.0, 1.0))
+                self.assertEqual(res["grad_norm_normed"], res["grad_norm"])
+            sys.stderr.write("\n[grad-norm eps] min %g: raw grad_norm %.3g, scale %.3g, normed %.3g\n"
+                             % (min_norm, res["grad_norm"], res["grad_norm_scale"], res["grad_norm_normed"]))
+
+    def test_weights_after_normalisation(self):
+        target = 4.0
+        w = {"deform": 0.25, "rigid": 2.0}
+        base = self.make3().model
+        for t in ("rigid", "deform"):        # fresh twins per task: both start from `base`
+            on = self.make3(like=base, task_grad_norm=target, task_loss_weights=w)
+            off = self.make3(like=base)
+            with _OpDeterminism():          # deform gathers: nondeterministic gradient sums otherwise
+                r_on, r_off = on.train_step(t, self.batch(t)), off.train_step(t, self.batch(t))
+            np.testing.assert_allclose(r_on["grad_norm_normed"], target * w[t], rtol=1e-5, err_msg=t)
+            np.testing.assert_allclose(r_on["grad_norm"], r_off["grad_norm"], rtol=1e-6, err_msg=t)  # w not in it
+            np.testing.assert_allclose(r_on["diag_enc_grad_norm_raw"], r_off["diag_enc_grad_norm_raw"],
+                                       rtol=1e-6, err_msg=t)
+            self.assertGreater(r_on["diag_enc_grad_norm_raw"], 0.0)
+            np.testing.assert_allclose(r_on["diag_enc_grad_norm_eff"],
+                                       r_on["diag_enc_grad_norm_raw"] * r_on["grad_norm_scale"] * w[t],
+                                       rtol=1e-5, err_msg=t)
+        # Global clip 1 below the applied norm 8: _eff includes the clip factor 1 / normed.
+        clipped = self.make3(like=base, clipnorm=1.0, task_grad_norm=target, task_loss_weights=w)
+        rc = clipped.train_step("rigid", self.batch("rigid"))
+        np.testing.assert_allclose(rc["grad_norm_normed"], 8.0, rtol=1e-5)
+        np.testing.assert_allclose(rc["diag_enc_grad_norm_eff"],
+                                   rc["diag_enc_grad_norm_raw"] * rc["grad_norm_scale"] * 2.0 / rc["grad_norm_normed"],
+                                   rtol=1e-4)
+
+    def test_nonfinite_unchanged(self):
+        # NaN pixel: the images are zeroed (finite gradient) and the step is skipped as before.
+        imgs = self.groups["rigid"]["images"].copy()
+        imgs[0, 3, 4, 5, 0] = np.nan
+        g = self.groups["rigid"]
+        nan_batch = fd.to_dali_batch(imgs, g["T"], g["T_target"], "rigid", 4)
+        tr = self.make3(task_grad_norm=12.0)
+        self.assertTrue(tr.train_step("rigid", self.batch("rigid"))["finite"])
+        model, opt = tr.model, tr.optimizer
+        before = (_vals(model.trainable_variables), _vals(model.non_trainable_variables), _vals(opt.variables()))
+        it = int(opt.iterations.numpy())
+        res = tr.train_step("rigid", nan_batch)
+        self.assertFalse(res["finite"])
+        self.assertTrue(np.isfinite(res["grad_norm_scale"]))
+        self.assertEqual(int(opt.iterations.numpy()), it)
+        self.assertTrue(_all_equal(before[0], model.trainable_variables))
+        self.assertTrue(_all_equal(before[1], model.non_trainable_variables))
+        self.assertTrue(_all_equal(before[2], opt.variables()))
+
+    def test_amp_normalised_and_overflow(self):
+        try:
+            tf.keras.mixed_precision.set_global_policy("mixed_float16")
+            tr = self.make3(amp=True, task_grad_norm=12.0, task_ratio={"rigid": 1.0, "deform": 1.0})
+            self.assertIsInstance(tr.optimizer, tf.keras.mixed_precision.LossScaleOptimizer)
+            n_ok = {"rigid": 0, "deform": 0}
+            for _ in range(20):
+                for t in n_ok:
+                    res = tr.train_step(t, self.batch(t))
+                    if res["finite"]:
+                        n_ok[t] += 1
+                        np.testing.assert_allclose(res["grad_norm_normed"], 12.0, rtol=1e-3, err_msg=t)
+                if min(n_ok.values()) >= 2:
+                    break
+            self.assertGreaterEqual(min(n_ok.values()), 2, n_ok)
+            # Forced float16 overflow (initial loss scale 2^40): inf gradients are never rescaled
+            # (scale 1, not gated), the LSO skips the update and halves its scale.
+            inner = O.make_optimizer("adam", lr=1e-3, clipnorm=None)
+            lso = tf.keras.mixed_precision.LossScaleOptimizer(inner, initial_scale=2.0 ** 40)
+            tr2 = self.make3(opt=lso, amp=True, task_grad_norm=12.0, task_ratio={"rigid": 1.0})
+            w0 = _vals(tr2.model.trainable_variables)
+            res = tr2.train_step("rigid", self.batch("rigid"))
+            self.assertFalse(res["finite"])
+            self.assertEqual((res["grad_norm_scale"], res["grad_norm_gated_frac"]), (1.0, 0.0))
+            self.assertEqual(float(lso.loss_scale.numpy()), 2.0 ** 39)
+            self.assertTrue(_all_equal(w0, tr2.model.trainable_variables))
+        finally:
+            tf.keras.mixed_precision.set_global_policy("float32")
+
+    def test_trainer_validation(self):
+        for bad in (dict(task_grad_norm=-1.0), dict(task_grad_norm=float("nan")),
+                    dict(task_grad_norm=float("inf")), dict(task_grad_norm_min=-1.0),
+                    dict(task_grad_norm_min=float("nan"))):
+            with self.assertRaises(ValueError, msg=str(bad)):
+                self.make(config(**bad))
+
+    def test_window_logs(self):
+        seed = _seed_with_all_tasks(self.RATIO, 8)
+        recs = {}
+        for name, kw in (("on", dict(task_grad_norm=12.0)), ("off", {})):
+            paths = make_run_dir(self.tmp, "gn_" + name)
+            logger = RunLogger(paths, backend="jsonl", tensorboard=False, quiet=True)
+            tr = self.make3(logger=logger, seed=seed, log_every=1, **kw)
+            tr.fit(8)
+            logger.close()
+            self.assertTrue(all(h["finite"] for h in tr.history))
+            self.assertEqual(tr.trace_counts, {"rigid": 1, "affine": 1, "deform": 1})
+            with open(logger.metrics_path) as f:
+                recs[name] = [json.loads(line)["data"] for line in f]
+        for t in self.RATIO:
+            pre = "train_%s/" % t
+            got = [r for r in recs["on"] if pre + "grad_norm" in r]
+            self.assertTrue(got, t)
+            for r in got:
+                self.assertTrue(np.isfinite(r[pre + "grad_norm_scale"]))
+                self.assertGreaterEqual(r[pre + "grad_norm_gated_frac"], 0.0)
+                self.assertLessEqual(r[pre + "grad_norm_gated_frac"], 1.0)
+                np.testing.assert_allclose(r[pre + "grad_norm_normed"], 12.0, rtol=1e-5)
+                self.assertEqual(r["train/grad_norm"], r[pre + "grad_norm"])      # raw, not normalised
+        for r in recs["off"]:
+            for k in r:
+                self.assertFalse(any(k.endswith("/" + key) for key in TASK_GRAD_NORM_KEYS), k)
+
+
+class TestTaskGradNormClipEquivalence(unittest.TestCase):
+    """KEY check: --task-grad-norm 12 without weights equals the clip-12 recipe with weights 2^14
+    (every step's raw norm > 12, so every step is clipped). Powers of two scale every float value
+    exactly, and `task_grad_norm_scale` computes target * (1.0 / norm) like
+    `tf.clip_by_global_norm`, so with the optimizer clip OFF (A0) the runs agree bit for bit;
+    with the clip kept at 12 (A12, the real recipe) the extra clip of a norm-12 gradient is a
+    no-op up to ~1 ulp per step (near-equality only, see the tolerance comment below)."""
+
+    W = 2.0 ** 14
+
+    def tearDown(self):
+        free_memory()
+
+    @staticmethod
+    def max_diff(a, b):
+        d = [abs(x - y) for x, y in zip(a["loss"], b["loss"])]
+        for p, q in zip(a["deform_terms"], b["deform_terms"]):
+            d += [abs(x - y) for x, y in zip(p, q)]
+        for name, (s, m) in b["variables"].items():
+            gs, gm = a["variables"][name]
+            d += [abs(gs - s) / (1.0 + abs(s)), abs(gm - m) / (1.0 + abs(m))]
+        return max(d)
+
+    def test_equivalent_to_clipping_when_all_clipped(self):
+        with _OpDeterminism():
+            b, hb = _three_task_run(clipnorm=12.0,
+                                    task_loss_weights={t: self.W for t in ("rigid", "affine", "deform")})
+            a0, h0 = _three_task_run(clipnorm=None, task_grad_norm=12.0)
+            a12, h12 = _three_task_run(clipnorm=12.0, task_grad_norm=12.0)
+        self.assertEqual(set(b["tasks"]), {"rigid", "affine", "deform"})
+        self.assertEqual(a0["tasks"], b["tasks"])
+        self.assertTrue(all(h["finite"] for h in hb + h0 + h12))
+        self.assertTrue(all(h["grad_norm"] > 12.0 for h in hb), [h["grad_norm"] for h in hb])
+        self.assertTrue(all(h["grad_norm_gated_frac"] == 0.0 for h in h0 + h12))
+        for ha, hw in zip(h0, hb):                         # raw norm of the unweighted objective
+            np.testing.assert_allclose(ha["grad_norm"] * self.W, hw["grad_norm"], rtol=1e-6)
+        d0, d12 = self.max_diff(a0, b), self.max_diff(a12, b)
+        loss12 = max(abs(x - y) / abs(y) for x, y in zip(a12["loss"], b["loss"]))
+        sys.stderr.write("\n[grad-norm equiv] A0 (clip off) vs B max |diff| %.3g, A12 (clip 12) vs B "
+                         "max |diff| %.3g (variables relative to 1 + |value|), A12 loss max rel. diff "
+                         "%.3g\n" % (d0, d12, loss12))
+        if d0 != 0.0:
+            sys.stderr.write("[grad-norm equiv] A0 vs B not bit-identical\n")
+        self.assertLessEqual(d0, 1e-5)
+        # A12: the optimizer re-clips the normalised gradient whose norm is 12 +- 1 ulp; when it is
+        # above 12 the clip factor is 1 - 1 ulp. Measured on the GTX 1080: losses agree to ~1e-6
+        # relative, but Adam's updates of near-zero-gradient elements (m / sqrt(v) of tiny,
+        # cancelling moments) turn the ulp-level differences into variable-sum differences of
+        # up to ~1e-3 relative after 8 steps (per-element max |v| ~2e-4).
+        for h in h12:
+            np.testing.assert_allclose(h["grad_norm_normed"], 12.0, rtol=1e-6)
+        self.assertLessEqual(loss12, 1e-5)
+        self.assertLessEqual(d12, 1e-2)
 
 
 class TestDeformValidation(DeformCase):

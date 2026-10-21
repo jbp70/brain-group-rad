@@ -33,6 +33,8 @@
 #   RUN_NAME=m7_three_task_long sbatch --job-name=m7long --time=12:00:00 --mem=64G slurm/m7_three_task.sh
 # LNCC A/B (design 6.2 v3.9; LNCC weights default 0 = this recipe unchanged), Dice+LNCC arm:
 #   RUN_NAME=m7_three_task_lncc EXTRA_ARGS="--lambda-ncc-template 1 --lambda-ncc-pair 1" sbatch --job-name=m7lncc --time=14:00:00 --mem=64G slurm/m7_three_task.sh
+# Per-task gradient normalisation A/B (design 5.2 v3.10; vs the deform:64 default):
+#   RUN_NAME=m7_three_task_gradnorm TASK_GRAD_NORM=12 TASK_LOSS_WEIGHTS=none sbatch --job-name=m7gn --time=08:00:00 --mem=64G -p dgx-a100 slurm/m7_three_task.sh
 # On an A100 (fits: 34.3 GB peak; ~1.6 s/step measured): add -p dgx-a100 to the sbatch line.
 # Time estimates (not measured for this recipe): linear step ~1.4 s at N = 32 (m5, RTX 8000),
 # deform step ~3 s at N = 16 (extrapolated from 1.6 s at N = 8). Memory: linear N 32 ~34 GB,
@@ -64,6 +66,13 @@ LOSS_SCALE_MM2="${LOSS_SCALE_MM2:-1}"
 # 0.638 with linear errors unchanged. Set TASK_LOSS_WEIGHTS=none for the unweighted recipe.
 TASK_LOSS_WEIGHTS="${TASK_LOSS_WEIGHTS:-deform:64}"
 if [ "$TASK_LOSS_WEIGHTS" = "none" ]; then TASK_LOSS_WEIGHTS=""; fi
+# Per-task gradient normalisation (design 5.2 v3.10): default off (empty = flags not passed, the
+# recipe above unchanged). E.g. TASK_GRAD_NORM=12 TASK_LOSS_WEIGHTS=none: each task's raw
+# gradient is rescaled to global norm 12 (unless its raw norm < TASK_GRAD_NORM_MIN, default
+# 1e-3), then multiplied by its task weight. Use it WITH TASK_LOSS_WEIGHTS=none: the default
+# deform:64 would multiply the normalised deform gradient to 768, which --clipnorm 12 clips back.
+TASK_GRAD_NORM="${TASK_GRAD_NORM:-}"
+TASK_GRAD_NORM_MIN="${TASK_GRAD_NORM_MIN:-}"
 G_ROT="${G_ROT:-45}"
 G_TRANS="${G_TRANS:-10}"
 AMP="${AMP:-false}"
@@ -76,6 +85,20 @@ fi
 WEIGHT_ARGS=""
 if [ -n "$TASK_LOSS_WEIGHTS" ]; then
     WEIGHT_ARGS="--task-loss-weights $TASK_LOSS_WEIGHTS"
+fi
+NORM_ARGS=""
+if [ -n "$TASK_GRAD_NORM" ]; then
+    NORM_ARGS="--task-grad-norm $TASK_GRAD_NORM"
+    if [ -n "$TASK_LOSS_WEIGHTS" ]; then
+        echo "WARNING: TASK_GRAD_NORM=$TASK_GRAD_NORM with TASK_LOSS_WEIGHTS=$TASK_LOSS_WEIGHTS: the weights multiply the normalised gradients (weights > 1 get clipped back to --clipnorm); TASK_LOSS_WEIGHTS=none is recommended" >&2
+    fi
+fi
+if [ -n "$TASK_GRAD_NORM_MIN" ]; then
+    if [ -n "$TASK_GRAD_NORM" ]; then
+        NORM_ARGS="$NORM_ARGS --task-grad-norm-min $TASK_GRAD_NORM_MIN"
+    else
+        echo "WARNING: TASK_GRAD_NORM_MIN=$TASK_GRAD_NORM_MIN has no effect without TASK_GRAD_NORM" >&2
+    fi
 fi
 
 SCRATCH="$PROJ/scratch"
@@ -94,15 +117,15 @@ cd "$REPO"
 echo "host $(hostname) | job $JOB_ID | repo $(git rev-parse --short HEAD 2>/dev/null || echo '?') | $(date -Is)"
 nvidia-smi --query-gpu=index,name,memory.used,memory.total --format=csv,noheader || true
 echo "run $RUN_NAME | steps $STEPS | val every $VAL_EVERY | warmup $WARMUP | N $N | deform N $DEFORM_N | ratio $TASK_RATIO"
-echo "init $INIT | loss scale mm2 $LOSS_SCALE_MM2 | task loss weights ${TASK_LOSS_WEIGHTS:-default} | G $G_ROT deg / $G_TRANS mm | amp $AMP"
+echo "init $INIT | loss scale mm2 $LOSS_SCALE_MM2 | task loss weights ${TASK_LOSS_WEIGHTS:-default} | task grad norm ${TASK_GRAD_NORM:-off} (min ${TASK_GRAD_NORM_MIN:-default}) | G $G_ROT deg / $G_TRANS mm | amp $AMP"
 
 rc=0
-# shellcheck disable=SC2086  # WEIGHT_ARGS / EXTRA_ARGS are split on purpose
+# shellcheck disable=SC2086  # WEIGHT_ARGS / NORM_ARGS / EXTRA_ARGS are split on purpose
 singularity exec --nv -B /scratch -B /autofs -B /cluster -B /space -B /vast "$SIF" \
     python main.py --data "$DATA" --results "$RESULTS" --run-name "$RUN_NAME" \
     --level 4 --group-size "$N" --deform-group-size "$DEFORM_N" --task-ratio "$TASK_RATIO" \
     --steps "$STEPS" --val-every "$VAL_EVERY" --warmup-steps "$WARMUP" \
-    --init-weights "$INIT" --loss-scale-mm2 "$LOSS_SCALE_MM2" $WEIGHT_ARGS \
+    --init-weights "$INIT" --loss-scale-mm2 "$LOSS_SCALE_MM2" $WEIGHT_ARGS $NORM_ARGS \
     --global-transform true --global-rot-max-deg "$G_ROT" --global-trans-max-mm "$G_TRANS" \
     --global-start-step 0 --global-ramp-steps 0 --curriculum false --val-png true \
     --amp "$AMP" --num-threads "${SLURM_CPUS_PER_TASK:-3}" --log-every 25 --log-backend jsonl \

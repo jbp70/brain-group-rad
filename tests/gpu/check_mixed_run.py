@@ -21,7 +21,8 @@ Tasks: rigid, affine (linear) and deform. Passes (exit 0) when:
   has that mode; partial: encoder + linear_decoder restored and ``fresh_parts`` exactly
   [deform_decoder] when deform is trained (else none). ``--expect-enc-grad true``: every task
   logged finite ``train_<task>/diag_enc_grad_norm_{raw,eff}``; prints the medians and the
-  linear / deform median _eff ratio as an INFO line (never a failure).
+  linear / deform median _eff ratio as an INFO line (never a failure); with --task-grad-norm
+  (v3.10) each task's detail also gives the median grad_norm_scale and the mean gated fraction.
 Prints one line per criterion and writes nothing.
 """
 import argparse
@@ -89,8 +90,15 @@ def _check_enc_grad(recs, tasks):
         med[t] = {k.rsplit("_", 1)[1]: _median(vals[k]) for k in keys}
         gn = [r["data"]["train_%s/grad_norm" % t] for r in recs if "train_%s/grad_norm" % t in r["data"]]
         med[t]["grad_norm"] = _median(gn)
-        res.append(("enc_grad_%s" % t, ok, "%d/%d logged values, median raw %.4g, eff %.4g, task grad_norm %.4g" % (
-            len(vals[keys[0]]), len(vals[keys[1]]), med[t]["raw"], med[t]["eff"], med[t]["grad_norm"])))
+        detail = "%d/%d logged values, median raw %.4g, eff %.4g, task grad_norm %.4g" % (
+            len(vals[keys[0]]), len(vals[keys[1]]), med[t]["raw"], med[t]["eff"], med[t]["grad_norm"])
+        sk, gk = "train_%s/grad_norm_scale" % t, "train_%s/grad_norm_gated_frac" % t
+        scales = [r["data"][sk] for r in recs if sk in r["data"]]
+        if scales:                       # --task-grad-norm runs (v3.10); info only
+            gated = [float(r["data"][gk]) for r in recs if gk in r["data"]]
+            detail += ", grad_norm_scale median %.4g, gated frac %.3g" % (
+                _median(scales), sum(gated) / len(gated) if gated else float("nan"))
+        res.append(("enc_grad_%s" % t, ok, detail))
     if DEFORM_TASK in tasks:
         d = med[DEFORM_TASK]["eff"]
         ratios = {t: (med[t]["eff"] / d if d and math.isfinite(d) and d > 0 else float("nan"))

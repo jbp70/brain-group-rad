@@ -16,6 +16,8 @@ of the level, `data_loading.dali_loader.linear_output_signature`)::
       diag = collapse_diagnostics(out["pre_head"], out["params"])   (no gradient, every step)
       grads -> drop None (e.g. the scale/shear head in rigid steps; static, at trace time)
       finite = isfinite(loss) & isfinite(global_norm(grads))
+      optional --task-grad-norm (design 5.2 v3.10; default off = no op): grads *= target /
+        max(g, eps) when the raw norm g >= min (else 1), then * w_task (w not in the objective)
       enc_diag = diag_enc_grad_norm_raw / _eff (encoder-only gradient norms, read-only)
       tf.cond(finite, apply_gradients, skip); if not finite: restore BN statistics
       step += 1;  returns loss terms, diag_*, grad_norm, finite, n_vars_updated
@@ -26,7 +28,10 @@ Task balance diagnostics (milestone 7, logged for every task as window means):
 norm actually applied (after loss scale, task weight and the global-clip factor min(1, clipnorm
 / grad_norm)), ``train_<task>/grad_norm`` = the task's pre-clip total norm (``train/grad_norm``
 pools all tasks as before). One Adam is shared by all tasks, so _eff of the linear tasks vs
-deform shows which task dominates its second-moment estimate on the encoder.
+deform shows which task dominates its second-moment estimate on the encoder. With
+--task-grad-norm, grad_norm stays the RAW (unweighted) norm, _eff includes the normalisation
+scale and weight, and ``train_<task>/{grad_norm_scale, grad_norm_gated_frac, grad_norm_normed}``
+are logged (`TASK_GRAD_NORM_KEYS`; window mean of gated_frac = fraction of gated steps).
 
 Collapse diagnostics (`collapse_diagnostics`, logged as ``train_<task>/diag_*`` means over the
 log window): a degenerate fixed point where every image of a group gets the same pre-head
@@ -80,7 +85,9 @@ Deformable step (milestone 6, traced once; input_signature =
         (ncc_* = mean squared LNCC, higher is better)
       diag = deform_diagnostics(out)      # same diag_feat_* / diag_dead_frac keys as linear on
                                           # the D1 decoder features, + v / u / folding stats
-      static None filter, finite flag, tf.cond apply, BN rollback, step += 1 (as linear)
+      static None filter, finite flag, optional --task-grad-norm (grads *= target / max(g, eps)
+        when g >= min, then * w_deform; w not in the objective), tf.cond apply, BN rollback,
+        step += 1 (as linear)
 
 None gradients per step (dropped at trace time; the ONE optimizer has slots for every trainable
 variable from `__init__`, so no step creates variables or retraces; BN statistics of a part that
@@ -166,6 +173,42 @@ DEFORM_NCC_KEYS = ("ncc_tmpl", "ncc_pair", "ncc_tmpl_loss", "ncc_pair_loss")
 ENC_GRAD_KEYS = ("diag_enc_grad_norm_raw", "diag_enc_grad_norm_eff")
 DEFORM_DIAG_KEYS = ("diag_feat_spread", "diag_feat_rel_spread", "diag_dead_frac", "diag_v_rms_vox",
                     "diag_v_raw_mean_rms_vox", "diag_u_max_vox", "diag_fold_frac")
+# Per-task gradient normalisation (design 5.2 v3.10, `task_grad_norm_scale`): eps of the
+# division and the result keys, present in a step's results only with task_grad_norm > 0.
+# grad_norm_scale = applied normalisation factor (1 when gated), grad_norm_gated_frac = 1 if the
+# finite raw norm was below task_grad_norm_min, grad_norm_normed = global norm of the gradients
+# passed to apply_gradients (after normalisation and task weight, before the optimizer's clip).
+TASK_GRAD_NORM_EPS = 1e-12
+TASK_GRAD_NORM_KEYS = ("grad_norm_scale", "grad_norm_gated_frac", "grad_norm_normed")
+
+
+def task_grad_norm_scale(gnorm, target, min_norm, eps=TASK_GRAD_NORM_EPS):
+    """(scale, gated) float32 scalars of the per-task gradient normalisation.
+
+    scale = target / max(gnorm, eps) if gnorm is finite and >= min_norm, else 1 (gated steps and
+    non-finite norms are never rescaled). gated = 1.0 if gnorm is finite and below min_norm.
+    ``target * (1.0 / max(.))`` mirrors `tf.clip_by_global_norm`'s ``clip * (1.0 / norm)``, so
+    normalising equals clipping exactly when the norm exceeds the clip (both branches are
+    computed; the divided one is finite because of eps).
+    """
+    gnorm = tf.convert_to_tensor(gnorm, tf.float32)
+    finite = tf.math.is_finite(gnorm)
+    ok = tf.logical_and(finite, gnorm >= float(min_norm))
+    scale = tf.where(ok, float(target) * (1.0 / tf.maximum(gnorm, float(eps))), tf.ones_like(gnorm))
+    gated = tf.cast(tf.logical_and(finite, tf.logical_not(ok)), tf.float32)
+    return scale, gated
+
+
+def scale_gradients(gs, factor):
+    """Every gradient times the scalar `factor` (cast to the gradient dtype; IndexedSlices kept)."""
+    out = []
+    for g in gs:
+        if isinstance(g, tf.IndexedSlices):
+            out.append(tf.IndexedSlices(g.values * tf.cast(factor, g.values.dtype), g.indices,
+                                        g.dense_shape))
+        else:
+            out.append(g * tf.cast(factor, g.dtype))
+    return out
 
 
 def deform_diagnostics(out):
@@ -262,6 +305,10 @@ class TrainConfig:
     # Per-task objective multipliers (milestone 7; missing task = 1.0): linear objective =
     # w * loss / loss_scale_mm2, deform objective = w * loss. Logged losses stay unweighted.
     task_loss_weights: Dict[str, float] = dataclasses.field(default_factory=dict)
+    # Per-task gradient normalisation (design 5.2 v3.10; 0 = off): grads *= target / max(g, eps)
+    # if the raw norm g >= task_grad_norm_min, then * task weight (the weight leaves the objective).
+    task_grad_norm: float = 0.0
+    task_grad_norm_min: float = 1e-3
     p_pair: float = 0.1
     flip_prob: float = 0.5
     target_iters: int = 10
@@ -365,6 +412,12 @@ class Trainer:
                 raise ValueError("task_loss_weights: unknown task %r" % t)
             if not (math.isfinite(float(w)) and float(w) > 0):
                 raise ValueError("task_loss_weights[%r] must be finite and > 0, got %r" % (t, w))
+        for k in ("task_grad_norm", "task_grad_norm_min"):
+            val = float(getattr(cfg, k))
+            if not (math.isfinite(val) and val >= 0):
+                raise ValueError("%s must be finite and >= 0, got %r" % (k, getattr(cfg, k)))
+        self.task_grad_norm = float(cfg.task_grad_norm)
+        self.task_grad_norm_min = float(cfg.task_grad_norm_min)
         for k in ("lambda_dice_tmpl", "lambda_ncc_tmpl", "lambda_ncc_pair"):
             val = float(getattr(cfg, k))
             if not (math.isfinite(val) and val >= 0):
@@ -418,22 +471,40 @@ class Trainer:
         """Objective multiplier of `task` (``cfg.task_loss_weights``, default 1.0)."""
         return float(dict(self.cfg.task_loss_weights or {}).get(task, 1.0))
 
-    def _enc_grad_diagnostics(self, gs, vs, gnorm, mult):
+    def _normalise_gradients(self, gs, gnorm, w):
+        """Per-task gradient normalisation (traced only with task_grad_norm > 0): normalise the
+        raw (unweighted, AMP-unscaled) gradients `gs` of global norm `gnorm` to task_grad_norm
+        (scale 1 when gated or non-finite), THEN multiply by the task weight `w`. Returns
+        (applied gradients, factor = scale * w, {TASK_GRAD_NORM_KEYS: tensors})."""
+        scale, gated = task_grad_norm_scale(gnorm, self.task_grad_norm, self.task_grad_norm_min)
+        factor = scale if w == 1.0 else scale * tf.constant(w, scale.dtype)
+        applied = scale_gradients(gs, factor)
+        return applied, factor, {"grad_norm_scale": scale, "grad_norm_gated_frac": gated,
+                                 "grad_norm_normed": tf.linalg.global_norm(applied)}
+
+    def _enc_grad_diagnostics(self, gs, vs, gnorm, mult, post=None):
         """Encoder-only gradient norms of one step (traced; no effect on the update).
 
         diag_enc_grad_norm_raw: norm of the gradient of the UNSCALED task loss w.r.t. the shared
-          encoder variables (the applied objective's gradient divided by ``mult`` = task weight /
-          loss_scale_mm2 for linear, task weight for deform);
+          encoder variables (the objective's gradient `gs` divided by ``mult`` = task weight /
+          loss_scale_mm2 for linear, task weight for deform; with --task-grad-norm the weight is
+          not in the objective, so ``mult`` = 1 / loss_scale_mm2 resp. 1);
         diag_enc_grad_norm_eff: the encoder norm actually applied: the objective's encoder
-          gradient times the global-clip factor min(1, clipnorm / grad_norm) (1 without clip).
+          gradient times ``post`` (with --task-grad-norm: normalisation scale x task weight; None
+          = 1) times the global-clip factor min(1, clipnorm / (grad_norm x post)) (1 without clip).
         """
         enc_refs = {v.ref() for v in self.model.encoder.trainable_variables}
         enc = [g for g, v in zip(gs, vs) if v.ref() in enc_refs]
         enc_norm = tf.linalg.global_norm(enc) if enc else tf.constant(0.0)
         clip = getattr(O.inner_optimizer(self.optimizer), "global_clipnorm", None)
         eff = enc_norm
-        if clip:
-            eff = enc_norm * tf.minimum(1.0, float(clip) / tf.maximum(gnorm, 1e-12))
+        if post is None:
+            if clip:
+                eff = enc_norm * tf.minimum(1.0, float(clip) / tf.maximum(gnorm, 1e-12))
+        else:
+            eff = enc_norm * post
+            if clip:
+                eff = eff * tf.minimum(1.0, float(clip) / tf.maximum(gnorm * post, 1e-12))
         return {"diag_enc_grad_norm_raw": enc_norm / float(mult), "diag_enc_grad_norm_eff": eff}
 
     def _group_size(self, task):
@@ -454,6 +525,7 @@ class Trainer:
         ncc_kw = dict(lambda_dice_tmpl=float(cfg.lambda_dice_tmpl), lambda_ncc_tmpl=float(cfg.lambda_ncc_tmpl),
                       lambda_ncc_pair=float(cfg.lambda_ncc_pair), ncc_window=self.ncc_window)
         w = self._task_weight(task)
+        norm_on = self.task_grad_norm > 0      # trace-time switch: off adds no op
 
         def body(images, labels, t_dali=None):
             self.trace_counts[task] += 1          # Python side effect: runs only while tracing
@@ -468,7 +540,7 @@ class Trainer:
                 out = model(batch["images"], task=task, training=True)
                 terms = losses.deform_loss(out, batch, lam_p, lam_s, order, **ncc_kw)
                 objective = terms["loss"]
-                if w != 1.0:
+                if w != 1.0 and not norm_on:
                     objective = objective * tf.constant(w, objective.dtype)
                 scaled = opt.get_scaled_loss(objective) if amp else objective
             grads = tape.gradient(scaled, tvars)
@@ -481,10 +553,16 @@ class Trainer:
             gnorm = tf.linalg.global_norm(gs)
             finite = tf.logical_and(tf.math.is_finite(terms["loss"]), tf.math.is_finite(gnorm))
             finite = tf.logical_and(finite, in_finite)
-            enc_diag = self._enc_grad_diagnostics(gs, vs, gnorm, w)
+            norm_res = {}
+            if norm_on:
+                gs_applied, factor, norm_res = self._normalise_gradients(gs, gnorm, w)
+                enc_diag = self._enc_grad_diagnostics(gs, vs, gnorm, 1.0, post=factor)
+            else:
+                gs_applied = gs
+                enc_diag = self._enc_grad_diagnostics(gs, vs, gnorm, w)
 
             def apply():
-                opt.apply_gradients(zip(gs, vs))
+                opt.apply_gradients(zip(gs_applied, vs))
                 return tf.constant(True)
 
             tf.cond(in_finite if amp else finite, apply, lambda: tf.constant(False))
@@ -500,6 +578,7 @@ class Trainer:
             res = dict(terms)
             res.update(diag)
             res.update(enc_diag)
+            res.update(norm_res)
             res.update(grad_norm=gnorm, finite=finite, n_vars_updated=tf.constant(len(pairs)))
             return res
 
@@ -519,6 +598,7 @@ class Trainer:
         if not (math.isfinite(loss_scale) and loss_scale > 0):
             raise ValueError("loss_scale_mm2 must be finite and > 0, got %r" % loss_scale)
         w = self._task_weight(task)
+        norm_on = self.task_grad_norm > 0      # trace-time switch: off adds no op
         S = self.S
 
         def body(images, t_dali, rt_dali=None):
@@ -538,7 +618,7 @@ class Trainer:
                 objective = terms["loss"]
                 if loss_scale != 1.0:
                     objective = objective / tf.constant(loss_scale, objective.dtype)
-                if w != 1.0:
+                if w != 1.0 and not norm_on:
                     objective = objective * tf.constant(w, objective.dtype)
                 scaled = opt.get_scaled_loss(objective) if amp else objective
             grads = tape.gradient(scaled, tvars)
@@ -551,10 +631,16 @@ class Trainer:
             gnorm = tf.linalg.global_norm(gs)
             finite = tf.logical_and(tf.math.is_finite(terms["loss"]), tf.math.is_finite(gnorm))
             finite = tf.logical_and(finite, in_finite)
-            enc_diag = self._enc_grad_diagnostics(gs, vs, gnorm, w / loss_scale)
+            norm_res = {}
+            if norm_on:
+                gs_applied, factor, norm_res = self._normalise_gradients(gs, gnorm, w)
+                enc_diag = self._enc_grad_diagnostics(gs, vs, gnorm, 1.0 / loss_scale, post=factor)
+            else:
+                gs_applied = gs
+                enc_diag = self._enc_grad_diagnostics(gs, vs, gnorm, w / loss_scale)
 
             def apply():
-                opt.apply_gradients(zip(gs, vs))
+                opt.apply_gradients(zip(gs_applied, vs))
                 return tf.constant(True)
 
             # Under AMP the LSO must see non-finite gradients (it skips them itself and lowers
@@ -572,6 +658,7 @@ class Trainer:
             res = dict(terms)
             res.update(diag)
             res.update(enc_diag)
+            res.update(norm_res)
             res.update(grad_norm=gnorm, finite=finite, n_vars_updated=tf.constant(len(pairs)))
             return res
 
@@ -1049,6 +1136,7 @@ class Trainer:
                 pre = "train_%s/" % task
                 acc.update({pre + k: res[k] for k in ENC_GRAD_KEYS})
                 acc.update({pre + "grad_norm": res["grad_norm"]})
+                acc.update({pre + k: res[k] for k in TASK_GRAD_NORM_KEYS if k in res})
                 if task == DEFORM:
                     acc.update({pre + k: res[k] for k in DEFORM_LOSS_KEYS})
                     acc.update({pre + k: res[k] for k in DEFORM_NCC_KEYS if k in res})

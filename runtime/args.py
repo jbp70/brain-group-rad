@@ -207,6 +207,17 @@ def build_parser():
                    "--loss-scale-mm2 (linear: objective = w * loss / loss_scale_mm2; deform: w * "
                    "loss). Balances the tasks' gradients on the shared encoder through the one Adam "
                    "(train_<task>/diag_enc_grad_norm_{raw,eff}). Logged losses stay unweighted")
+    g.add_argument("--task-grad-norm", type=float, default=0.0,
+                   help="per-task gradient normalisation target: each step's (unweighted) gradient "
+                   "is rescaled to this global norm before the optimizer, then multiplied by its "
+                   "--task-loss-weights weight (so weights become ratios of applied norms; the "
+                   "weight is then not in the objective and train_<task>/grad_norm is the "
+                   "unweighted raw norm); 0 = off (default, bit-identical); steps whose raw norm "
+                   "is below --task-grad-norm-min are not rescaled. With target <= --clipnorm the "
+                   "global clip is a no-op")
+    g.add_argument("--task-grad-norm-min", type=float, default=1e-3,
+                   help="raw global norm below which a step is left unscaled (scale 1); >= 0. "
+                   "Default 1e-3 = the collapse detector's zero-gradient threshold")
     g.add_argument("--p-pair", type=float, default=0.1)
     g.add_argument("--flip-prob", type=float, default=0.5, help="per-axis group flip probability")
     g.add_argument("--target-iters", type=int, default=10)
@@ -355,6 +366,10 @@ def parse_args(argv=None):
         args.group_size = DEFAULT_GROUP_SIZE[args.level]
     if not (math.isfinite(args.loss_scale_mm2) and args.loss_scale_mm2 > 0):
         parser.error("--loss-scale-mm2 must be finite and > 0, got %r" % args.loss_scale_mm2)
+    for flag, val in (("--task-grad-norm", args.task_grad_norm),
+                      ("--task-grad-norm-min", args.task_grad_norm_min)):
+        if not (math.isfinite(val) and val >= 0):
+            parser.error("%s must be finite and >= 0, got %r" % (flag, val))
     if args.val_png_k < 1 or args.val_png_group < 0:
         parser.error("--val-png-k must be >= 1 and --val-png-group >= 0")
     if args.group_size < 2:
@@ -517,6 +532,7 @@ def train_config_from_args(args):
                        ckpt_every=args.ckpt_every, task_ratio=dict(args.task_ratio_parsed),
                        lambda_pair=args.lambda_pair, loss_scale_mm2=args.loss_scale_mm2,
                        task_loss_weights=dict(args.task_loss_weights_parsed),
+                       task_grad_norm=args.task_grad_norm, task_grad_norm_min=args.task_grad_norm_min,
                        p_pair=args.p_pair,
                        flip_prob=0.0 if args.overfit_one_group else args.flip_prob,
                        target_iters=args.target_iters, amp=args.amp, seed=args.seed,
