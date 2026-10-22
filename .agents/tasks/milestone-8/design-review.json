@@ -1,0 +1,34 @@
+{
+  "verdict": "APPROVED",
+  "findings": [
+    {
+      "id": 1,
+      "severity": "NIT",
+      "title": "--val-pair-chunk must reach every _deform_errors call (identity and frozen baselines too)",
+      "where": "design.md sections 10, 11, 17; runtime/run.py _deform_errors / _identity_deform_metrics",
+      "fix": "Make _deform_errors default chunk=None -> int(self.cfg.val_pair_chunk) so the composed, identity and frozen-baseline calls all honour it; the memory script passes chunk=16 explicitly; add one assertion that the baselines use val_pair_chunk=4."
+    },
+    {
+      "id": 2,
+      "severity": "NIT",
+      "title": "Pin the index b in controls[t].update(b) and note that recalibration consumes training-stream state",
+      "where": "design.md section 7 step 3",
+      "fix": "State b = global plan index 0..K-1; fit restarts at update(0), which is safe because control values are a pure function of the step; K > 0 consumes K source batches and postprocess draws, so the data order differs from K = 0 (reproducible on resume through checkpointed generators)."
+    },
+    {
+      "id": 3,
+      "severity": "NIT",
+      "title": "Test 6 bitwise equality across two different graphs may be fragile",
+      "where": "design.md section 16 test 6",
+      "fix": "Run with TF_CUDNN_USE_AUTOTUNE=0 and _OpDeterminism; document a 1e-6 relative fallback tolerance if a mismatch can't be traced to skip ops; keep the no-cascade_skip-ops graph check as the strict proof."
+    },
+    {
+      "id": 4,
+      "severity": "NIT",
+      "title": "Decide resume vs fresh once, before building the FrozenStage",
+      "where": "design.md section 9 vs main.py (trainer.checkpoint.latest_last decided after the Trainer exists)",
+      "fix": "cascade_resume = bool(args.resume) and C.peek_last_step(<run>/ckpt/last) > 0, computed before any model is built; use it for the FrozenStage factory and the recal gate; assert restore_last() is True when cascade_resume; document that --resume false on an existing run dir is a fresh run that appends a second bn_recalibration event."
+    }
+  ],
+  "reviewDoc": "d:\\Research\\Brain_Registration_Projects\\brain-group-rad\\.agents\\tasks\\milestone-8\\design-review.md"
+}

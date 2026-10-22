@@ -1,0 +1,7 @@
+{
+  "task_id": "task-m8-level2-cascade",
+  "task_description": "Milestone 8: train level 2 (80x112x96, 2 mm) as the second stage of a frozen level-4 cascade (weight copy, frozen FrozenStage, linear and deform residual composition, skip, BN recalibration, cascade validation baselines, cross-level warm start), plus checker, level memory script, verify_dali --level, SLURM recipes m8_memory.sh / m8_level2_cascade.sh, exporter synthseg at level 2, local e2e and report. Approved design: .agents/tasks/milestone-8/design.md v5; ordered plan: .agents/tasks/milestone-8/plan.md. Level-4 runs must stay bit-identical. No commits, pushes or cluster actions.",
+  "status": "completed",
+  "feature_order": ["FEAT-001", "FEAT-002", "FEAT-003", "FEAT-004", "FEAT-005"],
+  "blocked_reason": null
+}

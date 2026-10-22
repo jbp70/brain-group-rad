@@ -23,6 +23,21 @@ def narrow_config(**kw):
     return ModelConfig(**d)
 
 
+# Tiny model (milestone 8, design §16): small enough for level-2 cascade tests (a frozen level-4
+# stage plus a trainable level-2 stage) under the 6000 MB GTX 1080 cap. The deform decoder is
+# still off unless ``deform_decoder=True`` is passed (decoder_widths only apply then).
+TINY = dict(filters=(8, 16, 16, 16, 16, 16), reductions=(16, 8), dense=(64, 32),
+            decoder_widths=(8, 8, 8, 8, 8), dropout=0.0)
+TINY_ARGS = ["--filters", "8,16,16,16,16,16", "--reductions", "16,8", "--dense", "64,32",
+             "--decoder-widths", "8,8,8,8,8"]
+
+
+def tiny_config(**kw):
+    d = dict(TINY)
+    d.update(kw)
+    return ModelConfig(**d)
+
+
 def free_memory():
     tf.keras.backend.clear_session()
     gc.collect()

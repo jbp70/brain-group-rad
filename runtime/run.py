@@ -112,6 +112,33 @@ tasks only. Best files: linear tasks -> ``ckpt/best`` keeps the linear rule; def
 wires ``ckpt/best_deform``). Overfit stop (`overfit_status`): every linear task's window mean
 center RMS below the threshold (unchanged) AND the deform window mean soft template Dice >=
 ``overfit_dice_threshold`` with window mean folding fraction < ``overfit_fold_max``.
+
+Level cascade (milestone 8, `.agents/tasks/milestone-8/design.md` sections 4-8; ``Trainer(cascade=
+models.cascade.FrozenStage)``, default None = every function below is built exactly as without
+it). The frozen level-4 stage is never in the optimizer, runs outside the tape in eval mode and
+its outputs are stop_gradient'ed. Chosen at trace time (``if self.cascade is not None``)::
+
+    linear step(images, T_dali(, Rt_dali), skip bool[])          deform step(images, labels, skip)
+      batch = pp(...); x = finite-zeroed images                    batch = pp(...); x = ... (same)
+      A_prev = frozen.linear(x, task)          (pool to level 4)   U, U_inv = frozen.deform(x)
+      [p_skip > 0: A_prev = I if skip]                             [p_skip > 0: U = U_inv = 0 if skip]
+      x_in = x o A_prev^-1                                         x_in = warp(x, U)
+      tape: out = model(x_in); A = Center(out.A_raw A_prev)        tape: out = model(x_in) (residual)
+            linear_loss(A, batch, S)                                     (u, u_inv) = compose_cascade
+                                                                         deform_loss(out_c, batch)
+
+The deform losses use the ORIGINAL batch images / one-hot with the composed field (u_res = the
+residual u, ``diag_u_res_max_vox`` logged). The skip input exists only in cascade signatures;
+with ``cascade_skip_prob == 0`` its ``tf.where`` ops (name scope ``cascade_skip``) are not built.
+`fit` draws skip = ``random.Random('cascade-skip-<seed>-<step>').random() < p`` (stateless) and
+logs ``train/cascade_skip_frac`` only when p > 0; with a cascade it also logs
+``train_<task>/{data_ms, compute_ms}`` window means. Validation: the same pool -> frozen (eval)
+-> pre-warp -> trainable -> compose forward inside the traced validation function (never
+skipped); eval passes also collect the frozen estimates, giving the cached frozen-stage
+baselines ``val_<set>_frozen/...`` (`_frozen_baseline_metrics`) and, for deform sets,
+``val_<set>/composed_mean_disp_mm`` (RMS over voxels of |mean_i u_i| in mm).
+`recalibrate_bn` re-estimates the trainable stage's BN statistics (forward-only, exact average
+of per-batch statistics) and optionally freezes them (design section 7).
 """
 import collections
 import dataclasses
@@ -129,7 +156,9 @@ import tensorflow as tf
 from data_loading import dali_loader
 from data_loading import params as P
 from data_loading.postprocess import DeformPostprocess, LinearPostprocess
+from models import cascade as CS
 from models import diffeo
+from models import layers as L
 from models import transforms as tfm
 from runtime import losses
 from runtime import metrics as M
@@ -180,6 +209,48 @@ DEFORM_DIAG_KEYS = ("diag_feat_spread", "diag_feat_rel_spread", "diag_dead_frac"
 # passed to apply_gradients (after normalisation and task weight, before the optimizer's clip).
 TASK_GRAD_NORM_EPS = 1e-12
 TASK_GRAD_NORM_KEYS = ("grad_norm_scale", "grad_norm_gated_frac", "grad_norm_normed")
+# Level cascade (milestone 8): extra deform-step diagnostics (max |u_res| of the level-2 residual,
+# cascade steps only), the per-step skip flag key and the BN recalibration gap metrics
+# (|eval - trainmode| per validation set, `Trainer.recalibrate_bn`).
+DEFORM_CASCADE_DIAG_KEYS = ("diag_u_res_max_vox",)
+CASCADE_SKIP_KEY = "train/cascade_skip_frac"
+BN_GAP_METRICS = {"linear": ("center_rms_mm", "pair_rms_mm"), DEFORM: ("template_dice", "pair_dice")}
+
+
+def cascade_skip_draw(seed, step, p):
+    """Stateless per-step skip draw of the cascade (design section 6): True with probability `p`."""
+    return random.Random("cascade-skip-%d-%d" % (int(seed), int(step))).random() < float(p)
+
+
+def bn_recal_plan(num_batches, ratio):
+    """BN recalibration task plan (design section 7 step 2): ordered list of `num_batches` task names.
+
+    Largest-remainder allocation of K over the (ordered) task ratio (ties -> earlier task), every
+    task >= 1 (taken from the task with the most slots), interleaved round-robin in ratio order
+    (K = 64, rigid:1,affine:1,deform:2 -> 16 / 16 / 32: r a d r a d ... then 16 x d)."""
+    k = int(num_batches)
+    tasks = [t for t, v in ratio.items() if float(v) > 0]
+    if k < len(tasks):
+        raise ValueError("bn recalibration needs >= %d batches (one per task), got %d" % (len(tasks), k))
+    total = sum(float(ratio[t]) for t in tasks)
+    quota = [k * float(ratio[t]) / total for t in tasks]
+    counts = [int(math.floor(q)) for q in quota]
+    order = sorted(range(len(tasks)), key=lambda i: (-(quota[i] - counts[i]), i))
+    for i in order[:k - sum(counts)]:
+        counts[i] += 1
+    for i in range(len(tasks)):
+        while counts[i] == 0:
+            j = max(range(len(tasks)), key=lambda m: (counts[m], -m))
+            counts[j] -= 1
+            counts[i] += 1
+    left = list(counts)
+    plan = []
+    while len(plan) < k:
+        for i, t in enumerate(tasks):
+            if left[i] > 0:
+                plan.append(t)
+                left[i] -= 1
+    return plan
 
 
 def task_grad_norm_scale(gnorm, target, min_norm, eps=TASK_GRAD_NORM_EPS):
@@ -359,6 +430,11 @@ class TrainConfig:
     lambda_ncc_tmpl: float = 0.0
     lambda_ncc_pair: float = 0.0
     ncc_window: Optional[int] = None
+    # Level cascade (milestone 8, design section 6 / section 11): per-step probability of skipping the frozen
+    # stage in training (0 = off, no skip ops built) and the deform validation pair chunk size
+    # (16 = the milestone-6 value).
+    cascade_skip_prob: float = 0.0
+    val_pair_chunk: int = 16
 
 
 def _peak_gpu_mb():
@@ -388,11 +464,16 @@ class Trainer:
         (curriculum / global transform). Each step first writes every task's control values of
         that step; batches then carry G_dali and control_version, which are logged and dropped
         before the step function. None (default): no control file is touched.
+      cascade: optional `models.cascade.FrozenStage` (milestone 8, level 2 only): the frozen
+        previous level (module docstring "Level cascade"). It is called outside the tape in eval
+        mode and its variables are never given to the optimizer (`O.build_optimizer` stays on
+        ``model.trainable_variables``). None (default): no cascade code is traced.
     """
 
     def __init__(self, model, optimizer, sources, S, cfg, logger=None, checkpoint=None, val_sets=None,
-                 controls=None):
+                 controls=None, cascade=None):
         self.model = model
+        self.cascade = cascade
         self.optimizer = optimizer
         self.sources = dict(sources)
         self.cfg = cfg
@@ -401,6 +482,15 @@ class Trainer:
         self.val_sets = dict(val_sets or {})
         self.controls = dict(controls or {})
         self.level = P.check_level(cfg.level)
+        if cascade is not None:
+            if CS.PREV_LEVEL.get(self.level) != cascade.level:
+                raise ValueError("cascade: level %d has no frozen level-%d stage (PREV_LEVEL %s)"
+                                 % (self.level, cascade.level, CS.PREV_LEVEL))
+            if cfg.deform_residual_affine:
+                raise ValueError("cascade: deform_residual_affine is not supported (design section 5)")
+            p = float(cfg.cascade_skip_prob)
+            if not (math.isfinite(p) and 0.0 <= p < 1.0):
+                raise ValueError("cascade_skip_prob must be in [0, 1), got %r" % cfg.cascade_skip_prob)
         self.S_np = np.asarray(S, np.float64)
         self.S = tf.constant(self.S_np, tf.float32)
         self.schedule = TaskSchedule(cfg.task_ratio, cfg.seed)
@@ -444,6 +534,7 @@ class Trainer:
                                                         seed=cfg.seed + POSTPROCESS_SEED_OFFSET[t],
                                                         target_iters=cfg.target_iters)
         self._identity_cache = {}
+        self._frozen_cache = {}         # cascade: frozen-stage validation baselines
         self.trace_counts = {t: 0 for t in self.sources}
         self.val_trace_counts = {}
         self.nonfinite_total = 0
@@ -526,18 +617,30 @@ class Trainer:
                       lambda_ncc_pair=float(cfg.lambda_ncc_pair), ncc_window=self.ncc_window)
         w = self._task_weight(task)
         norm_on = self.task_grad_norm > 0      # trace-time switch: off adds no op
+        cascade = self.cascade                 # trace-time switch (design section 5): None adds no op
+        skip_on = cascade is not None and float(cfg.cascade_skip_prob) > 0
 
-        def body(images, labels, t_dali=None):
+        def body(images, labels, t_dali=None, skip=None):
             self.trace_counts[task] += 1          # Python side effect: runs only while tracing
             batch = pp(images, labels, t_dali)    # outside the tape
             x = batch["images"]
             in_finite = tf.reduce_all(tf.math.is_finite(x))
             batch["images"] = tf.where(in_finite, x, tf.zeros_like(x))
+            x_in = batch["images"]
+            if cascade is not None:               # frozen stage + pre-warp, outside the tape
+                prev = cascade.deform(batch["images"])
+                U, U_inv = prev["U"], prev["U_inv"]
+                if skip_on:
+                    U, U_inv = CS.skip_fields(skip, [U, U_inv])
+                x_in = CS.prewarp_deform(batch["images"], U)
             stats = list(model.non_trainable_variables)
             backup = [tf.identity(v) for v in stats]
             tvars = model.trainable_variables
             with tf.GradientTape() as tape:
-                out = model(batch["images"], task=task, training=True)
+                out = model(x_in, task=task, training=True)
+                if cascade is not None:           # composed field; losses on the ORIGINAL batch
+                    u, u_inv = diffeo.compose_cascade(U, U_inv, out["u"], out["u_inv"])
+                    out = dict(out, u=u, u_inv=u_inv, u_res=out["u"])
                 terms = losses.deform_loss(out, batch, lam_p, lam_s, order, **ncc_kw)
                 objective = terms["loss"]
                 if w != 1.0 and not norm_on:
@@ -545,6 +648,8 @@ class Trainer:
                 scaled = opt.get_scaled_loss(objective) if amp else objective
             grads = tape.gradient(scaled, tvars)
             diag = deform_diagnostics(out)
+            if cascade is not None:
+                diag["diag_u_res_max_vox"] = tf.reduce_max(tf.norm(tf.cast(out["u_res"], tf.float32), axis=-1))
             pairs = [(g, v) for g, v in zip(grads, tvars) if g is not None]   # static filter
             gs = [g for g, _ in pairs]
             vs = [v for _, v in pairs]
@@ -582,6 +687,9 @@ class Trainer:
             res.update(grad_norm=gnorm, finite=finite, n_vars_updated=tf.constant(len(pairs)))
             return res
 
+        if cascade is not None:                   # residual affine excluded (Trainer.__init__)
+            return tf.function(lambda images, labels, skip: body(images, labels, None, skip),
+                               input_signature=signature + [tf.TensorSpec([], tf.bool)])
         if residual:
             return tf.function(lambda images, labels, t_dali: body(images, labels, t_dali),
                                input_signature=signature)
@@ -600,8 +708,11 @@ class Trainer:
         w = self._task_weight(task)
         norm_on = self.task_grad_norm > 0      # trace-time switch: off adds no op
         S = self.S
+        cascade = self.cascade                 # trace-time switch (design section 4): None adds no op
+        skip_on = cascade is not None and float(cfg.cascade_skip_prob) > 0
+        spacing = P.LEVEL_SPACING[self.level]
 
-        def body(images, t_dali, rt_dali=None):
+        def body(images, t_dali, rt_dali=None, skip=None):
             self.trace_counts[task] += 1          # Python side effect: runs only while tracing
             batch = pp(images, t_dali, rt_dali)   # outside the tape
             # Non-finite inputs would make the barycenter's matrix inverse raise instead of
@@ -609,12 +720,19 @@ class Trainer:
             x = batch["images"]
             in_finite = tf.reduce_all(tf.math.is_finite(x))
             batch["images"] = tf.where(in_finite, x, tf.zeros_like(x))
+            x_in = batch["images"]
+            if cascade is not None:               # frozen stage + pre-warp, outside the tape
+                A_prev = cascade.linear(batch["images"], task)
+                if skip_on:
+                    A_prev = CS.skip_linear(skip, A_prev)
+                x_in = CS.prewarp_linear(batch["images"], A_prev, spacing)
             stats = list(model.non_trainable_variables)
             backup = [tf.identity(v) for v in stats]
             tvars = model.trainable_variables
             with tf.GradientTape() as tape:
-                out = model(batch["images"], task=task, training=True)
-                terms = losses.linear_loss(out["A"], batch, S, lam)
+                out = model(x_in, task=task, training=True)
+                A = out["A"] if cascade is None else CS.compose_linear(out["A_raw"], A_prev, model.centering)
+                terms = losses.linear_loss(A, batch, S, lam)
                 objective = terms["loss"]
                 if loss_scale != 1.0:
                     objective = objective / tf.constant(loss_scale, objective.dtype)
@@ -662,6 +780,13 @@ class Trainer:
             res.update(grad_norm=gnorm, finite=finite, n_vars_updated=tf.constant(len(pairs)))
             return res
 
+        if cascade is not None:                   # one extra trailing input: skip bool[] (design section 6)
+            skip_spec = [tf.TensorSpec([], tf.bool)]
+            if task == "rigid":
+                return tf.function(lambda images, t_dali, rt_dali, skip: body(images, t_dali, rt_dali, skip),
+                                   input_signature=signature + skip_spec)
+            return tf.function(lambda images, t_dali, skip: body(images, t_dali, None, skip),
+                               input_signature=signature + skip_spec)
         if task == "rigid":
             return tf.function(lambda images, t_dali, rt_dali: body(images, t_dali, rt_dali),
                                input_signature=signature)
@@ -693,11 +818,15 @@ class Trainer:
             out["control_version_lag"] = float(writer.version - ver.min()) if writer is not None else 0.0
         return out
 
-    def train_step(self, task, batch_tuple):
+    def train_step(self, task, batch_tuple, skip=False):
         """Run one step of `task` on a DALI-format tuple (control extras are ignored). Returns
-        Python scalars."""
+        Python scalars. ``skip`` (cascade only, design section 6): skip the frozen stage in this step
+        (passed as the step's trailing bool input; ignored without a cascade)."""
         batch_tuple, _ = self.split_batch(task, batch_tuple)
-        out = self._steps[task](*batch_tuple)
+        if self.cascade is None:
+            out = self._steps[task](*batch_tuple)
+        else:
+            out = self._steps[task](*batch_tuple, tf.constant(bool(skip)))
         res = {k: float(v.numpy()) for k, v in out.items() if k not in ("finite", "n_vars_updated")}
         res["finite"] = bool(out["finite"].numpy())
         res["n_vars_updated"] = int(out["n_vars_updated"].numpy())
@@ -708,7 +837,10 @@ class Trainer:
         """Validation forward -> A. ``train_mode=False``: eval mode (moving BN statistics), the
         source of truth. ``train_mode=True``: diagnostic forward with training-mode BN (batch
         statistics of the group) and dropout off; the BN moving statistics are restored
-        afterwards, so it changes no state."""
+        afterwards, so it changes no state. With a cascade: `_cascade_val_fn` (same key, returns a
+        dict)."""
+        if self.cascade is not None:
+            return self._cascade_val_fn(task, nv, train_mode)
         key = (task, int(nv), bool(train_mode))
         if key not in self._val_fns:
             shape = (int(nv),) + tuple(P.LEVEL_SHAPE[self.level]) + (1,)
@@ -742,12 +874,63 @@ class Trainer:
                                              input_signature=[tf.TensorSpec(shape, tf.float32)])
         return self._val_fns[key]
 
-    def _val_errors(self, task, vs, groups, train_mode):
-        """(pooled errors, [A per group] float64)."""
+    def _train_mode_forward(self, x, task, extract):
+        """Traced train-mode diagnostic forward of the trainable model (as `_val_fn`): dropout
+        rates zeroed while tracing, BN batch statistics, moving statistics restored afterwards.
+        Returns ``extract(model output)`` (a dict of tensors) after the restores."""
+        model = self.model
+        stats = list(model.non_trainable_variables)
+        backup = [tf.identity(v) for v in stats]
+        drops = [m for m in model.submodules if isinstance(m, tf.keras.layers.Dropout)]
+        rates = [d.rate for d in drops]
+        try:
+            for d in drops:
+                d.rate = 0.0
+            res = extract(model(x, task=task, training=True))
+        finally:
+            for d, r in zip(drops, rates):
+                d.rate = r
+        with tf.control_dependencies(list(res.values())):
+            restores = [v.assign(b) for v, b in zip(stats, backup)]
+        with tf.control_dependencies(restores):
+            return {k: tf.identity(v) for k, v in res.items()}
+
+    def _cascade_val_fn(self, task, nv, train_mode=False):
+        """Cascade linear validation forward (design section 8), key (task, nv, train_mode), traced once:
+        pool -> frozen (eval) -> pre-warp -> trainable (eval, or train-mode BN restored as
+        `_val_fn`) -> compose. Returns {'A': composed, 'A_prev': frozen A4} in eval mode and
+        {'A': composed} in train mode. Never skips."""
+        key = (task, int(nv), bool(train_mode))
+        if key not in self._val_fns:
+            shape = (int(nv),) + tuple(P.LEVEL_SHAPE[self.level]) + (1,)
+            model, cascade = self.model, self.cascade
+            spacing = P.LEVEL_SPACING[self.level]
+            self.val_trace_counts.setdefault(key, 0)
+
+            def fwd(x):
+                self.val_trace_counts[key] += 1
+                A_prev = cascade.linear(x, task)
+                x_in = CS.prewarp_linear(x, A_prev, spacing)
+                if train_mode:
+                    return self._train_mode_forward(
+                        x_in, task, lambda out: {"A": CS.compose_linear(out["A_raw"], A_prev, model.centering)})
+                out = model(x_in, task=task, training=False)
+                return {"A": CS.compose_linear(out["A_raw"], A_prev, model.centering), "A_prev": A_prev}
+
+            self._val_fns[key] = tf.function(fwd, input_signature=[tf.TensorSpec(shape, tf.float32)])
+        return self._val_fns[key]
+
+    def _val_errors(self, task, vs, groups, train_mode, frozen_outs=None):
+        """(pooled errors, [A per group] float64). With a cascade the validation function returns
+        a dict (composed ``A``); ``frozen_outs`` (a list, eval-mode cascade passes only) receives
+        the frozen A4 [N, 4, 4] float64 of every group."""
         fn = self._val_fn(task, vs.group_size, train_mode)
         errs, mats = [], []
         for g, grp in enumerate(groups):
-            A = fn(tf.constant(grp["images"])).numpy().astype(np.float64)
+            out = fn(tf.constant(grp["images"]))
+            A = (out["A"] if self.cascade is not None else out).numpy().astype(np.float64)
+            if frozen_outs is not None:
+                frozen_outs.append(out["A_prev"].numpy().astype(np.float64))
             mats.append(A)
             errs.append(M.group_errors(A, grp["A_star"], grp["T_target"], self.S_np, seed=g,
                                        affine=task == "affine" and not train_mode))
@@ -756,7 +939,9 @@ class Trainer:
     def _val_deform_fn(self, nv, train_mode=False):
         """Deform validation forward -> dict(u, u_inv, v, v_raw) float32. Eval mode, or (with
         ``train_mode``) training-mode BN with dropout off and the BN statistics restored, as
-        `_val_fn`."""
+        `_val_fn`. With a cascade: `_cascade_val_deform_fn` (same key)."""
+        if self.cascade is not None:
+            return self._cascade_val_deform_fn(nv, train_mode)
         key = (DEFORM, int(nv), bool(train_mode))
         if key not in self._val_fns:
             shape = (int(nv),) + tuple(P.LEVEL_SHAPE[self.level]) + (1,)
@@ -792,6 +977,35 @@ class Trainer:
                                              input_signature=[tf.TensorSpec(shape, tf.float32)])
         return self._val_fns[key]
 
+    def _cascade_val_deform_fn(self, nv, train_mode=False):
+        """Cascade deform validation forward (design section 8), key ('deform', nv, train_mode): pool ->
+        frozen (eval) -> pre-warp warp(x, U) -> trainable residual -> compose_cascade. Returns the
+        composed u, u_inv and the residual v, v_raw (float32); eval mode also U, U_inv, V (the
+        upsampled frozen fields, for the frozen baselines). Never skips."""
+        key = (DEFORM, int(nv), bool(train_mode))
+        if key not in self._val_fns:
+            shape = (int(nv),) + tuple(P.LEVEL_SHAPE[self.level]) + (1,)
+            model, cascade = self.model, self.cascade
+            self.val_trace_counts.setdefault(key, 0)
+
+            def composed(prev, out):
+                u, u_inv = diffeo.compose_cascade(prev["U"], prev["U_inv"], out["u"], out["u_inv"])
+                return {"u": tf.cast(u, tf.float32), "u_inv": tf.cast(u_inv, tf.float32),
+                        "v": tf.cast(out["v"], tf.float32), "v_raw": tf.cast(out["v_raw"], tf.float32)}
+
+            def fwd(x):
+                self.val_trace_counts[key] += 1
+                prev = cascade.deform(x)
+                x_in = CS.prewarp_deform(x, prev["U"])
+                if train_mode:
+                    return self._train_mode_forward(x_in, DEFORM, lambda out: composed(prev, out))
+                res = composed(prev, model(x_in, task=DEFORM, training=False))
+                res.update({k: tf.cast(prev[k], tf.float32) for k in ("U", "U_inv", "V")})
+                return res
+
+            self._val_fns[key] = tf.function(fwd, input_signature=[tf.TensorSpec(shape, tf.float32)])
+        return self._val_fns[key]
+
     def _val_pairs(self, n, seed):
         """Ordered validation pairs (i, j): all if n (n - 1) <= val_deform_max_pairs, else a fixed
         seeded subset of that size (sorted)."""
@@ -802,14 +1016,16 @@ class Trainer:
             i, j = i[sel], j[sel]
         return np.asarray(i, np.int32), np.asarray(j, np.int32)
 
-    def _deform_errors(self, labels, u, u_inv, v, v_raw, seed, chunk=16, images=None):
+    def _deform_errors(self, labels, u, u_inv, v, v_raw, seed, chunk=None, images=None):
         """`M.deform_group_errors` of one group (eager TF warps, numpy metrics). labels uint8
         [N, X, Y, Z(, 1)]; fields float32 [N, X, Y, Z, 3]. Also returns the warped one-hot hard
         segmentation [N, X, Y, Z] and the label template [X, Y, Z] (for the PNG).
 
         ``images`` float32 [N, X, Y, Z, 1] (optional): also ncc_template [N] and ncc_pair [P]
         (squared LNCC with the training definition: leave-one-out template, label ROI, window
-        ``self.ncc_window``)."""
+        ``self.ncc_window``). ``chunk``: pairs warped at once (None = ``cfg.val_pair_chunk``,
+        default 16; the validation callers never pass it)."""
+        chunk = int(self.cfg.val_pair_chunk if chunk is None else chunk)
         n_cls = int(self.cfg.n_classes)
         lab = np.asarray(labels).astype(np.int32)
         if lab.ndim == 5:
@@ -847,14 +1063,23 @@ class Trainer:
             errs.update(ncc)
         return errs, {"seg_warped": seg_warped, "seg_template": seg_template, "jac": jac}
 
-    def _val_deform_errors(self, vs, groups, train_mode):
-        """(pooled errors, [dict(u, seg_warped, seg_template, jac) per group])."""
+    def _val_deform_errors(self, vs, groups, train_mode, frozen_outs=None):
+        """(pooled errors, [dict(u, seg_warped, seg_template, jac) per group]). With a cascade in
+        eval mode the errors also hold composed_mean_disp_mm (one value per group: RMS over voxels
+        of |mean_i u_i| in mm of the composed u) and ``frozen_outs`` (a list, when given) receives
+        the frozen dict(U, U_inv, V) (numpy float32) of every group."""
         fn = self._val_deform_fn(vs.group_size, train_mode)
         errs, extras = [], []
         for g, grp in enumerate(groups):
             out = fn(tf.constant(grp["images"]))
             e, ex = self._deform_errors(grp["labels"], out["u"], out["u_inv"], out["v"].numpy(),
                                         out["v_raw"].numpy(), seed=g, images=grp["images"])
+            if self.cascade is not None and not train_mode:
+                mean_u = diffeo.to_mm(tf.reduce_mean(out["u"], axis=0), P.LEVEL_SPACING[self.level])
+                e["composed_mean_disp_mm"] = np.asarray(
+                    [float(tf.sqrt(tf.reduce_mean(tf.reduce_sum(tf.square(mean_u), axis=-1))))])
+                if frozen_outs is not None:
+                    frozen_outs.append({k: out[k].numpy() for k in ("U", "U_inv", "V")})
             ex["u"] = out["u"].numpy()
             errs.append(e)
             extras.append(ex)
@@ -876,6 +1101,36 @@ class Trainer:
                 "val_%s/ncc_template_identity" % name: float(np.mean(pooled["ncc_template"])),
                 "val_%s/ncc_pair_identity" % name: float(np.mean(pooled["ncc_pair"]))}
         return dict(self._identity_cache[key])
+
+    def _frozen_baseline_metrics(self, name, vs, groups, frozen_outs):
+        """Frozen-stage baselines of a validation set (cascade, design section 8), computed once per
+        (set name, number of groups) from the eval-mode pass's frozen estimates ``frozen_outs``
+        (ignored on a cache hit) and cached (the frozen weights never change). Linear sets:
+        ``M.summarize(M.group_errors(A4, ...), 'val_<name>_frozen')`` (same groups, N, S and
+        seeds as the composed metrics; affine sets incl. the affine factor errors). Deform sets:
+        ``_deform_errors(labels, U, U_inv, V, V, ...)`` -> ``val_<name>_frozen/{template_dice,
+        pair_dice, neg_jac_pct, inv_consistency_mm, ..., ncc_template, ncc_pair}``."""
+        key = (name, len(groups))
+        if key not in self._frozen_cache:
+            if frozen_outs is None or len(frozen_outs) != len(groups):
+                raise ValueError("frozen baseline of %r needs the frozen outputs of all %d groups"
+                                 % (name, len(groups)))
+            errs = []
+            for g, (grp, fo) in enumerate(zip(groups, frozen_outs)):
+                if vs.task == DEFORM:
+                    errs.append(self._deform_errors(grp["labels"], fo["U"], fo["U_inv"], fo["V"], fo["V"],
+                                                    seed=g, images=grp["images"])[0])
+                else:
+                    errs.append(M.group_errors(fo, grp["A_star"], grp["T_target"], self.S_np, seed=g,
+                                               affine=vs.task == "affine"))
+            self._frozen_cache[key] = M.summarize(M.concat_errors(errs), "val_%s_frozen" % name)
+        return dict(self._frozen_cache[key])
+
+    def _frozen_outs_list(self, name, groups):
+        """[] when this eval pass must collect the frozen estimates (cascade, cache miss), else None."""
+        if self.cascade is None or (name, len(groups)) in self._frozen_cache:
+            return None
+        return []
 
     def _write_deform_png(self, name, grp, extra, metrics, step):
         """Deformable validation PNG (`runtime.val_png.write_deform_png`), file
@@ -911,7 +1166,8 @@ class Trainer:
         out = {}
         pre = "val_%s" % name
         t0 = time.perf_counter()
-        errs, extras = self._val_deform_errors(vs, groups, False)
+        frozen_outs = self._frozen_outs_list(name, groups)
+        errs, extras = self._val_deform_errors(vs, groups, False, frozen_outs)
         out.update(M.summarize(errs, pre))
         out[pre + "/pair_dice_loss"] = M.deform_pair_dice_loss(out, pre)
         out[pre + "/groups"] = len(groups)
@@ -920,6 +1176,8 @@ class Trainer:
         for k in ("template_dice", "pair_dice"):
             out["%s_trainmode/%s" % (pre, k)] = tm["%s_trainmode/%s" % (pre, k)]
         out.update(self._identity_deform_metrics(name, vs, groups))
+        if self.cascade is not None:
+            out.update(self._frozen_baseline_metrics(name, vs, groups, frozen_outs))
         g = int(self.cfg.val_png_group)
         if self.cfg.val_png_dir and 0 <= g < len(groups):
             self._write_deform_png(name, groups[g], extras[g], out, int(self.step.numpy()))
@@ -963,6 +1221,9 @@ class Trainer:
         ``val/mean_pair_rms_mm``: mean of ``val_<task>/pair_rms_mm`` over the trained LINEAR
         tasks (sets named exactly like the task, i.e. without G), when every one was validated.
         Deform sets (task 'deform'): `_validate_deform` (module docstring).
+        With a cascade every metric above is of the COMPOSED result, plus the cached frozen-stage
+        baselines ``val_<name>_frozen/...`` (`_frozen_baseline_metrics`) and, for deform sets,
+        ``val_<name>/composed_mean_disp_mm``.
         """
         out = {}
         for name, vs in self.val_sets.items():
@@ -976,7 +1237,8 @@ class Trainer:
                 out.update(self._validate_deform(name, vs, groups))
                 continue
             t0 = time.perf_counter()
-            errs, mats = self._val_errors(task, vs, groups, False)
+            frozen_outs = self._frozen_outs_list(name, groups)
+            errs, mats = self._val_errors(task, vs, groups, False, frozen_outs)
             out.update(M.summarize(errs, "val_%s" % name))
             out["val_%s/groups" % name] = len(groups)
             out["val_%s/time_s" % name] = time.perf_counter() - t0
@@ -984,6 +1246,8 @@ class Trainer:
             tm = M.summarize(self._val_errors(task, vs, groups, True)[0], pre)
             for k in ("center_rms_mm", "pair_rms_mm"):
                 out["%s/%s" % (pre, k)] = tm["%s/%s" % (pre, k)]
+            if self.cascade is not None:
+                out.update(self._frozen_baseline_metrics(name, vs, groups, frozen_outs))
             g = int(self.cfg.val_png_group)
             if self.cfg.val_png_dir and 0 <= g < len(groups):
                 self._write_val_png(name, groups[g], mats[g], out, int(self.step.numpy()))
@@ -991,6 +1255,161 @@ class Trainer:
         if mean_pair is not None:
             out[MEAN_PAIR_METRIC] = mean_pair
         return out
+
+    # ------------------------------------------------------------------ BN recalibration
+    def _bn_parts(self, task):
+        """Model parts a `task` forward runs through (their BN layers are recalibrated)."""
+        if task == DEFORM:
+            return [self.model.encoder, self.model.deform_decoder]
+        return [self.model.encoder, self.model.linear_decoder]
+
+    @staticmethod
+    def _bn_layers(parts):
+        """Unique `BatchNormWithSeparateAffine` layers inside `parts` (stable order)."""
+        out, seen = [], set()
+        for part in parts:
+            for m in [part] + list(part.submodules):
+                if isinstance(m, L.BatchNormWithSeparateAffine) and id(m) not in seen:
+                    seen.add(id(m))
+                    out.append(m)
+        return out
+
+    def _recal_input(self, task, inputs):
+        """Eager input path of one recalibration batch, exactly as the cascade training step:
+        postprocess (flips on), then pool -> frozen (eval) -> pre-warp. Returns (x_in, finite):
+        finite False (x_in None) when the post-processed images are not all finite."""
+        batch = self.postprocess[task](*inputs)
+        x = batch["images"]
+        if not bool(tf.reduce_all(tf.math.is_finite(x)).numpy()):
+            return None, False
+        if task == DEFORM:
+            return CS.prewarp_deform(x, self.cascade.deform(x)["U"]), True
+        A_prev = self.cascade.linear(x, task)
+        return CS.prewarp_linear(x, A_prev, P.LEVEL_SPACING[self.level]), True
+
+    def _recal_validate(self, prefix, step):
+        """`validate()` with PNGs off, logged at `step` with every key prefixed by `prefix`."""
+        png_dir = self.cfg.val_png_dir
+        self.cfg.val_png_dir = None
+        try:
+            val = self.validate()
+        finally:
+            self.cfg.val_png_dir = png_dir
+        self._log(step, {prefix + k: v for k, v in val.items()})
+        return val
+
+    def _bn_gap(self, val, prefix):
+        """{'<prefix>/<set>/<metric>': |eval - trainmode|} of the validation metrics `val`."""
+        out = {}
+        for name, vs in self.val_sets.items():
+            metrics = BN_GAP_METRICS[DEFORM] if vs.task == DEFORM else BN_GAP_METRICS["linear"]
+            for k in metrics:
+                a, b = val.get("val_%s/%s" % (name, k)), val.get("val_%s_trainmode/%s" % (name, k))
+                if a is not None and b is not None:
+                    out["%s/%s/%s" % (prefix, name, k)] = abs(float(a) - float(b))
+        return out
+
+    def recalibrate_bn(self, num_batches, freeze, val=True):
+        """Re-estimate the trainable stage's BN moving statistics on cascade training batches
+        (design section 7; cascade trainers only, called once at the start of a fresh run).
+
+        1. ``val``: pre validation (PNGs off), logged at the current step as ``bnrecal_pre/...``.
+        2. Plan: `bn_recal_plan` (largest remainder over the task ratio, each task >= 1,
+           interleaved round-robin, no RNG).
+        3. Slot b = 0..K-1 (the GLOBAL plan index) of task t: ``self.controls[t].update(b)`` only
+           if t has a control (G / curriculum resampled as during steps 0..K-1; `fit` restarts
+           at update(0), the control values being pure functions of the step), then EXACTLY one
+           ``next(sources[t])`` and one postprocess draw (flips on, the training `pp`). So the
+           recalibration consumes K source batches and K postprocess draws: K > 0 changes the
+           data order vs K = 0 (reproducible on resume via the checkpointed generators). A batch
+           with non-finite images consumes its slot without a forward (no replacement draw;
+           stderr warning, ``skipped_nonfinite[t]``); a task with 0 used batches -> RuntimeError;
+           StopIteration -> RuntimeError('bn recalibration: source <t> exhausted'). Forward:
+           pool -> frozen (eval) -> pre-warp, then ``model(x_in, t, training=True)`` EAGERLY and
+           without a tape (dropout as in training; a tape-free forward runs a recompute_grad
+           decoder once).
+        4. Exact averages: before each forward every `BatchNormWithSeparateAffine` m of the
+           parts t runs gets ``m.bn.momentum = c_m / (c_m + 1)`` (c_m = its earlier recal
+           updates, over all tasks), so the moving statistics become the mean of that layer's
+           per-batch statistics (the first update replaces the level-4 values). Every layer's
+           own momentum is restored in ``finally``.
+        5. ``val``: post validation (statistics still unfrozen) ``bnrecal_post/...``.
+        6. ``freeze``: ``model.set_bn_stats_frozen(True)`` + `rebuild_steps()`.
+        7. Event ``bn_recalibration`` (logged at the current step) = the returned dict: batches
+           (used per task), skipped_nonfinite, planned, num_batches, n_layers_updated,
+           layers_without_updates (layers of a used part whose statistics are bitwise unchanged;
+           must be [] else RuntimeError; a repeated recalibration that reproduces the current
+           statistics exactly would also be flagged), elapsed_s, freeze, gap (``gap_pre/<set>/<metric>`` and
+           ``gap_post/...`` = |eval - trainmode| of center_rms_mm / pair_rms_mm resp.
+           template_dice / pair_dice; {} when ``val`` is False).
+
+        Only the trainable model's BN statistics change: no trainable variable, optimizer slot,
+        ``self.step`` or frozen-stage variable is touched.
+        """
+        if self.cascade is None:
+            raise RuntimeError("bn recalibration needs a cascade trainer")
+        t_start = time.perf_counter()
+        step = int(self.step.numpy())
+        plan = bn_recal_plan(num_batches, self.schedule.ratio)
+        tasks = [t for t in self.schedule.tasks]
+        task_layers = {t: self._bn_layers(self._bn_parts(t)) for t in tasks}
+        layers = self._bn_layers([p for t in tasks for p in self._bn_parts(t)])
+        gap = {}
+        if val:
+            gap.update(self._bn_gap(self._recal_validate("bnrecal_pre/", step), "gap_pre"))
+        before = {id(m): [v.numpy().copy() for v in m.bn.non_trainable_variables] for m in layers}
+        orig = {id(m): m.bn.momentum for m in layers}
+        counts = {id(m): 0 for m in layers}
+        used = {t: 0 for t in tasks}
+        skipped = {t: 0 for t in tasks}
+        try:
+            for b, t in enumerate(plan):
+                if t in self.controls:
+                    self.controls[t].update(b)
+                try:
+                    batch_tuple = next(self.sources[t])
+                except StopIteration:
+                    raise RuntimeError("bn recalibration: source %s exhausted" % t)
+                inputs, _ = self.split_batch(t, batch_tuple)
+                x_in, finite = self._recal_input(t, inputs)
+                if not finite:
+                    skipped[t] += 1
+                    print("WARNING bn recalibration: non-finite input images in %s batch %d (slot "
+                          "skipped)" % (t, b), file=sys.stderr, flush=True)
+                    continue
+                for m in task_layers[t]:
+                    c = counts[id(m)]
+                    m.bn.momentum = c / (c + 1.0)
+                self.model(x_in, task=t, training=True)
+                for m in task_layers[t]:
+                    counts[id(m)] += 1
+                used[t] += 1
+        finally:
+            for m in layers:
+                m.bn.momentum = orig[id(m)]
+        empty = [t for t in tasks if used[t] == 0]
+        if empty:
+            raise RuntimeError("bn recalibration: no finite batch for task(s) %s (all %s slots non-finite)"
+                               % (empty, [plan.count(t) for t in empty]))
+        stale = [m.bn.moving_mean.name.split(":")[0] for m in layers
+                 if all(np.array_equal(a, v.numpy())
+                        for a, v in zip(before[id(m)], m.bn.non_trainable_variables))]
+        if stale:
+            raise RuntimeError("bn recalibration: %d BN layer(s) got no update (stale level-4 statistics): %s"
+                               % (len(stale), stale))
+        if val:
+            gap.update(self._bn_gap(self._recal_validate("bnrecal_post/", step), "gap_post"))
+        if freeze:
+            self.model.set_bn_stats_frozen(True)
+            self.rebuild_steps()
+        event = {"event": "bn_recalibration", "num_batches": len(plan),
+                 "planned": {t: plan.count(t) for t in tasks}, "batches": used,
+                 "skipped_nonfinite": skipped, "n_layers_updated": len(layers) - len(stale),
+                 "layers_without_updates": stale, "elapsed_s": time.perf_counter() - t_start,
+                 "freeze": bool(freeze), "gap": gap}
+        if self.logger is not None:
+            self.logger.log_event(step, event)
+        return event
 
     # ------------------------------------------------------------------ loop
     def _log(self, step, metrics):
@@ -1097,6 +1516,7 @@ class Trainer:
         last_val = {}
         best_window = None
         best_window_dice = None
+        p_skip = float(cfg.cascade_skip_prob) if self.cascade is not None else 0.0
         while int(self.step.numpy()) < end:
             s = int(self.step.numpy())
             task = self.schedule.draw(s)
@@ -1109,12 +1529,19 @@ class Trainer:
             t0 = time.perf_counter()
             batch, extras = self.split_batch(task, next(self.sources[task]))
             t1 = time.perf_counter()
-            res = self.train_step(task, batch)
+            skip = cascade_skip_draw(cfg.seed, s, p_skip) if p_skip > 0 else False
+            res = self.train_step(task, batch, skip=skip)
             t2 = time.perf_counter()
             done = s + 1
             rec = {"step": done, "task": task, "lr": lr, "data_ms": 1e3 * (t1 - t0),
                    "compute_ms": 1e3 * (t2 - t1)}
             rec.update(res)
+            if p_skip > 0:
+                rec["cascade_skip"] = bool(skip)
+                acc.update({CASCADE_SKIP_KEY: float(skip)})
+            if self.cascade is not None:
+                acc.update({"train_%s/data_ms" % task: rec["data_ms"],
+                            "train_%s/compute_ms" % task: rec["compute_ms"]})
             if task in ctl_values:
                 cm = self.control_metrics(task, extras, ctl_values[task], step=s)
                 rec.update(cm)
@@ -1142,6 +1569,7 @@ class Trainer:
                     acc.update({pre + k: res[k] for k in DEFORM_NCC_KEYS if k in res})
                     acc.update({"train/grad_norm": res["grad_norm"]})
                     acc.update({pre + k: res[k] for k in DEFORM_DIAG_KEYS})
+                    acc.update({pre + k: res[k] for k in DEFORM_CASCADE_DIAG_KEYS if k in res})
                 else:
                     acc.update({pre + "loss": res["loss"], pre + "center": res["center"],
                                 pre + "pair": res["pair"], "train/grad_norm": res["grad_norm"]})

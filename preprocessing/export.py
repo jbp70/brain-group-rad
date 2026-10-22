@@ -5,7 +5,7 @@ Layout (one folder per case; suffix "" = full resolution, _2 = 1/2, _4 = 1/4):
   <export_root>/<dataset>/<subject_dir>/
       image.npy  image_2.npy  image_4.npy                       (160x224x192, 80x112x96, 40x56x48)
       labels_train18.npy  labels_train18_2.npy  labels_train18_4.npy
-      [labels_synthseg.npy] [labels_<provided>.npy, e.g. labels_lumir10.npy] [mask.npy]
+      [labels_synthseg.npy labels_synthseg_2.npy] [labels_<provided>.npy, e.g. labels_lumir10.npy] [mask.npy]
   <export_root>/manifest_parts/<part>.csv, <part>.luts.json   (one per export-npy run / chunk)
   <export_root>/export_manifest.csv, label_luts.json            (written by the merge step)
   <export_root>/template/template[_k].npy, template_mask[_k].npy, template_info.json
@@ -19,11 +19,12 @@ the export fails):
   image   EXACT block average over non-overlapping k x k x k blocks, computed in
           float64 from the full-resolution float32 image.nii.gz (never from a
           float16 export), then cast to --image-dtype.
-  labels  train18 only: merged first (fixed LUT, preprocessing/luts.py), then
-          block majority vote (mode of each block). Tie-break: the SMALLEST
-          merged label id wins (deterministic; e.g. a 4/4 background/cortex block
-          becomes background). synthseg (103-id remap) and provided label sets
-          (lumir10, seg4, seg35, ...) are FULL RESOLUTION ONLY (evaluation).
+  labels  train18 (levels 1, 2, 4) and synthseg (levels 1, 2 only, no _4;
+          LABEL_SET_LEVELS): remapped first (fixed LUT, preprocessing/luts.py),
+          then block majority vote (mode of each block). Tie-break: the SMALLEST
+          remapped label id wins (deterministic; e.g. a 4/4 background/cortex
+          block becomes background). Provided label sets (lumir10, seg4, seg35,
+          ...) are FULL RESOLUTION ONLY (evaluation).
   affine  level k voxel q has its center at full-resolution index k*q + (k-1)/2
           (2q+0.5, 4q+1.5), so A_k = A_1 @ [[k,0,0,(k-1)/2], ...] where A_1 is the
           corrected target-grid affine stamped on image.nii.gz. The world center
@@ -113,8 +114,9 @@ DEFAULT_LABEL_SETS = ("train18",)
 DEFAULT_CONTRASTS = ("T1w",)
 # Label sets read from labels_synthseg.nii.gz (raw SynthSeg ids); others from labels_<name>.nii.gz.
 SYNTHSEG_SETS = ("train18", "synthseg")
-# Label sets exported at every requested level; all others are full resolution only.
-PYRAMID_LABEL_SETS = ("train18",)
+# Levels at which a label set is exported (those of --levels in this tuple); any set not listed
+# is full resolution only (1,). synthseg has no level 4 (many fine labels are a few voxels at 4 mm).
+LABEL_SET_LEVELS = {"train18": (1, 2, 4), "synthseg": (1, 2)}
 _NAME = re.compile(r"^[A-Za-z0-9_-]+$")
 
 MISSING_OPTIONAL = "missing_optional_labels"
@@ -401,8 +403,12 @@ def export_npy(out_root: str, export_root: str, datasets: Optional[Sequence[str]
     for ls in sets:
         if not _NAME.match(ls):
             raise ValueError("invalid label set name %r" % ls)
-        if ls not in PYRAMID_LABEL_SETS and 1 not in levels:
-            raise ValueError("label set %r is exported at full resolution only; add 1 to --levels" % ls)
+        allowed = LABEL_SET_LEVELS.get(ls, (1,))
+        if not [k for k in levels if k in allowed]:
+            if tuple(allowed) == (1,):
+                raise ValueError("label set %r is exported at full resolution only; add 1 to --levels" % ls)
+            raise ValueError("label set %r is exported at levels %s only; add one of them to --levels"
+                             % (ls, ",".join(str(k) for k in allowed)))
     if not remap_labels and "train18" in sets:
         raise ValueError("train18 is a remapped label set; drop --no-remap-labels or train18")
     want_contrast = [c for c in _split_list(contrasts) if c.lower() != "any"]
@@ -480,7 +486,7 @@ def export_npy(out_root: str, export_root: str, datasets: Optional[Sequence[str]
                     log.warning("export: no fixed LUT for label set %r; exporting original ids", ls)
                     warned.add(ls)
                 dt = "uint16" if label_dtype == "auto" else label_dtype
-            ls_levels = levels if ls in PYRAMID_LABEL_SETS else [1]
+            ls_levels = [k for k in levels if k in LABEL_SET_LEVELS.get(ls, (1,))]
             label_info.append((ls, dt, lut is not None, ls_levels))
 
             def full_labels(ls=ls, src=src, lut=lut, dt=dt) -> np.ndarray:

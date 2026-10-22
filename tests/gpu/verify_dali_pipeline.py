@@ -39,7 +39,7 @@ Control file (curriculum / global transform G, design 3.2 v3.5; real level-4 dat
       matches the TF-only one (criteria of (b)).
   (k) curriculum start values written: sampled rotation / translation / log-scale / shear
       magnitudes stay within them (and are not collapsed to 0).
-Deformable pipeline (milestone 6; real level-4 val cases with labels_train18_4.npy):
+Deformable pipeline (milestone 6; real val cases of level `--level` with `labels_train18<suffix>.npy`):
   (l1) image/label alignment, residual OFF, shuffle on, 6 cases, batch 4, 4 batches (crosses
       epoch boundaries), intensity aug OFF: every DALI image is matched to its source case
       (min over cases of max |img - npy|, must be <= 1e-6) and its label map must EQUAL that
@@ -51,6 +51,9 @@ Deformable pipeline (milestone 6; real level-4 val cases with labels_train18_4.n
       boundaries); |T - I| within the residual ranges (params.DEFAULT_DEFORM_RESIDUAL_RANGES).
 Select checks with --checks (e.g. h,i,j,k). All temporary files go to a fresh folder under
 --scratch (never /tmp), removed at the end.
+--level {4,2} (default 4; milestone 8) runs the checks at that pyramid level: main() rebinds the
+module globals LEVEL, SHAPE, SPACING (`_set_level`) right after parsing, and the template mask
+is read for that level (`_template_brain`). Check a (pixel center) is level-independent.
 """
 import argparse
 import gc
@@ -86,6 +89,21 @@ from runtime.curriculum import ControlWriter, global_matrix_mm  # noqa: E402
 LEVEL = 4
 SHAPE = P.LEVEL_SHAPE[LEVEL]
 SPACING = P.LEVEL_SPACING[LEVEL]
+
+
+def _set_level(level):
+    """Rebind the module globals LEVEL, SHAPE, SPACING to pyramid level `level` (every check
+    reads them at call time)."""
+    global LEVEL, SHAPE, SPACING
+    LEVEL = int(level)
+    SHAPE = P.LEVEL_SHAPE[LEVEL]
+    SPACING = P.LEVEL_SPACING[LEVEL]
+
+
+def _template_brain(args):
+    """Boolean brain mask of the template at the current LEVEL (template_mask<suffix>.npy)."""
+    name = "template_mask%s.npy" % P.level_suffix(LEVEL)
+    return np.load(os.path.join(args.data, dm.TEMPLATE_DIR, name)) > 0
 RESULTS = {}
 FLIPS = [(True, False, False), (False, True, True), (True, True, True)]
 
@@ -924,7 +942,10 @@ def main():
                     "over 20 synthetic groups per task at 10 iterations, G 30 deg / Rt 20 deg, float64; "
                     ".agents/tasks/milestone-5/measure_bary.py)")
     ap.add_argument("--keep-tmp", action="store_true")
+    ap.add_argument("--level", type=int, choices=(4, 2), default=4,
+                    help="pyramid level of the checks (milestone 8: 2 for the level-2 cascade)")
     args = ap.parse_args()
+    _set_level(args.level)
     checks = set(c.strip() for c in args.checks.split(",") if c.strip())
 
     os.makedirs(args.scratch, exist_ok=True)
@@ -960,7 +981,7 @@ def main():
             guarded("a_pixel_center_direction", check_a, tmp, args)
         if checks & {"b", "c", "d"}:
             src = np.stack([np.load(os.path.join(args.data, f)) for f in files]).astype(np.float32)
-            brain = np.load(os.path.join(args.data, dm.TEMPLATE_DIR, "template_mask_4.npy")) > 0
+            brain = _template_brain(args)
             outs = {}
             for task in P.TASKS:
                 outs[task] = guarded("b_rewarp_%s" % task, real_batch, task, files, args)
@@ -986,7 +1007,7 @@ def main():
             guarded("i_global_shared", check_i, files, tmp, args)
         if "j" in checks:
             src = np.stack([np.load(os.path.join(args.data, f)) for f in files]).astype(np.float32)
-            brain = np.load(os.path.join(args.data, dm.TEMPLATE_DIR, "template_mask_4.npy")) > 0
+            brain = _template_brain(args)
             s_mom = pp.brain_S_matrix(LEVEL, os.path.join(args.data, dm.TEMPLATE_DIR))
             guarded("j_targets_with_global", check_j, files, src, brain, s_mom, tmp, args)
         if "k" in checks:

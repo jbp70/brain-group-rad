@@ -1,0 +1,28 @@
+{
+  "id": "FEAT-005",
+  "type": "docs",
+  "description": "Full verification (py3.8 checks over every new/modified file, bash -n, preprocessing suite, the full local unittest suite once in the background) and the milestone-8 report plus design-doc touch-ups (NIT 2 / NIT 4 sentences, measured tolerances). Plan items 15-16. Depends on FEAT-001..FEAT-004.",
+  "status": "completed",
+  "steps": [
+    "Read plan.md items 15-16, design.md §17 (file list) and the findings of FEAT-001..FEAT-004 first.",
+    "Write .agents/tmp/py38.sh with the full file list of plan.md (models/cascade.py runtime/args.py runtime/run.py runtime/checkpoint.py main.py tests/gpu/check_mixed_run.py tests/gpu/verify_dali_pipeline.py tests/gpu/measure_level_memory.py tests/runtime_helpers.py tests/test_cascade.py tests/test_slurm_scripts.py tests/test_measure_memory.py tests/test_verify_dali_level.py tests/test_runtime_infra.py tests/test_check_mixed_run.py tests/test_main.py preprocessing/export.py preprocessing/cli.py preprocessing/tests/test_export.py) and bash -n of both m8 scripts; run it; fix any failure.",
+    "Run the preprocessing suite: wsl -d Ubuntu bash /mnt/d/Research/Brain_Registration_Projects/brain-group-rad/preprocessing/tests/run_tests_wsl.sh bgr_preproc38.",
+    "Run the full suite ONCE in the background with a ~2 h timeout: wsl -d Ubuntu bash /mnt/d/Research/Brain_Registration_Projects/brain-group-rad/tests/run_tests_wsl.sh, redirecting output to .agents/tmp/full_suite.log (e.g. via a small .agents/tmp/full.sh that runs the script with `> .../full_suite.log 2>&1`), poll the log; expected: unittest exit code 0, Ran 327 + new tests, OK (skips allowed), both golden lines max |diff| 0, py_compile OK, ast OK, every bash -n OK. Fix failures and rerun only the failing modules (then the full suite again only if a shared module changed).",
+    "Write .agents/tasks/milestone-8/report.md (concise): files changed (new / modified, per design §17), tests run with counts (full suite totals, new tests per module, preprocessing totals), local verification numbers from the FEAT findings (T4 two-level round-trip max/mean, T7 BN gap pre/post, T16b margins, e2e numbers, local memory test, frozen share if measured), memory recommendation 'pending cluster job (a)', exact sbatch lines in cluster order (memory -> smoke -> long) with provisional --time and the T_smoke / T formulas of design §12, the C4 grad-balance decision rule, G-gap table template with the level-4 LNCC numbers (rigid pair 5.45 vs 5.53 mm; affine pair 6.92 vs 9.45 mm, rotation 4.9 -> 7.1 deg, shear 4.0 -> 5.3 %) to be filled from the checker's g_gap lines, open decision: label sampling (B) deferred unless Jay chooses (A), and Jay's export commands / inputs of design §14, the design-review NITs and how each was implemented, any deviations or tolerance revisions.",
+    "Update .agents/tasks/milestone-8/design.md: NIT 2 sentence in §7 step 3 and NIT 4 sentence in §9 if not already added by FEAT-002/003; measured T4 tolerances if they differ from the provisional values. Do not change decisions.",
+    "Delete every temporary script/log under .agents/tmp/ created by this task (keep nothing in the repo tree besides the planned files; remove __pycache__ only if run_tests_wsl.sh did not). Set status completed; findings: full-suite counts and wall time."
+  ],
+  "acceptance_criteria": [
+    "Full local suite: unittest exit code 0, 0 failures/errors, test count = 327 + new tests; golden tests max |diff| 0",
+    "Preprocessing suite prints ALL CHECKS PASSED (bgr_preproc38)",
+    "py_compile + ast feature_version (3,8) OK on every new/modified .py; bash -n OK on both m8 scripts",
+    ".agents/tasks/milestone-8/report.md exists and contains the file list, test counts, local numbers, the three sbatch lines in cluster order, the C4 rule and the open label-sampling decision"
+  ],
+  "verification": [
+    ".agents/tmp/py38.sh",
+    "wsl -d Ubuntu bash /mnt/d/Research/Brain_Registration_Projects/brain-group-rad/preprocessing/tests/run_tests_wsl.sh bgr_preproc38",
+    "wsl -d Ubuntu bash /mnt/d/Research/Brain_Registration_Projects/brain-group-rad/tests/run_tests_wsl.sh (background, ~2 h timeout)"
+  ],
+  "blocked_reason": null,
+  "findings": "DONE (no commit, no cluster). py38 (bgr_preproc38): py_compile OK on the 19 plan files, ast feature_version (3,8) OK; bash -n OK on slurm/m8_memory.sh and slurm/m8_level2_cascade.sh. Preprocessing suite: 142 passed, 'ALL CHECKS PASSED (bgr_preproc38)'. Full suite (tests/run_tests_wsl.sh, once, no code fixes needed): 'Ran 381 tests in 10295.388s', 'OK (skipped=4)' (327 baseline + 54 new: test_cascade 29, test_check_mixed_run +10, test_slurm_scripts 9, test_runtime_infra +2, test_verify_dali_level 2, test_main +1, test_measure_memory 1; skips = 3 DALI + dllogger), unittest exit code 0, wall time 10319 s (2 h 52 min); '[golden] max |diff| 0 (tolerance 0)' and '[golden deform] max |diff| 0 (tolerance 0)'; step 1 of the script: py_compile OK, ast 3.8 OK (57 files), main.py --help OK (no TF), bash -n OK on all six scripts. The FEAT-001 flake test_group_net.TestGradientCheckpointing.test_recompute_matches passed. DEVIATION: the run exceeded the ~2 h timeout budget; the timeout wrapper was paused (SIGSTOP) at ~1.5 h so the run could finish (the wrapper then reported 124 only because its alarm fired on SIGCONT after the suite had exited 0). Future full runs need ~3 h. Docs: report.md written; design.md already had the NIT 2 (section 7 step 3), NIT 4 (section 9) sentences and the measured T4 tolerance revision (section 16, from FEAT-001), so no further design.md edits. Temp scripts/logs under .agents/tmp deleted."
+}

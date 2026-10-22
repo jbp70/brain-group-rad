@@ -194,8 +194,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--levels", type=_rows_arg, default=[1, 2, 4],
                    help="pyramid levels from 1,2,4 (default 1,2,4: full, _2, _4)")
     s.add_argument("--label-sets", default="train18",
-                   help="comma list: train18 (default; all levels), synthseg (103-id remap) and provided "
-                        "label names such as lumir10 (full resolution only); a missing set fails the export")
+                   help="comma list: train18 (default; levels 1,2,4), synthseg (103-id remap; levels 1,2 "
+                        "only, no _4) and provided label names such as lumir10 (full resolution only); "
+                        "a missing set fails the export")
     s.add_argument("--optional-label-sets", default="", metavar="NAME[,NAME]",
                    help="comma list of evaluation-only provided label sets, added to --label-sets; a case "
                         "without one skips it and lists it in the manifest column missing_optional_labels "

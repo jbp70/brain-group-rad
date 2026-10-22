@@ -116,13 +116,17 @@ def test_float16_option_raw_labels_mask_and_synthseg_set(tmp_path):
     np.testing.assert_allclose(a2.astype(np.float64), _mean_ref(img, 2), rtol=0, atol=5e-4)
     ll = np.load(os.path.join(e, "labels_synthseg.npy"))
     assert ll.dtype == np.uint8 and ll.max() == len(SYNTHSEG_IDS) - 1
-    assert not os.path.exists(os.path.join(e, "labels_synthseg_2.npy"))  # full resolution only
+    # synthseg is exported at levels 1 and 2 only (LABEL_SET_LEVELS), never at 4.
+    np.testing.assert_array_equal(np.load(os.path.join(e, "labels_synthseg_2.npy")), block_mode(ll, 2))
+    assert not os.path.exists(os.path.join(e, "labels_synthseg_4.npy"))
     m = {int(k): v for k, v in json.load(open(os.path.join(exp, "label_luts.json")))["luts"]["synthseg"]["map"].items()}
     np.testing.assert_array_equal(np.array([k for k, _ in sorted(m.items(), key=lambda x: x[1])])[ll], lab)
     np.testing.assert_array_equal(np.load(os.path.join(e, "mask.npy")), (img > 0).astype(np.uint8))
     r = _manifest(exp)[0]
-    assert r["mask"] == "image>0" and r["label_levels"] == "train18:1,2,4;synthseg:1"
-    assert r["labels_l1"] == "labels_train18.npy;labels_synthseg.npy" and r["labels_l2"] == "labels_train18_2.npy"
+    assert r["mask"] == "image>0" and r["label_levels"] == "train18:1,2,4;synthseg:1,2"
+    assert r["labels_l1"] == "labels_train18.npy;labels_synthseg.npy"
+    assert r["labels_l2"] == "labels_train18_2.npy;labels_synthseg_2.npy"
+    assert r["labels_l4"] == "labels_train18_4.npy"
     # Raw ids (no remap) for synthseg; train18 cannot be un-remapped.
     exp2 = str(tmp_path / "raw")
     export_npy(out, exp2, remap_labels=False, label_sets=["synthseg"])
@@ -133,6 +137,42 @@ def test_float16_option_raw_labels_mask_and_synthseg_set(tmp_path):
     assert json.load(open(os.path.join(exp2, "label_luts.json"))) == {"remap_labels": False, "luts": {}}
     with pytest.raises(ValueError, match="train18"):
         export_npy(out, str(tmp_path / "x"), remap_labels=False)
+
+
+def test_synthseg_pyramid_levels_1_2(tmp_path):
+    """Milestone 8 (design section 14): synthseg at --levels 1,2,4 writes _1 and _2 (no _4), _2 is
+    the block mode of the full-resolution map, train18 outputs are byte-identical to a
+    train18-only export, and --levels 4 alone fails naming the allowed levels."""
+    out = str(tmp_path / "out")
+    _subject(out, "s1")
+    exp = str(tmp_path / "npy")
+    assert main(["export-npy", "--out-root", out, "--export-root", exp, "--levels", "1,2,4",
+                 "--label-sets", "train18,synthseg"]) == 0
+    ref = str(tmp_path / "npy_t18")
+    assert main(["export-npy", "--out-root", out, "--export-root", ref, "--levels", "1,2,4"]) == 0
+    e, e0 = os.path.join(exp, "ds", "s1"), os.path.join(ref, "ds", "s1")
+    assert sorted(f for f in os.listdir(e) if f.startswith("labels_synthseg")) == [
+        "labels_synthseg.npy", "labels_synthseg_2.npy"]
+    full = np.load(os.path.join(e, "labels_synthseg.npy"))
+    l2 = np.load(os.path.join(e, "labels_synthseg_2.npy"))
+    assert l2.dtype == np.uint8 and l2.shape == tuple(s // 2 for s in SHAPE)
+    np.testing.assert_array_equal(l2, block_mode(full, 2))
+    np.testing.assert_array_equal(l2, _mode_ref(full, 2))
+    for f in ("labels_train18.npy", "labels_train18_2.npy", "labels_train18_4.npy", "image.npy",
+              "image_2.npy", "image_4.npy"):
+        with open(os.path.join(e, f), "rb") as a, open(os.path.join(e0, f), "rb") as b:
+            assert a.read() == b.read(), f
+    r = _manifest(exp)[0]
+    assert r["label_levels"] == "train18:1,2,4;synthseg:1,2"
+    assert r["labels_l2"] == "labels_train18_2.npy;labels_synthseg_2.npy"
+    assert r["labels_l4"] == "labels_train18_4.npy"
+    with pytest.raises(ValueError, match="levels 1,2 only"):
+        export_npy(out, str(tmp_path / "npy4"), levels=[4], label_sets=["train18,synthseg"])
+    # Level 2 alone is enough for synthseg.
+    export_npy(out, str(tmp_path / "npy2"), levels=[2], label_sets=["train18,synthseg"])
+    e2 = os.path.join(str(tmp_path / "npy2"), "ds", "s1")
+    assert os.path.exists(os.path.join(e2, "labels_synthseg_2.npy"))
+    assert not os.path.exists(os.path.join(e2, "labels_synthseg.npy"))
 
 
 def test_val_labels_full_resolution_only_and_missing_set_fails(tmp_path):

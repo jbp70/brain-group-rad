@@ -18,6 +18,17 @@ Warm start (--init-weights, `warm_start_model`; milestone 7): model variables on
 ModelConfig: strict whole-model restore. Configs differing only in the deform-decoder fields
 (`DECODER_ONLY_FIELDS`): the encoder, linear decoder + heads and centering are restored through
 a temporary model built with the source config, the deform decoder stays freshly initialised.
+Milestone 8: the source level is read from the source config.json ``args.level`` (absent = the
+model's level). A source of another level (e.g. a level-4 run into a level-2 model, the no-cascade
+baseline) is restored into a temporary model of the SOURCE level and copied variable by variable
+(`GroupRegLevelModel.copy_weights_from`, or the shared parts for a decoder-only difference);
+those records add ``source_level``, ``source_step`` and ``cross_level``. Same-level records are
+unchanged.
+
+Level cascade (--cascade-from, milestone 8, design §2.2 / §9): `load_cascade_source` resolves and
+checks the level-4 source, `check_cascade_config` requires identical ModelConfigs (seed aside),
+`cascade_init_record` is the run's ``init_weights`` record and `weight_fingerprint` identifies
+the frozen stage's weights in config.json (checked after every resume).
 """
 import json
 import os
@@ -146,6 +157,88 @@ def _strict_restore(model, prefix):
     status.assert_existing_objects_matched()
 
 
+def _checkpoint_step(prefix):
+    """Global step stored in the checkpoint `prefix` (ValueError if it has none)."""
+    try:
+        return int(tf.train.load_variable(prefix, STEP_KEY))
+    except (tf.errors.NotFoundError, ValueError) as e:
+        raise ValueError("checkpoint %s holds no global step (%s)" % (prefix, e))
+
+
+CASCADE_SOURCE_LEVEL = 4
+
+
+def load_cascade_source(path):
+    """--cascade-from: (prefix, src_cfg ModelConfig, info dict).
+
+    `path` is a checkpoint prefix or a checkpoint directory (`resolve_checkpoint`). Raises
+    ValueError when the path does not resolve, the source run's config.json is missing
+    (`source_config_path`), or its ``args.level`` is not 4. info: ``checkpoint`` (absolute
+    prefix), ``source_config`` (absolute path), ``source_level`` 4, ``source_step`` (the global
+    step stored in the checkpoint)."""
+    try:
+        prefix = resolve_checkpoint(path)
+    except ValueError as e:
+        raise ValueError("--cascade-from %s: %s" % (path, e))
+    prefix = os.path.abspath(prefix)
+    cfg_path = source_config_path(prefix)
+    if cfg_path is None:
+        raise ValueError("--cascade-from %s: no config.json of the source run next to the checkpoint "
+                         "(expected <run>/config.json for <run>/ckpt/<kind>/<name>)" % path)
+    with open(cfg_path) as f:
+        saved = json.load(f)
+    level = (saved.get("args") or {}).get("level")
+    if level is None or int(level) != CASCADE_SOURCE_LEVEL:
+        raise ValueError("--cascade-from %s: the source run %s is level %s; the cascade needs a level-%d "
+                         "source" % (path, cfg_path, level, CASCADE_SOURCE_LEVEL))
+    src_cfg = ModelConfig.from_dict(saved["model_config"])
+    info = {"checkpoint": prefix, "source_config": os.path.abspath(cfg_path),
+            "source_level": CASCADE_SOURCE_LEVEL, "source_step": _checkpoint_step(prefix)}
+    return prefix, src_cfg, info
+
+
+def check_cascade_config(model_config, src_cfg):
+    """ValueError naming every ModelConfig field (seed excepted) in which this run's config
+    differs from the cascade source's; no field may differ (`DECODER_ONLY_FIELDS` included: the
+    frozen stage and the copied trainable stage need the source's deform decoder)."""
+    mine = {k: v for k, v in model_config.to_dict().items() if k != "seed"}
+    theirs = {k: v for k, v in src_cfg.to_dict().items() if k != "seed"}
+    diff = sorted(k for k in set(mine) | set(theirs) if mine.get(k) != theirs.get(k))
+    if diff:
+        raise ValueError("--cascade-from: model config differs from the source run in %s (%s); the "
+                         "cascade needs identical model flags"
+                         % (diff, ", ".join("%s: source %r, this run %r" % (k, theirs.get(k), mine.get(k))
+                                            for k in diff)))
+
+
+def weight_fingerprint(model):
+    """{'n_vars': int, 'abs_sum': float64 sum of |w|, 'sq_sum': float64 sum of w^2} over
+    ``model.weights`` (in variable order), e.g. to identify the frozen stage after a resume."""
+    abs_sum = 0.0
+    sq_sum = 0.0
+    for v in model.weights:
+        w = np.asarray(v.numpy(), np.float64)
+        abs_sum += float(np.abs(w).sum())
+        sq_sum += float(np.square(w).sum())
+    return {"n_vars": len(model.weights), "abs_sum": abs_sum, "sq_sum": sq_sum}
+
+
+def _part_counts(model):
+    parts = SHARED_PARTS + ((DEFORM_PART,) if getattr(model, DEFORM_PART, None) is not None else ())
+    return {p: len(getattr(model, p).weights) for p in parts}
+
+
+def cascade_init_record(model, info):
+    """The ``init_weights`` record of a cascade run (design §2.2): `model` is the trainable
+    (level-2) model after ``copy_weights_from(frozen.model)``, `info` the dict of
+    `load_cascade_source`."""
+    return {"mode": "full", "via": "cascade", "checkpoint": info["checkpoint"],
+            "source_config": info["source_config"], "source_level": int(info["source_level"]),
+            "source_step": int(info["source_step"]), "cross_level": [int(info["source_level"]), model.level],
+            "restored_parts": _part_counts(model), "fresh_parts": {}, "ignored_source_parts": [],
+            "n_restored_vars": len(model.weights), "n_fresh_vars": 0, "config_diff": {}}
+
+
 def warm_start_model(model, model_config, path):
     """Warm start: restore ONLY model variables of another run's checkpoint into `model` (built).
     Optimizer, step, best value and RNG states are never read (the caller builds a fresh
@@ -161,21 +254,31 @@ def warm_start_model(model, model_config, path):
       count, shape and scope-local name of every variable. The target's deform decoder keeps
       its fresh initialisation; a source deform decoder is ignored.
     * Any other difference: ValueError naming the fields.
+    * Source of another level (config.json ``args.level`` != ``model.level``; absent = same
+      level; milestone 8, design §2.3): the source model is built at the SOURCE level and
+      restored strictly, then copied: identical configs -> `copy_weights_from` (``mode='full'``),
+      decoder-only difference -> the shared-parts copy above (``mode='partial'``). These records
+      add exactly ``source_level``, ``source_step`` (the checkpoint's global step) and
+      ``cross_level`` = [source level, model level]; same-level records are unchanged.
 
     Returns an info dict: checkpoint, source_config, mode, config_diff {field: [source, target]},
     restored_parts {part: n_vars}, fresh_parts {part: n_vars}, ignored_source_parts [part],
-    n_restored_vars, n_fresh_vars."""
+    n_restored_vars, n_fresh_vars (plus the three cross-level keys)."""
     prefix = resolve_checkpoint(path)
     cfg_path = source_config_path(prefix)
     info = {"checkpoint": prefix, "source_config": cfg_path, "mode": "full", "config_diff": {},
             "restored_parts": {}, "fresh_parts": {}, "ignored_source_parts": [],
             "n_restored_vars": 0, "n_fresh_vars": 0}
     src_cfg = None
+    src_level = model.level
     diff = []
     if cfg_path is not None:
         with open(cfg_path) as f:
             saved = json.load(f)
         src_cfg = ModelConfig.from_dict(saved["model_config"])
+        saved_level = (saved.get("args") or {}).get("level")
+        if saved_level is not None:
+            src_level = int(saved_level)
         theirs = {k: v for k, v in src_cfg.to_dict().items() if k != "seed"}
         mine = {k: v for k, v in model_config.to_dict().items() if k != "seed"}
         diff = sorted(k for k in set(mine) | set(theirs) if mine.get(k) != theirs.get(k))
@@ -185,7 +288,8 @@ def warm_start_model(model, model_config, path):
             raise ValueError("--init-weights: model config differs from the source run %s in %s "
                              "(only %s may differ); build the model with the same flags"
                              % (cfg_path, other, list(DECODER_ONLY_FIELDS)))
-    if not diff:
+    cross = src_level != model.level
+    if not diff and not cross:
         _strict_restore(model, prefix)
         parts = SHARED_PARTS + ((DEFORM_PART,) if getattr(model, DEFORM_PART, None) is not None else ())
         info["restored_parts"] = {p: len(getattr(model, p).weights) for p in parts}
@@ -193,8 +297,22 @@ def warm_start_model(model, model_config, path):
         return info
 
     from models.group_net import GroupRegLevelModel   # local import: no module-level cycle
+    if cross:
+        src_step = _checkpoint_step(prefix)
+    if not diff:                                      # cross-level, identical configs
+        src = GroupRegLevelModel(src_level, src_cfg).build_model(2)
+        try:
+            _strict_restore(src, prefix)
+            model.copy_weights_from(src)
+        finally:
+            del src
+        info["restored_parts"] = _part_counts(model)
+        info["n_restored_vars"] = len(model.weights)
+        info.update(source_level=src_level, source_step=src_step, cross_level=[src_level, model.level])
+        return info
+
     info["mode"] = "partial"
-    src = GroupRegLevelModel(model.level, src_cfg).build_model(2)
+    src = GroupRegLevelModel(src_level, src_cfg).build_model(2)
     try:
         _strict_restore(src, prefix)
         pairs = []
@@ -227,6 +345,8 @@ def warm_start_model(model, model_config, path):
         info["n_fresh_vars"] = len(fresh)
     finally:
         del src
+    if cross:
+        info.update(source_level=src_level, source_step=src_step, cross_level=[src_level, model.level])
     return info
 
 

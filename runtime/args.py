@@ -32,6 +32,9 @@ Pattern from the rigid project's ``runtime/args.py`` (argparse + ``str2bool``). 
   milestone-6/7 deform loss unchanged), --lambda-dice-template 1, --ncc-window per level
   (`data_loading.params.NCC_WINDOW_DEFAULT`: 5 / 7 / 9 at levels 4 / 2 / 1). A deform run needs
   at least one similarity weight > 0.
+* level cascade (milestone 8, `.agents/tasks/milestone-8/design.md` §10): --cascade-from None
+  (off), --cascade-skip-prob 0, --bn-recal-batches 0 (off), --bn-recal-freeze true,
+  --val-pair-chunk 16. With these defaults every run is unchanged (level-4 runs bit-identical).
 """
 import argparse
 import collections
@@ -258,6 +261,10 @@ def build_parser():
     g.add_argument("--val-deform-max-pairs", type=int, default=64,
                    help="deform validation: all ordered pairs of a group if at most this many, else a "
                    "fixed seeded subset of this size")
+    g.add_argument("--val-pair-chunk", type=int, default=16,
+                   help="deform validation: pairs evaluated per chunk (>= 1; default 16 = the "
+                   "milestone-6 value). Smaller values lower the validation memory peak (level-2 "
+                   "fallback, design §11) without changing the metrics")
     g = p.add_argument_group("augmentation (half-widths of uniform ranges)")
     for task in TRAIN_TASKS:
         d = P.DEFAULT_LINEAR_RANGES[task]
@@ -302,7 +309,31 @@ def build_parser():
                    "integration_steps): then only the encoder + linear heads are restored and the "
                    "deform decoder stays freshly initialised (e.g. a linear-only run into a "
                    "three-task run). Fresh optimizer, step 0; not allowed when this run dir "
-                   "already has a checkpoint and --resume is on")
+                   "already has a checkpoint and --resume is on. A level-4 source into a --level 2 "
+                   "run copies the weights across levels (no-cascade baseline)")
+    g = p.add_argument_group("level cascade (milestone 8; all off by default)")
+    g.add_argument("--cascade-from", default=None,
+                   help="train --level 2 as the second stage of a cascade: a FROZEN level-4 model "
+                   "restored from this level-4 run's checkpoint (prefix, or a ckpt/best or ckpt/last "
+                   "directory) runs on the 2x2x2-pooled group, pre-warps the level-2 images, and the "
+                   "trainable level-2 model (a verbatim copy of the same weights) predicts a "
+                   "residual composed with the frozen estimate. Needs --level 2, the identical "
+                   "model flags of the source run and --deform-residual-affine false; excludes "
+                   "--init-weights. On a resume the path is not read (the frozen weights come "
+                   "from the run's checkpoint)")
+    g.add_argument("--cascade-skip-prob", type=float, default=0.0,
+                   help="level skipping: probability per step (= per group) that the frozen stage "
+                   "is skipped (A_prev = I, U = 0) in training; in [0, 1), > 0 needs "
+                   "--cascade-from; 0 = off (default, no skip ops built). Validation never skips")
+    g.add_argument("--bn-recal-batches", type=int, default=0,
+                   help="BN recalibration of the trainable level-2 stage at the start of a fresh "
+                   "cascade run: this many forward-only training batches (split over the tasks "
+                   "by --task-ratio, >= one per task), exact average of the batch statistics; "
+                   "0 = off (default). > 0 needs --cascade-from and --norm batch; never repeated "
+                   "on a resume")
+    g.add_argument("--bn-recal-freeze", type=str2bool, default=True,
+                   help="freeze the BN statistics after the recalibration (ignored when "
+                   "--bn-recal-batches is 0)")
     g = p.add_argument_group("DALI")
     g.add_argument("--num-threads", type=int, default=4)
     g.add_argument("--prefetch", type=int, default=1)
@@ -387,6 +418,39 @@ def parse_args(argv=None):
         parser.error("--integration-steps must be >= 0, got %d" % args.integration_steps)
     if args.val_deform_max_pairs < 1:
         parser.error("--val-deform-max-pairs must be >= 1, got %d" % args.val_deform_max_pairs)
+    if args.val_pair_chunk < 1:
+        parser.error("--val-pair-chunk must be >= 1, got %d" % args.val_pair_chunk)
+    # Level cascade (milestone 8, design §10). Resolution of the --cascade-from path, the source
+    # level and the config equality are checked in main.py (fresh runs only).
+    cascade = args.cascade_from is not None
+    if cascade:
+        if args.level != 2:
+            parser.error("--cascade-from needs --level 2 (the cascade is level 4 -> level 2), got "
+                         "--level %d" % args.level)
+        if args.init_weights is not None:
+            parser.error("--cascade-from and --init-weights are mutually exclusive (the cascade "
+                         "copies the source weights into the level-2 model itself)")
+        if args.deform_residual_affine:
+            parser.error("--cascade-from needs --deform-residual-affine false")
+    p_skip = args.cascade_skip_prob
+    if not (math.isfinite(p_skip) and 0.0 <= p_skip < 1.0):
+        parser.error("--cascade-skip-prob must be finite and in [0, 1), got %r" % p_skip)
+    if p_skip > 0 and not cascade:
+        parser.error("--cascade-skip-prob > 0 needs --cascade-from")
+    k_recal = args.bn_recal_batches
+    if k_recal < 0:
+        parser.error("--bn-recal-batches must be >= 0, got %d" % k_recal)
+    if k_recal > 0:
+        if not cascade:
+            parser.error("--bn-recal-batches > 0 needs --cascade-from (BN recalibration is defined "
+                         "for the level-transfer cascade only)")
+        if k_recal < len(args.task_ratio_parsed):
+            parser.error("--bn-recal-batches %d is fewer than the %d trained tasks (>= one batch per "
+                         "task)" % (k_recal, len(args.task_ratio_parsed)))
+        if args.norm != "batch":
+            parser.error("--bn-recal-batches > 0 needs --norm batch, got --norm %s" % args.norm)
+        if args.dry_run:
+            parser.error("--bn-recal-batches > 0 cannot be combined with --dry-run")
     if not (0.0 < args.p_pdice <= 1.0):
         parser.error("--p-pdice must be in (0, 1], got %r" % args.p_pdice)
     sim = ("lambda_dice_template", "lambda_pdice", "lambda_ncc_template", "lambda_ncc_pair")
@@ -550,7 +614,8 @@ def train_config_from_args(args):
                        deform_group_size=args.deform_group_size,
                        overfit_dice_threshold=args.overfit_dice_threshold,
                        overfit_fold_max=args.overfit_fold_max,
-                       val_deform_max_pairs=args.val_deform_max_pairs)
+                       val_deform_max_pairs=args.val_deform_max_pairs,
+                       cascade_skip_prob=args.cascade_skip_prob, val_pair_chunk=args.val_pair_chunk)
 
 
 def args_to_dict(args):

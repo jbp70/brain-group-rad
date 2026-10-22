@@ -7,7 +7,7 @@ import tempfile
 import unittest
 
 from tests import tf_setup  # noqa: F401  (log level, TF32 off, GPU memory growth)
-from tests.runtime_helpers import free_memory, narrow_config, write_fake_export, NARROW_ARGS
+from tests.runtime_helpers import free_memory, narrow_config, tiny_config, write_fake_export, NARROW_ARGS
 import numpy as np
 import tensorflow as tf
 
@@ -230,6 +230,59 @@ class TestArgs(unittest.TestCase):
                 for bad in ("-1", "nan", "inf"):
                     with self.assertRaises(SystemExit, msg="%s %s" % (flag, bad)):
                         A.parse_args(["--data", "x", flag, bad])
+
+    def test_cascade_flags(self):
+        # Milestone 8 (design §10, §16 T11 / T16): defaults off; every cross-flag rule is a parser error.
+        a = A.parse_args(["--data", "x"])
+        self.assertEqual((a.cascade_from, a.cascade_skip_prob, a.bn_recal_batches, a.bn_recal_freeze,
+                          a.val_pair_chunk), (None, 0.0, 0, True, 16))
+        tc = A.train_config_from_args(a)
+        self.assertEqual((tc.cascade_skip_prob, tc.val_pair_chunk), (0.0, 16))
+        d = A.args_to_dict(a)
+        for k in ("cascade_from", "cascade_skip_prob", "bn_recal_batches", "bn_recal_freeze", "val_pair_chunk"):
+            self.assertIn(k, d)
+        casc = ["--data", "x", "--level", "2", "--cascade-from", "src/ckpt/best"]
+        three = ["--task-ratio", "rigid:1,affine:1,deform:2"]
+        a = A.parse_args(casc + three + ["--cascade-skip-prob", "0.25", "--bn-recal-batches", "3",
+                                         "--bn-recal-freeze", "false", "--val-pair-chunk", "4"])
+        self.assertEqual((a.cascade_from, a.cascade_skip_prob, a.bn_recal_batches, a.bn_recal_freeze),
+                         ("src/ckpt/best", 0.25, 3, False))
+        tc = A.train_config_from_args(a)
+        self.assertEqual((tc.cascade_skip_prob, tc.val_pair_chunk), (0.25, 4))
+        json.dumps(A.args_to_dict(a))
+        for ok in (["--bn-recal-batches", "0"], ["--level", "2", "--bn-recal-batches", "0"],
+                   ["--cascade-skip-prob", "0"]):
+            A.parse_args(["--data", "x"] + ok)                    # no cascade needed
+        A.parse_args(casc + ["--norm", "instance"])                # norm only matters with recal
+        bad_cases = [
+            (["--data", "x", "--cascade-from", "s"], "--level 2"),                       # level 4
+            (casc + ["--init-weights", "w"], "--init-weights"),
+            (casc + ["--deform-residual-affine", "true"], "--deform-residual-affine"),    # T16
+            (casc + ["--cascade-skip-prob", "1.0"], "[0, 1)"),
+            (casc + ["--cascade-skip-prob", "-0.1"], "[0, 1)"),
+            (casc + ["--cascade-skip-prob", "nan"], "[0, 1)"),
+            (["--data", "x", "--level", "2", "--cascade-skip-prob", "0.5"], "--cascade-from"),
+            (casc + three + ["--bn-recal-batches", "2"], "fewer than the 3"),
+            (casc + ["--bn-recal-batches", "8", "--norm", "instance"], "--norm batch"),
+            (casc + ["--bn-recal-batches", "8", "--dry-run"], "--dry-run"),
+            (casc + ["--bn-recal-batches", "-1"], ">= 0"),
+            (["--data", "x", "--bn-recal-batches", "4"], "--cascade-from"),              # level 4
+            (["--data", "x", "--level", "2", "--bn-recal-batches", "4"], "--cascade-from"),
+            (["--data", "x", "--val-pair-chunk", "0"], "--val-pair-chunk"),
+        ]
+        import contextlib
+        import io
+        for bad, msg in bad_cases:
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                with self.assertRaises(SystemExit, msg=str(bad)):
+                    A.parse_args(bad)
+            self.assertIn(msg, err.getvalue(), bad)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), self.assertRaises(SystemExit):
+            A.parse_args(["--data", "x", "--level", "2", "--bn-recal-batches", "4"])
+        self.assertIn("--bn-recal-batches > 0 needs --cascade-from (BN recalibration is defined for the "
+                      "level-transfer cascade only)", err.getvalue())
 
     def test_best_metric_with_deform(self):
         from runtime.run import DEFORM_BEST_METRIC, MEAN_PAIR_METRIC, resolve_best_metric
@@ -524,6 +577,89 @@ class TestCheckpoint(TempDirCase):
             C.check_config_compatible(path, cfg.replace(dropout=0.3, group_config="B"))
         self.assertIn("dropout", str(cm.exception))
         self.assertIn("group_config", str(cm.exception))
+
+
+class TestCrossLevelWarmStart(TempDirCase):
+    """T10 (milestone 8, design §2.3): --init-weights from a level-4 run into a level-2 model."""
+
+    NINE_KEYS = ["checkpoint", "config_diff", "fresh_parts", "ignored_source_parts", "mode",
+                 "n_fresh_vars", "n_restored_vars", "restored_parts", "source_config"]
+
+    def save_source(self, cfg, step=5):
+        paths = make_run_dir(self.tmp, "src")
+        model = GroupRegLevelModel(4, cfg).build_model(2)
+        rng = np.random.default_rng(0)
+        for v in model.weights:                       # random heads and BN statistics
+            val = (rng.uniform(0.5, 1.5, v.shape) if "moving_variance" in v.name
+                   else v.numpy() + rng.normal(0.0, 0.05, v.shape))
+            v.assign(val.astype(v.dtype.as_numpy_dtype))
+        opt = O.make_optimizer("adam", lr=1e-3)
+        O.build_optimizer(opt, model.trainable_variables)
+        st = tf.Variable(step, dtype=tf.int64)
+        ck = C.RunCheckpoint(paths["ckpt_last"], paths["ckpt_best"], model, opt, st)
+        ck.save_last()
+        C.write_config(paths["config"], cfg, {"level": 4})
+        return paths, model, ck.latest_last
+
+    def assert_record(self, info, want):
+        self.assertEqual(sorted(info), sorted(want))
+        for k in want:
+            self.assertEqual(info[k], want[k], k)
+        import main
+        self.assertIsInstance(main._init_weights_lines(info), str)
+
+    def test_cross_level_records(self):
+        cfg = tiny_config(deform_decoder=True)
+        paths, src, prefix = self.save_source(cfg)
+        cfg_path = os.path.abspath(paths["config"])
+        base = {"checkpoint": prefix, "source_config": cfg_path, "source_level": 4, "source_step": 5,
+                "cross_level": [4, 2]}
+        # Identical configs (seed aside): every variable copied, mode full.
+        m = GroupRegLevelModel(2, cfg.replace(seed=3)).build_model(2)
+        info = C.warm_start_model(m, cfg.replace(seed=3), paths["ckpt_last"])
+        want = dict(base, mode="full",
+                    restored_parts={"encoder": len(m.encoder.weights), "linear_decoder": len(m.linear_decoder.weights),
+                                    "centering": 0, "deform_decoder": len(m.deform_decoder.weights)},
+                    fresh_parts={}, ignored_source_parts=[], n_restored_vars=len(m.weights), n_fresh_vars=0,
+                    config_diff={})
+        self.assert_record(info, want)
+        for a, b in zip(src.weights, m.weights):
+            self.assertTrue(np.array_equal(a.numpy(), b.numpy()), b.name)
+        # Decoder-only difference: shared parts copied, the target's deform decoder fresh.
+        cases = {"widths": tiny_config(deform_decoder=True, decoder_widths=(8, 8, 8, 4, 4)),
+                 "linear_only": tiny_config()}
+        for label, tcfg in cases.items():
+            with self.subTest(label):
+                m = GroupRegLevelModel(2, tcfg).build_model(2)
+                fresh0 = [v.numpy().copy() for v in m.deform_decoder.weights] if m.deform_decoder else []
+                info = C.warm_start_model(m, tcfg, paths["ckpt_last"])
+                n_shared = sum(len(getattr(m, p).weights) for p in C.SHARED_PARTS)
+                n_fresh = len(m.deform_decoder.weights) if m.deform_decoder else 0
+                diff = {k: [cfg.to_dict()[k], tcfg.to_dict()[k]] for k in sorted(cfg.to_dict())
+                        if cfg.to_dict()[k] != tcfg.to_dict()[k]}
+                want = dict(base, mode="partial",
+                            restored_parts={"encoder": len(m.encoder.weights),
+                                            "linear_decoder": len(m.linear_decoder.weights), "centering": 0},
+                            fresh_parts={"deform_decoder": n_fresh} if m.deform_decoder else {},
+                            ignored_source_parts=["deform_decoder"], n_restored_vars=n_shared,
+                            n_fresh_vars=n_fresh, config_diff=diff)
+                self.assert_record(info, want)
+                self.assertEqual(sorted(diff), ["decoder_widths"] if label == "widths" else ["deform_decoder"])
+                for part in C.SHARED_PARTS:
+                    for a, b in zip(getattr(src, part).weights, getattr(m, part).weights):
+                        self.assertTrue(np.array_equal(a.numpy(), b.numpy()), b.name)
+                if m.deform_decoder:
+                    for a, v in zip(fresh0, m.deform_decoder.weights):
+                        self.assertTrue(np.array_equal(a, v.numpy()), v.name)
+        # Level 4 -> level 4: today's record (nine keys, no cross-level keys).
+        m4 = GroupRegLevelModel(4, cfg).build_model(2)
+        info = C.warm_start_model(m4, cfg, paths["ckpt_last"])
+        self.assertEqual(sorted(info), self.NINE_KEYS)
+        self.assertEqual(info["mode"], "full")
+        m4p = GroupRegLevelModel(4, tiny_config()).build_model(2)
+        info = C.warm_start_model(m4p, tiny_config(), paths["ckpt_last"])
+        self.assertEqual(sorted(info), self.NINE_KEYS)
+        self.assertEqual(info["mode"], "partial")
 
 
 class TestFixedData(TempDirCase):

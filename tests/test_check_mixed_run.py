@@ -29,29 +29,69 @@ def deform_val():
             "val_deform/pair_dice_loss": 0.3}
 
 
+def cascade_config():
+    """config.json blocks of a milestone-8 cascade run (design §2.2 / §9)."""
+    return {"init_weights": {"mode": "full", "via": "cascade", "restored_parts": {"encoder": 30},
+                             "fresh_parts": {}, "config_diff": {}},
+            "cascade": {"source_checkpoint": "/x/ckpt/best/best-11000", "source_config": "/x/config.json",
+                        "source_level": 4, "source_step": 11000,
+                        "fingerprint": {"n_vars": 120, "abs_sum": 1.5, "sq_sum": 0.5},
+                        "S_rel_diff_vs_level4": None, "skip_prob": 0.0}}
+
+
+def cascade_val(tasks, drop=()):
+    """Final-step frozen-stage baselines (composed values: linear_val / deform_val)."""
+    d = {}
+    for t in tasks:
+        if t == "deform":
+            d.update({"val_deform_frozen/template_dice": 0.75, "val_deform_frozen/pair_dice": 0.72})
+        else:
+            d.update({"val_%s_frozen/center_rms_mm" % t: 2.0, "val_%s_frozen/pair_rms_mm" % t: 5.0})
+    for k in [k for k in d if k.split("/")[0] in drop]:
+        del d[k]
+    return d
+
+
+BN_EVENT = {"event": "bn_recalibration", "num_batches": 8, "planned": {"rigid": 2, "affine": 2, "deform": 4},
+            "batches": {"rigid": 2, "affine": 2, "deform": 4}, "skipped_nonfinite": {"rigid": 0, "affine": 0, "deform": 0},
+            "n_layers_updated": 20, "layers_without_updates": [], "elapsed_s": 3.0, "freeze": True,
+            "gap": {"gap_pre/rigid/center_rms_mm": 0.35, "gap_post/rigid/center_rms_mm": 0.001,
+                    "gap_pre/deform/template_dice": 0.01, "gap_post/deform/template_dice": 0.002}}
+
+
 def make_run(root, tasks, val_overrides=None, drop_pngs=(), best_dirs=None, trace=None, init_weights=None,
-             enc_grad=False, enc_grad_bad=None, grad_norm_keys=False):
+             enc_grad=False, enc_grad_bad=None, grad_norm_keys=False, steps=STEPS, every=5, eff=None,
+             config=None, events=(), train_extra=None):
     """Fabricated run dir: metrics.jsonl with train/val records, fit_summary.json, PNGs, ckpts;
     optional config.json init_weights record and train_<task>/diag_enc_grad_norm_* keys
     (``enc_grad_bad``: a task whose _eff values are NaN); ``grad_norm_keys``: the v3.10
-    --task-grad-norm keys train_<task>/grad_norm_scale 0.5 and grad_norm_gated_frac 0."""
+    --task-grad-norm keys train_<task>/grad_norm_scale 0.5 and grad_norm_gated_frac 0.
+    Milestone 8: train records at every..steps (window ends), ``eff(task, step)`` overrides the
+    _eff value, ``config`` extra config.json blocks, ``events`` records logged at step 0,
+    ``train_extra`` extra keys of every train record."""
     os.makedirs(os.path.join(root, "logs"))
     os.makedirs(os.path.join(root, "val_png"))
-    recs = []
-    for step in range(5, STEPS + 1, 5):
+    recs = [{"step": 0, "data": dict(ev)} for ev in events]
+    for step in range(every, steps + 1, every):
         data = {"train_%s/loss" % t: 1.0 / step for t in tasks}
         if enc_grad:
             for t in tasks:
-                eff = float("nan") if t == enc_grad_bad else (2.0 if t == "deform" else 1.0)
-                data.update({"train_%s/diag_enc_grad_norm_raw" % t: 10.0, "train_%s/diag_enc_grad_norm_eff" % t: eff,
+                e = float("nan") if t == enc_grad_bad else (2.0 if t == "deform" else 1.0)
+                if eff is not None:
+                    e = eff(t, step)
+                data.update({"train_%s/diag_enc_grad_norm_raw" % t: 10.0, "train_%s/diag_enc_grad_norm_eff" % t: e,
                              "train_%s/grad_norm" % t: 5.0})
         if grad_norm_keys:
             for t in tasks:
                 data.update({"train_%s/grad_norm_scale" % t: 0.5, "train_%s/grad_norm_gated_frac" % t: 0.0})
+        data.update(train_extra or {})
         recs.append({"step": step, "data": data})
-    if init_weights is not None:
+    if init_weights is not None or config is not None:
+        cfg = dict(config or {})
+        if init_weights is not None:
+            cfg["init_weights"] = init_weights
         with open(os.path.join(root, "config.json"), "w") as f:
-            json.dump({"init_weights": init_weights}, f)
+            json.dump(cfg, f)
     val = {}
     pairs = []
     for t in tasks:
@@ -64,7 +104,7 @@ def make_run(root, tasks, val_overrides=None, drop_pngs=(), best_dirs=None, trac
     if len(pairs) >= 2:
         val["val/mean_pair_rms_mm"] = sum(pairs) / len(pairs)
     val.update(val_overrides or {})
-    recs.append({"step": STEPS, "data": val})
+    recs.append({"step": steps, "data": val})
     with open(os.path.join(root, "logs", "metrics.jsonl"), "w") as f:
         for r in recs:
             f.write(json.dumps(r) + "\n")
@@ -72,7 +112,7 @@ def make_run(root, tasks, val_overrides=None, drop_pngs=(), best_dirs=None, trac
         json.dump({"trace_counts": trace or {t: 1 for t in tasks}, "nonfinite_total": 0}, f)
     for t in tasks:
         if t not in drop_pngs:
-            open(os.path.join(root, "val_png", "%s_step%07d.png" % (t, STEPS)), "wb").close()
+            open(os.path.join(root, "val_png", "%s_step%07d.png" % (t, steps)), "wb").close()
     if best_dirs is None:
         best_dirs = {"best": "best"}
         if "deform" in tasks and any(t != "deform" for t in tasks):
@@ -204,6 +244,152 @@ class TestDeform(CheckMixedRunCase):
         d = self.run_dir("m3", tasks, trace={"rigid": 1, "affine": 1, "deform": 2})
         ok, res = cmr.check(d, tasks, STEPS)
         self.assertEqual(self.failed(res), ["trace_once"])
+
+
+TASKS3 = ["rigid", "affine", "deform"]
+TIMING = {"train_%s/%s" % (t, k): v for t in TASKS3 for k, v in (("data_ms", 10.0), ("compute_ms", 90.0))}
+
+
+class TestCascade(CheckMixedRunCase):
+    """T12 (milestone 8, design §13): cascade / bn-recal / skip / grad-balance options."""
+
+    def cascade_run(self, name, drop=(), events=(BN_EVENT,), **kw):
+        kw.setdefault("val_overrides", cascade_val(TASKS3, drop))
+        kw.setdefault("train_extra", TIMING)
+        return self.run_dir(name, TASKS3, config=cascade_config(), events=events, **kw)
+
+    def details(self, res):
+        return dict((n, x) for n, _, x in res)
+
+    def test_cascade_pass(self):
+        d = self.cascade_run("c", enc_grad=True)
+        ok, res = cmr.check(d, TASKS3, STEPS, expect_init_weights="full", expect_enc_grad=True,
+                            expect_cascade=True, expect_bn_recal=True, grad_balance_rule=True,
+                            grad_balance_from_step=5)
+        self.assertTrue(ok, self.failed(res))
+        x = self.details(res)
+        for n in ("cascade_config", "val_rigid_frozen", "val_affine_frozen", "val_deform_frozen", "bn_recalibration"):
+            self.assertIn(n, x)
+        # composed rigid center 1.0 < frozen 2.0 (better), deform template 0.8 > 0.75 (better), pair 0.7 < 0.72
+        self.assertIn("center_rms_mm composed 1 vs frozen 2 (better)", x["cascade_gain_rigid"])
+        self.assertIn("pair_rms_mm composed 6 vs frozen 5 (worse)", x["cascade_gain_rigid"])
+        self.assertIn("template_dice composed 0.8 vs frozen 0.75 (better)", x["cascade_gain_deform"])
+        self.assertIn("pair_dice composed 0.7 vs frozen 0.72 (worse)", x["cascade_gain_deform"])
+        self.assertTrue(x["cascade_gain_deform"].startswith("INFO cascade_gain deform"))
+        self.assertIn("fraction 0.100", x["data_wait_rigid"])
+        self.assertIn("no rigid_g validation set", x["g_gap_rigid"])
+        self.assertIn("center_rms_mm pre 0.35 post 0.001", x["bn_gap_rigid"])
+        self.assertIn("template_dice pre 0.01 post 0.002", x["bn_gap_deform"])
+        # default eff: linear 1.0, deform 2.0 -> ratios 0.5 -> KEEP
+        self.assertIn("grad_balance KEEP task-grad-norm", x["grad_balance"])
+        self.assertEqual(cmr.main([d, "--tasks", ",".join(TASKS3), "--expect-init-weights", "full",
+                                   "--expect-cascade", "true", "--expect-bn-recal", "true",
+                                   "--grad-balance-rule", "true", "--grad-balance-from-step", "5"]), 0)
+        # defaults off: no milestone-8 result names (level-4 behaviour unchanged)
+        names = [n for n, _, _ in cmr.check(d, TASKS3, STEPS)[1]]
+        self.assertFalse([n for n in names if n.startswith(("cascade", "val_rigid_frozen", "bn_", "grad_balance",
+                                                             "g_gap", "data_wait"))])
+
+    def test_cascade_wrong_provenance_fails(self):
+        d = self.cascade_run("c")
+        cfg = cascade_config()
+        cfg["cascade"]["source_level"] = 2
+        cfg["init_weights"].pop("via")
+        with open(os.path.join(d, "config.json"), "w") as f:
+            json.dump(cfg, f)
+        ok, res = cmr.check(d, TASKS3, STEPS, expect_cascade=True)
+        self.assertEqual(self.failed(res), ["cascade_config"])
+        self.assertIn("source_level 2", self.details(res)["cascade_config"])
+
+    def test_missing_val_rigid_frozen_fails(self):
+        d = self.cascade_run("c", drop=("val_rigid_frozen",))
+        ok, res = cmr.check(d, TASKS3, STEPS, expect_cascade=True)
+        self.assertFalse(ok)
+        self.assertEqual(self.failed(res), ["val_rigid_frozen"])
+        self.assertNotIn("cascade_gain_rigid", self.details(res))
+
+    def test_g_gap_lines(self):
+        g = {"val_rigid_g/center_rms_mm": 1.5, "val_rigid_g/pair_rms_mm": 7.0, "val_rigid_g/center_rot_deg": 2.0,
+             "val_rigid/center_rot_deg": 1.0, "val_rigid_g_frozen/center_rms_mm": 3.0,
+             "val_rigid_g_frozen/pair_rms_mm": 8.0, "val_affine_g/pair_shear_pct": 5.3,
+             "val_affine/pair_shear_pct": 4.0}
+        over = dict(cascade_val(TASKS3), **g)
+        d = self.cascade_run("c", val_overrides=over)
+        ok, res = cmr.check(d, TASKS3, STEPS, expect_cascade=True)
+        self.assertTrue(ok, self.failed(res))
+        x = self.details(res)
+        self.assertIn("center_rms_mm 1 -> 1.5", x["g_gap_rigid"])
+        self.assertIn("center_rot_deg 1 -> 2", x["g_gap_rigid"])
+        self.assertIn("center_rms_mm 2 -> 3", x["g_gap_rigid_frozen"])
+        self.assertIn("pair_shear_pct 4 -> 5.3", x["g_gap_affine"])
+        self.assertIn("no affine_g validation set", x["g_gap_affine_frozen"])
+        self.assertIn("cascade_gain_rigid_g", x)
+
+    def test_bn_recal_event_missing_fails(self):
+        d = self.cascade_run("c", events=())
+        ok, res = cmr.check(d, TASKS3, STEPS, expect_bn_recal=True)
+        self.assertEqual(self.failed(res), ["bn_recalibration"])
+        stale = dict(BN_EVENT, layers_without_updates=["encoder/l2/bn"])
+        d2 = self.cascade_run("c2", events=(stale,))
+        self.assertEqual(self.failed(cmr.check(d2, TASKS3, STEPS, expect_bn_recal=True)[1]), ["bn_recalibration"])
+
+    def test_bn_recal_empty_gap_passes(self):
+        d = self.cascade_run("c", events=(dict(BN_EVENT, gap={}),))
+        ok, res = cmr.check(d, TASKS3, STEPS, expect_bn_recal=True)
+        self.assertTrue(ok, self.failed(res))
+        self.assertFalse([n for n, _, _ in res if n.startswith("bn_gap")])
+
+    def test_skip(self):
+        d = self.cascade_run("c", train_extra=dict(TIMING, **{cmr.SKIP_KEY: 0.25}))
+        ok, res = cmr.check(d, TASKS3, STEPS, expect_skip=True)
+        self.assertTrue(ok, self.failed(res))
+        d2 = self.cascade_run("c2")
+        self.assertEqual(self.failed(cmr.check(d2, TASKS3, STEPS, expect_skip=True)[1]), ["cascade_skip"])
+
+    def verdict(self, eff, steps=STEPS, every=5, from_step=None):
+        d = self.cascade_run("gb_%d" % len(os.listdir(self.tmp)), enc_grad=True, eff=eff, steps=steps,
+                             every=every)
+        kw = {} if from_step is None else {"grad_balance_from_step": from_step}
+        ok, res = cmr.check(d, TASKS3, steps, grad_balance_rule=True, **kw)
+        self.assertTrue(ok, self.failed(res))                 # never a failure
+        self.assertIn("enc_grad_rigid", self.details(res))   # implies the enc-grad checks
+        return self.details(res)["grad_balance"]
+
+    def test_grad_balance_keep_fallback_undecided(self):
+        ratios = {"rigid": 1.3, "affine": 0.7, "deform": 1.0}
+        x = self.verdict(lambda t, s: ratios[t], steps=75, every=25)
+        self.assertIn("grad_balance KEEP task-grad-norm", x)
+        self.assertIn("rigid 1.3, affine 0.7", x)
+        x = self.verdict(lambda t, s: {"rigid": 40.0, "affine": 0.7, "deform": 1.0}[t], steps=75, every=25)
+        self.assertIn("grad_balance FALLBACK deform:64", x)
+        self.assertIn("rigid 40", x)
+        # no record at or after the cut -> values missing -> UNDECIDED (and still no failure)
+        x = self.verdict(lambda t, s: ratios[t], steps=75, every=25, from_step=100)
+        self.assertIn("grad_balance UNDECIDED (treat as FALLBACK and inspect the run)", x)
+        self.assertIn("['deform', 'rigid', 'affine']", x)
+
+    def test_grad_balance_step_cut(self):
+        # Extreme value only at the window ending at step 25: excluded (>= 50); step 50 included.
+        eff = lambda t, s: 1000.0 if (t == "rigid" and s == 25) else {"rigid": 1.3, "affine": 0.7, "deform": 1.0}[t]
+        x = self.verdict(eff, steps=75, every=25)
+        self.assertIn("grad_balance KEEP task-grad-norm", x)
+        self.assertIn("rigid 1.3", x)
+        # step 50 included: an extreme value there flips the median of (50, 75) records
+        eff50 = lambda t, s: 1000.0 if (t == "rigid" and s == 50) else {"rigid": 1.3, "affine": 0.7, "deform": 1.0}[t]
+        self.assertIn("grad_balance FALLBACK deform:64", self.verdict(eff50, steps=75, every=25))
+        # --grad-balance-from-step 25 includes the step-25 window
+        x = self.verdict(eff, steps=75, every=25, from_step=25)
+        self.assertIn("rigid 1.3", x)                          # median of (1000, 1.3, 1.3)
+        x = self.verdict(eff, steps=50, every=25, from_step=25)
+        self.assertIn("grad_balance FALLBACK deform:64", x)    # median of (1000, 1.3) = 500.65
+
+    def test_grad_balance_function(self):
+        recs = [{"step": 50, "data": {"train_rigid/diag_enc_grad_norm_eff": 2.0}}]
+        self.assertEqual(cmr.grad_balance(recs, ["rigid"])[0], "UNDECIDED")      # no deform task
+        recs.append({"step": 50, "data": {"train_deform/diag_enc_grad_norm_eff": 1.0}})
+        verdict, ratios, _ = cmr.grad_balance(recs, ["rigid", "deform"])
+        self.assertEqual((verdict, ratios), ("KEEP", {"rigid": 2.0}))
+        self.assertEqual(cmr.grad_balance(recs, ["rigid", "deform"], from_step=51)[0], "UNDECIDED")
 
 
 if __name__ == "__main__":

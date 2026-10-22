@@ -20,9 +20,30 @@ the deform pipeline reads images + train18 labels (`DeformPipeline`), validation
 linear task, ``ckpt/best`` keeps the linear criterion and ``ckpt/best_deform`` tracks
 val_deform/pair_dice_loss.
 
+Level cascade (milestone 8, `.agents/tasks/milestone-8/design.md` §2, §7, §9)::
+
+    python main.py --data <export_root> --level 2 --cascade-from <level-4 run>/ckpt/best \
+        --task-ratio rigid:1,affine:1,deform:2 --group-size 16 --deform-group-size 8 --bn-recal-batches 64
+
+Fresh vs resume is decided ONCE before any model is built: resume iff --resume and the run's
+``ckpt/last`` holds a checkpoint with step > 0 (``--resume false`` on an existing run dir is a
+fresh run). Fresh: the source is resolved and checked (`C.load_cascade_source`, level 4, identical
+model config; failure -> SystemExit), the frozen stage is restored from it
+(`FrozenStage.from_checkpoint`), the level-2 model gets a verbatim copy, config.json gets the
+``init_weights`` record (``via: cascade``) and the ``cascade`` block (source, step, frozen-weight
+fingerprint, S_rel_diff_vs_level4 = ||S2 - S4||_F / ||S4||_F on real data, null in
+overfit-synthetic runs, skip prob); after the PARAMETER record and the init_weights event,
+--bn-recal-batches K > 0 runs `Trainer.recalibrate_bn` once and config.json is written again with
+``bn_recalibration``. Resume: the source is NOT read; config.json must hold ``cascade``
+(RuntimeError otherwise), the frozen stage (``frozen_stage`` in the run checkpoint) is restored
+into `FrozenStage.from_config`, its fingerprint must match (RuntimeError), the BN freeze is
+re-applied iff the SAVED ``bn_recalibration.freeze`` is true (the current --bn-recal-* flags are
+ignored), and the three provenance blocks are carried over verbatim.
+
 Order: parse args (no TF) -> DALI check (unless overfit mode) -> configure_tf_precision() (TF32
-off, memory growth) -> seeds -> mixed_float16 / XLA flags -> data -> model -> optimizer ->
-run dir, logger, config.json, checkpoint (resume) -> Trainer.fit.
+off, memory growth) -> seeds -> mixed_float16 / XLA flags -> [cascade: fresh/resume decision,
+source check] -> data -> model -> [cascade: frozen stage] -> optimizer -> run dir, logger,
+config.json, checkpoint (resume) -> [cascade: BN recalibration] -> Trainer.fit.
 
 Exit code: 0 on success; in overfit mode 1 if the threshold was not reached.
 """
@@ -187,6 +208,17 @@ def main(argv=None):
         raise SystemExit("main.py: --init-weights starts a NEW run at step 0, but %s already has a "
                          "checkpoint and --resume is on; use a new --run-name (or --resume false)"
                          % os.path.join(args.results, args.run_name))
+    cascade_on = args.cascade_from is not None
+    cascade_resume, cascade_src, saved_cfg = False, None, None
+    if cascade_on:
+        # NIT 4: fresh vs resume is decided ONCE, before any model is built. A fresh run reads
+        # and checks the level-4 source; a resume never reads it (design section 9).
+        run_root = os.path.join(args.results, args.run_name)
+        cascade_resume = bool(args.resume) and C.peek_last_step(os.path.join(run_root, "ckpt", "last")) > 0
+        if cascade_resume:
+            saved_cfg = _saved_cascade_config(os.path.join(run_root, "config.json"))
+        else:
+            cascade_src = _load_cascade_source(C, args.cascade_from, A.model_config_from_args(args))
     if args.overfit_one_group:
         sources, val_sets, S, data_desc = _build_overfit_data(args, level, tf_mods)
     else:
@@ -215,6 +247,28 @@ def main(argv=None):
         init_info["checkpoint"] = os.path.abspath(init_info["checkpoint"])
         if init_info["source_config"]:
             init_info["source_config"] = os.path.abspath(init_info["source_config"])
+    frozen, cascade_rec = None, None
+    if cascade_on:
+        from models.cascade import FrozenStage
+        if cascade_resume:
+            # Random init; the run checkpoint (key frozen_stage) restores it below.
+            frozen = FrozenStage.from_config(model_cfg)
+            cascade_rec = saved_cfg["cascade"]
+        else:
+            prefix, src_cfg, src_info = cascade_src
+            frozen = FrozenStage.from_checkpoint(prefix, src_cfg)
+            model.copy_weights_from(frozen.model)
+            init_info = C.cascade_init_record(model, src_info)
+            s_rel = None
+            if not args.overfit_one_group:
+                # Real data (DALI path): level-4 S from template_mask_4.npy vs this run's level-2 S.
+                S4 = np.asarray(postprocess.brain_S_matrix(4, os.path.join(args.data, dm.TEMPLATE_DIR)),
+                                np.float64)
+                s_rel = float(np.linalg.norm(np.asarray(S, np.float64) - S4) / np.linalg.norm(S4))
+            cascade_rec = {"source_checkpoint": src_info["checkpoint"], "source_config": src_info["source_config"],
+                           "source_level": int(src_info["source_level"]),
+                           "source_step": int(src_info["source_step"]), "fingerprint": frozen.fingerprint,
+                           "S_rel_diff_vs_level4": s_rel, "skip_prob": float(args.cascade_skip_prob)}
     optimizer = O.make_optimizer(args.optimizer, lr=args.lr, weight_decay=args.weight_decay,
                                  momentum=args.momentum, dampening=args.dampening,
                                  nesterov=args.nesterov, decoupled=args.decoupled,
@@ -230,13 +284,15 @@ def main(argv=None):
         train_cfg.val_png_dir = os.path.join(paths["root"], "val_png")
     logger = RunLogger(paths, backend=args.log_backend, tensorboard=True, quiet=args.quiet)
     trainer = Trainer(model, optimizer, sources, S, train_cfg, logger=logger, val_sets=val_sets,
-                      controls=controls)
+                      controls=controls, cascade=frozen)
     # Deform + linear: a second best file on the deform metric (ckpt/best keeps the linear rule).
     extra_best = ({name: os.path.join(paths["root"], "ckpt", "best_%s" % name) for name in trainer.extra_best}
                   or None)
+    ckpt_extra = trainer.checkpoint_variables()
+    if frozen is not None:
+        ckpt_extra = dict(ckpt_extra, frozen_stage=frozen.model)     # cascade runs only
     trainer.checkpoint = C.RunCheckpoint(paths["ckpt_last"], paths["ckpt_best"], model, optimizer,
-                                         trainer.step, extra=trainer.checkpoint_variables(),
-                                         extra_best=extra_best)
+                                         trainer.step, extra=ckpt_extra, extra_best=extra_best)
     resumed = False
     if init_info is not None:
         if not args.quiet:
@@ -244,8 +300,26 @@ def main(argv=None):
     elif args.resume and trainer.checkpoint.latest_last:
         C.check_config_compatible(paths["config"], model_cfg)
         resumed = trainer.checkpoint.restore_last()
-    C.write_config(paths["config"], model_cfg, A.args_to_dict(args),
-                   extra={"param_counts": dict(counts), "data": data_desc, "init_weights": init_info})
+    config_extra = {"param_counts": dict(counts), "data": data_desc, "init_weights": init_info}
+    if cascade_on:
+        if cascade_resume:
+            # Design section 9 steps 3-6: restored, fingerprint checked, BN freeze re-applied
+            # from the SAVED record, provenance blocks carried over verbatim.
+            if not resumed:
+                raise RuntimeError("resume of cascade run %s: no checkpoint restored from %s"
+                                   % (paths["root"], paths["ckpt_last"]))
+            _check_cascade_fingerprint(cascade_rec.get("fingerprint"), frozen.fingerprint, paths["config"])
+            bn_saved = saved_cfg.get("bn_recalibration")
+            if (bn_saved or {}).get("freeze") is True:
+                model.set_bn_stats_frozen(True)
+                trainer.rebuild_steps()
+            config_extra["init_weights"] = saved_cfg.get("init_weights")
+            if "bn_recalibration" in saved_cfg:
+                config_extra["bn_recalibration"] = bn_saved
+        config_extra["cascade"] = cascade_rec
+        if not args.quiet:
+            print(_cascade_lines(cascade_rec, cascade_resume, saved_cfg))
+    C.write_config(paths["config"], model_cfg, A.args_to_dict(args), extra=config_extra)
     logger.log_params(dict(A.args_to_dict(args), run_dir=paths["root"], resumed=resumed,
                            resumed_step=int(trainer.step.numpy()), data=data_desc,
                            trainable_params=counts["trainable"],
@@ -254,6 +328,16 @@ def main(argv=None):
     if init_info is not None:
         # After the PARAMETER record (the first line of metrics.jsonl stays the run parameters).
         logger.log_event(0, dict(init_info, event="init_weights"))
+    if cascade_on and not cascade_resume and args.bn_recal_batches > 0:
+        # Once, at the start of a fresh cascade run (never on a resume: the recalibrated
+        # statistics come back with the checkpoint); then config.json again with the record.
+        recal = trainer.recalibrate_bn(args.bn_recal_batches, args.bn_recal_freeze)
+        C.write_config(paths["config"], model_cfg, A.args_to_dict(args),
+                       extra=dict(config_extra, bn_recalibration=recal))
+        if not args.quiet:
+            print("bn recalibration: %d batches %s, %d BN layers updated, freeze %s, %.1f s; gap %s" % (
+                recal["num_batches"], recal["batches"], recal["n_layers_updated"], recal["freeze"],
+                recal["elapsed_s"], ", ".join("%s %.4g" % kv for kv in sorted(recal["gap"].items())) or "none"))
     if not args.quiet:
         print("run dir: %s | resumed: %s at step %d | data: %s" % (
             paths["root"], resumed, int(trainer.step.numpy()), data_desc[:200]))
@@ -397,6 +481,65 @@ def _init_weights_lines(info):
              "  config diff (source, this run): %s" % (info["config_diff"] or "none")]
     if info["ignored_source_parts"]:
         lines.append("  ignored source parts: %s" % ", ".join(info["ignored_source_parts"]))
+    return "\n".join(lines)
+
+
+def _load_cascade_source(C, path, model_cfg):
+    """Fresh cascade run: (prefix, source ModelConfig, info) of the level-4 source, checked
+    against this run's model config; any problem -> SystemExit (exit 1) with the message."""
+    try:
+        prefix, src_cfg, info = C.load_cascade_source(path)
+        C.check_cascade_config(model_cfg, src_cfg)
+    except ValueError as e:
+        msg = str(e)
+        raise SystemExit("main.py: " + msg if msg.startswith("--cascade-from")
+                         else "main.py: --cascade-from %s: %s" % (path, msg))
+    return prefix, src_cfg, info
+
+
+def _saved_cascade_config(path):
+    """Resume of a cascade run: the saved config.json, which must hold the ``cascade`` record."""
+    saved = None
+    if os.path.exists(path):
+        with open(path) as f:
+            saved = json.load(f)
+    if not (saved or {}).get("cascade"):
+        raise RuntimeError("resume of a cascade run without config.json cascade: %s" % path)
+    return saved
+
+
+FINGERPRINT_RTOL = 1e-12
+
+
+def _check_cascade_fingerprint(saved, current, path):
+    """RuntimeError unless the restored frozen stage's `current` weight fingerprint matches the
+    `saved` config.json one (n_vars exact, abs_sum / sq_sum relative 1e-12)."""
+    def close(a, b):
+        try:
+            a, b = float(a), float(b)
+        except (TypeError, ValueError):
+            return False
+        return abs(a - b) <= FINGERPRINT_RTOL * max(abs(a), abs(b))
+
+    saved = saved or {}
+    ok = (saved.get("n_vars") == current["n_vars"]
+          and all(close(saved.get(k), current[k]) for k in ("abs_sum", "sq_sum")))
+    if not ok:
+        raise RuntimeError("resume of a cascade run: the frozen-stage weight fingerprint after the restore %s "
+                           "differs from config.json cascade.fingerprint %s (%s)" % (current, saved, path))
+
+
+def _cascade_lines(rec, resumed, saved_cfg):
+    """Human-readable cascade summary (printed unless --quiet)."""
+    fp = rec["fingerprint"]
+    lines = ["cascade: frozen level-%d stage from %s (step %d; source config %s)" % (
+        rec["source_level"], rec["source_checkpoint"], rec["source_step"], rec["source_config"]),
+        "  fingerprint: %d vars, abs sum %.10g, sq sum %.10g; S rel diff vs level 4: %s; skip prob %g" % (
+            fp["n_vars"], fp["abs_sum"], fp["sq_sum"], rec["S_rel_diff_vs_level4"], rec["skip_prob"])]
+    if resumed:
+        bn = (saved_cfg or {}).get("bn_recalibration") or {}
+        lines.append("  resumed: frozen stage restored from the run checkpoint (source not read), fingerprint "
+                     "OK; BN statistics frozen from the saved record: %s" % (bn.get("freeze") is True))
     return "\n".join(lines)
 
 

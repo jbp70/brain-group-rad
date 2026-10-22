@@ -22,7 +22,7 @@ import tempfile
 import unittest
 
 from tests import tf_setup  # noqa: F401  (log level, TF32 off, GPU memory growth)
-from tests.runtime_helpers import free_memory, write_fake_export, NARROW_ARGS
+from tests.runtime_helpers import free_memory, write_fake_export, NARROW_ARGS, TINY_ARGS
 import numpy as np
 
 import main as M
@@ -410,6 +410,51 @@ class TestResumeControlsAndWarmStart(MainCase):
         self.assertEqual(s["trace_counts"], {"rigid": 1, "affine": 1, "deform": 1})
         self.assertEqual(s["deform_group_size"], 2)
         self.assertEqual(s["group_size"], 4)
+
+
+class TestCascadeMain(MainCase):
+    """Milestone 8: --cascade-from through main.py (overfit-synthetic, TINY widths, rigid only with
+    the deform decoder built so both levels share the ModelConfig). Resume: tests/test_cascade.py T8."""
+
+    def test_cascade_overfit_smoke_and_level_error(self):
+        res = os.path.join(self.tmp, "results")
+        common = ["--overfit-one-group", "--overfit-synthetic", "--group-size", "4", "--task-ratio", "rigid:1",
+                  "--deform-decoder", "true", "--log-every", "1", "--val-every", "0", "--val-png", "false",
+                  "--results", res] + TINY_ARGS + COMMON
+        self.assertIn(M.main(common + ["--level", "4", "--run-name", "src4", "--overfit-max-steps", "2"]), (0, 1))
+        free_memory()
+        src = os.path.join(self.run_dir("src4"), "ckpt", "last")
+        rc = M.main(common + ["--level", "2", "--cascade-from", src, "--run-name", "c2", "--overfit-max-steps", "2"])
+        self.assertIn(rc, (0, 1))
+        with open(os.path.join(self.run_dir("c2"), "config.json")) as f:
+            cfg = json.load(f)
+        self.assertEqual(cfg["init_weights"]["via"], "cascade")
+        self.assertEqual(cfg["init_weights"]["mode"], "full")
+        cas = cfg["cascade"]
+        self.assertEqual((cas["source_level"], cas["source_step"], cas["skip_prob"]), (4, 2, 0.0))
+        self.assertIsNone(cas["S_rel_diff_vs_level4"])                   # overfit-synthetic
+        self.assertTrue(cas["source_checkpoint"].endswith("last-2"))
+        self.assertGreater(cas["fingerprint"]["n_vars"], 0)
+        self.assertNotIn("bn_recalibration", cfg)                        # --bn-recal-batches 0
+        with open(os.path.join(self.run_dir("c2"), "overfit_summary.json")) as f:
+            s = json.load(f)
+        self.assertEqual((s["trace_counts"], s["steps_run"]), ({"rigid": 1}, 2))
+        self.assertTrue(np.isfinite(s["final_val"]["val_rigid/center_rms_mm"]))
+        self.assertTrue(np.isfinite(s["final_val"]["val_rigid_frozen/center_rms_mm"]))
+        free_memory()
+        # A level-2 run as the source: SystemExit naming the level (before any model is built).
+        with self.assertRaises(SystemExit) as cm:
+            M.main(common + ["--level", "2", "--cascade-from", os.path.join(self.run_dir("c2"), "ckpt", "last"),
+                             "--run-name", "bad"])
+        msg = str(cm.exception.code)
+        self.assertTrue(msg.startswith("main.py: --cascade-from"), msg)
+        self.assertIn("level 2", msg)
+        self.assertIn("level-4 source", msg)
+        self.assertFalse(os.path.exists(self.run_dir("bad")))
+        # A config mismatch with the source: SystemExit naming the field.
+        with self.assertRaises(SystemExit) as cm:
+            M.main(common + ["--level", "2", "--cascade-from", src, "--run-name", "bad2", "--dropout", "0.1"])
+        self.assertIn("dropout", str(cm.exception.code))
 
 
 class TestOverfit(MainCase):
