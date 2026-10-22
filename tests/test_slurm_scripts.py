@@ -73,7 +73,9 @@ class TestStatic(unittest.TestCase):
         self.assertIn('[ ! -d "$CASCADE_FROM" ] && [ ! -f "$CASCADE_FROM.index" ]', text)
         self.assertIn('if [ ! -f "$RESULTS/$RUN_NAME/ckpt/last/checkpoint" ]; then', text)
         for k in ("grad_balance KEEP", "FALLBACK", "UNDECIDED", "scancel", "squeue -u jn85",
-                  "peak: unmeasured (fill in from scratch/m8/memory_level2.json)", "-p dgx-a100",
+                  "peak (job 10504614, RTX 8000, scratch/m8/memory_level2.json)",
+                  "verdict: fits the 40 GB A100 (peak 27.8 GB <= 36 GB)",
+                  '--max-nonfinite-frac 0.06', "-p dgx-a100",
                   "sbatch --job-name=m8mem --time=04:00:00 --mem=64G slurm/m8_memory.sh",
                   "--job-name=m8smoke --time=02:00:00", "--job-name=m8long --time=24:00:00", "T_smoke"):
             self.assertIn(k, text)

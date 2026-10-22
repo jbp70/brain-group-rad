@@ -110,6 +110,9 @@ case "$GRAD_BALANCE" in
 esac
 RECAL_CHECK=""
 if [ "$BN_RECAL_BATCHES" -gt 0 ]; then RECAL_CHECK="--expect-bn-recal true"; fi
+# AMP: the dynamic loss scale overflows (inf gradients, step skipped, scale halved) a few times
+# early on; the m8 smoke (job 10505028) skipped 10 of 200 steps, all linear, all by step 51.
+if [ "$AMP" = "true" ]; then RECAL_CHECK="$RECAL_CHECK --max-nonfinite-frac 0.06"; fi
 
 SCRATCH="$PROJ/scratch"
 mkdir -p "$RESULTS" "$SCRATCH/keras" "$SCRATCH/cuda_cache"

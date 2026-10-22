@@ -315,7 +315,7 @@ def _check_grad_balance(recs, tasks, from_step):
 
 def check(run_dir, tasks, steps, expect_best=True, expect_init_weights=None, expect_enc_grad=False,
           expect_cascade=False, expect_bn_recal=False, expect_skip=False, grad_balance_rule=False,
-          grad_balance_from_step=GRAD_BALANCE_FROM_STEP):
+          grad_balance_from_step=GRAD_BALANCE_FROM_STEP, max_nonfinite_frac=0.0):
     """Returns (ok, [(name, passed, detail)]). ``expect_init_weights`` None (not checked) |
     'none' (not checked) | 'full' | 'partial'; ``expect_enc_grad``: check the milestone-7
     encoder grad-norm diagnostics. Milestone 8 (module docstring): ``expect_cascade``,
@@ -367,7 +367,14 @@ def check(run_dir, tasks, steps, expect_best=True, expect_init_weights=None, exp
     res.append(("trace_once", tc is not None and all(tc.get(t) == 1 for t in tasks),
                 "trace counts %s (1 per task)" % tc))
     nf = (summ or {}).get("nonfinite_total", 0)
-    res.append(("finite_steps", nf == 0, "non-finite steps: %s" % nf))
+    if max_nonfinite_frac > 0:
+        # AMP: the dynamic loss scale starts high and halves on overflow, so a few skipped
+        # steps (inf gradients, weights unchanged) are expected; allow up to a fraction of steps.
+        limit = max_nonfinite_frac * max(int(steps), 1)
+        res.append(("finite_steps", nf <= limit, "non-finite steps: %s (allowed <= %.1f, %.1f %% of %d "
+                    "steps, AMP loss-scale overflows)" % (nf, limit, 100.0 * max_nonfinite_frac, int(steps))))
+    else:
+        res.append(("finite_steps", nf == 0, "non-finite steps: %s" % nf))
     pngs = ["%s_step%07d.png" % (t, final) for t in tasks]
     have = set(os.listdir(os.path.join(run_dir, "val_png"))) if os.path.isdir(os.path.join(run_dir, "val_png")) else set()
     res.append(("val_png", all(p in have for p in pngs), "PNGs %s present: %s" % (pngs, [p in have for p in pngs])))
@@ -417,6 +424,9 @@ def main(argv=None):
                     help="the grad-balance medians use the log records whose 'step' field (the END of "
                     "the logging window) is >= this value; with --log-every 25 the first used window "
                     "is steps 26-50 (default %(default)s)")
+    ap.add_argument("--max-nonfinite-frac", type=float, default=0.0,
+                    help="allowed fraction of non-finite (skipped) steps; 0 = none allowed. Use e.g. "
+                    "0.06 with AMP, where the dynamic loss scale overflows a few times early on")
     a = ap.parse_args(argv)
     tasks = [t for t in a.tasks.split(",") if t]
     unknown = [t for t in tasks if t not in LINEAR_TASKS + (DEFORM_TASK,)]
@@ -426,7 +436,8 @@ def main(argv=None):
                     expect_init_weights=a.expect_init_weights, expect_enc_grad=a.expect_enc_grad == "true",
                     expect_cascade=a.expect_cascade == "true", expect_bn_recal=a.expect_bn_recal == "true",
                     expect_skip=a.expect_skip == "true", grad_balance_rule=a.grad_balance_rule == "true",
-                    grad_balance_from_step=a.grad_balance_from_step)
+                    grad_balance_from_step=a.grad_balance_from_step,
+                    max_nonfinite_frac=a.max_nonfinite_frac)
     for name, passed, detail in res:
         label = "INFO" if passed and detail.startswith("INFO") else ("PASS" if passed else "FAIL")
         print("%s %-22s %s" % (label, name, detail))
