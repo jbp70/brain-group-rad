@@ -64,8 +64,11 @@
 #   T = 1.3 x (8000 x mean step s + 16 x val s), from the smoke run.
 # A100 override (same CPUs 3, --mem=64G): add -p dgx-a100 to the sbatch line, e.g.
 #   RUN_NAME=m8_level2_cascade N=<n> DEFORM_N=<nd> sbatch -p dgx-a100 --job-name=m8long --time=<T> --mem=64G slurm/m8_level2_cascade.sh
-#   peak: unmeasured (fill in from scratch/m8/memory_level2.json)
-#   verdict: 'fits the 40 GB A100 (peak X GB <= 36 GB)' or 'does NOT fit the 40 GB A100 (peak X GB > 36 GB)'
+#   peak (job 10504614, RTX 8000, scratch/m8/memory_level2.json): recipe N=16 DEFORM_N=8 AMP=true
+#   GRAD_CKPT=both -> deform 27.8 GB (6.97 s/step), linear 10.9-11.0 GB (1.16 s/step).
+#   verdict: fits the 40 GB A100 (peak 27.8 GB <= 36 GB).
+#   Without AMP: deform N 8 OOMs with every checkpointing option (N 6 'both' 35.2 GB, 7.8 s);
+#   linear N 12 fails in layer d2 (N 8 is 11.0 GB). AMP + 'integrator' at deform N 8: 40.9 GB, 6.5 s.
 set -euo pipefail
 
 PROJ="${PROJ:-/autofs/space/crater_001/users/jn85/BrainRegProjects/GroupwiseReg}"
