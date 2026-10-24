@@ -74,6 +74,23 @@ class TestSetLevel(unittest.TestCase):
         vdp._set_level(4)
         self.assertEqual((vdp.LEVEL, vdp.SHAPE, vdp.SPACING), (4, P.LEVEL_SHAPE[4], P.LEVEL_SPACING[4]))
 
+    def test_level1_template(self):
+        """Milestone 9 (design 5.4): level 1 = full resolution, template_mask.npy (suffix '')."""
+        self.assertEqual(P.level_suffix(1), "")
+        tdir = os.path.join(self.tmp, vdp.dm.TEMPLATE_DIR)
+        os.makedirs(tdir)
+        mask = np.zeros(P.LEVEL_SHAPE[1], np.uint8)
+        mask[40:120, 60:160, 40:140] = 1
+        np.save(os.path.join(tdir, "template_mask.npy"), mask)
+        vdp._set_level(1)
+        self.assertEqual((vdp.LEVEL, vdp.SHAPE, vdp.SPACING), (1, P.LEVEL_SHAPE[1], P.LEVEL_SPACING[1]))
+        brain = vdp._template_brain(argparse.Namespace(data=self.tmp))
+        self.assertEqual(brain.shape, (160, 224, 192))
+        self.assertEqual(brain.dtype, np.bool_)
+        self.assertEqual(int(brain.sum()), int(mask.sum()))
+        with open(_PATH) as f:
+            self.assertIn("choices=(4, 2, 1)", f.read())
+
 
 if __name__ == "__main__":
     unittest.main()

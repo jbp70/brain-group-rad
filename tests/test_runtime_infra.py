@@ -284,6 +284,76 @@ class TestArgs(unittest.TestCase):
         self.assertIn("--bn-recal-batches > 0 needs --cascade-from (BN recalibration is defined for the "
                       "level-transfer cascade only)", err.getvalue())
 
+    def test_memory_knob_flags(self):
+        # Milestone 9 (design 3.8): every knob off by default; invalid values are parser errors
+        # naming the option.
+        import contextlib
+        import io
+        a = A.parse_args(["--data", "x"])
+        self.assertEqual((a.gradient_checkpointing, a.lean_sampler, a.lean_losses, a.split_group_conv),
+                         ("none", False, False, False))
+        tc = A.train_config_from_args(a)
+        self.assertEqual((tc.lean_sampler, tc.lean_losses), (False, False))
+        dfm = ["--data", "x", "--task-ratio", "rigid:1,deform:1"]
+        a = A.parse_args(dfm + ["--gradient-checkpointing", "full", "--lean-sampler", "true",
+                                "--lean-losses", "yes", "--split-group-conv", "1"])
+        self.assertEqual((a.gradient_checkpointing, a.lean_sampler, a.lean_losses, a.split_group_conv),
+                         ("full", True, True, True))
+        tc = A.train_config_from_args(a)
+        self.assertEqual((tc.lean_sampler, tc.lean_losses), (True, True))
+        d = A.args_to_dict(a)
+        json.dumps(d)
+        for k in ("lean_sampler", "lean_losses", "split_group_conv"):
+            self.assertIn(k, d)
+        self.assertNotIn("lean_sampler", A.model_config_from_args(a).to_dict())     # not a ModelConfig field
+        A.parse_args(["--data", "x", "--split-group-conv", "true"])                  # valid for every task
+        for mode in ("none", "integrator", "decoder", "both"):
+            A.parse_args(["--data", "x", "--gradient-checkpointing", mode])          # unchanged: no task rule
+        bad_cases = [
+            (["--data", "x", "--gradient-checkpointing", "full"], "--gradient-checkpointing full needs 'deform'"),
+            (["--data", "x", "--task-ratio", "rigid:1,affine:1", "--gradient-checkpointing", "full"], "'deform'"),
+            (["--data", "x", "--lean-sampler", "true"], "--lean-sampler needs 'deform'"),
+            (["--data", "x", "--lean-losses", "true"], "--lean-losses needs 'deform'"),
+            (dfm + ["--lean-sampler", "maybe"], "--lean-sampler"),
+            (dfm + ["--lean-losses", "2"], "--lean-losses"),
+            (dfm + ["--split-group-conv", "nope"], "--split-group-conv"),
+            (dfm + ["--gradient-checkpointing", "fully"], "--gradient-checkpointing"),
+            (["--data", "x", "--filters", "32,64,0,192,256,384"], "--filters"),
+            (["--data", "x", "--filters", "32,64,128,192,256"], "--filters"),
+            (["--data", "x", "--filters", "32,64,128,192,256,-384"], "--filters"),
+            (["--data", "x", "--reductions", "192,0"], "--reductions"),
+            (["--data", "x", "--reductions", ""], "--reductions"),
+            (["--data", "x", "--dense", "-2048,512"], "--dense"),
+            (["--data", "x", "--decoder-widths", "128,96,64,32,0"], "--decoder-widths"),
+        ]
+        for bad, msg in bad_cases:
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                with self.assertRaises(SystemExit, msg=str(bad)):
+                    A.parse_args(bad)
+            self.assertIn(msg, err.getvalue(), bad)
+
+    def test_todays_config_and_args_restore(self):
+        # Milestone 9 (design 3.9, AC2): a ModelConfig dict and an args dict of today's format (no
+        # new keys) restore with today's defaults; check_cascade_config accepts today's pair.
+        from models.config import ModelConfig
+        d = ModelConfig(**dict(narrow_config().to_dict(), deform_decoder=True)).to_dict()
+        self.assertEqual(sorted(d), sorted(ModelConfig().to_dict()))                  # no new fields
+        self.assertEqual(ModelConfig.from_dict(d).to_dict(), d)
+        a = A.parse_args(["--data", "x", "--task-ratio", "rigid:1,affine:1,deform:2"] + NARROW_ARGS)
+        old_args = {k: v for k, v in A.args_to_dict(a).items()
+                    if k not in ("lean_sampler", "lean_losses", "split_group_conv")}
+        ns = argparse.Namespace(**old_args)
+        self.assertFalse(getattr(ns, "lean_sampler", False))
+        import main as MAIN
+        ns.task_ratio_parsed = a.task_ratio_parsed
+        self.assertEqual(MAIN._build_n(ns), min(a.group_size, a.deform_group_size))   # today's rule
+        # Today's level-4 source config.json and a level-2 run built from the same flags.
+        src_cfg = ModelConfig.from_dict(d)
+        C.check_cascade_config(A.model_config_from_args(
+            A.parse_args(["--data", "x", "--level", "2", "--task-ratio", "rigid:1,affine:1,deform:2",
+                          "--seed", "3"] + NARROW_ARGS)).replace(dropout=src_cfg.dropout), src_cfg)
+
     def test_best_metric_with_deform(self):
         from runtime.run import DEFORM_BEST_METRIC, MEAN_PAIR_METRIC, resolve_best_metric
         self.assertEqual(A.DEFORM_BEST_METRIC, DEFORM_BEST_METRIC)

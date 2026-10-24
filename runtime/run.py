@@ -435,6 +435,11 @@ class TrainConfig:
     # (16 = the milestone-6 value).
     cascade_skip_prob: float = 0.0
     val_pair_chunk: int = 16
+    # Memory knobs of the deform TRAINING step (milestone 9 design 3.3 / 3.4; validation keeps
+    # today's paths): lean_sampler must equal the model's `lean_sampler` (checked in Trainer);
+    # it is passed to compose_cascade and deform_loss; lean_losses to deform_loss.
+    lean_sampler: bool = False
+    lean_losses: bool = False
 
 
 def _peak_gpu_mb():
@@ -468,6 +473,11 @@ class Trainer:
         previous level (module docstring "Level cascade"). It is called outside the tape in eval
         mode and its variables are never given to the optimizer (`O.build_optimizer` stays on
         ``model.trainable_variables``). None (default): no cascade code is traced.
+
+    Memory knobs (milestone 9): ``cfg.lean_sampler`` must equal ``model.lean_sampler``
+    (ValueError otherwise); the deform training step passes it to `diffeo.compose_cascade` and
+    `losses.deform_loss`, and ``cfg.lean_losses`` to `losses.deform_loss`. Validation keeps the
+    default paths (no tape, same forward values).
     """
 
     def __init__(self, model, optimizer, sources, S, cfg, logger=None, checkpoint=None, val_sets=None,
@@ -482,6 +492,9 @@ class Trainer:
         self.val_sets = dict(val_sets or {})
         self.controls = dict(controls or {})
         self.level = P.check_level(cfg.level)
+        model_lean = bool(getattr(model, "lean_sampler", False))
+        if model_lean != bool(cfg.lean_sampler):
+            raise ValueError("lean_sampler: model %s vs TrainConfig %s" % (model_lean, bool(cfg.lean_sampler)))
         if cascade is not None:
             if CS.PREV_LEVEL.get(self.level) != cascade.level:
                 raise ValueError("cascade: level %d has no frozen level-%d stage (PREV_LEVEL %s)"
@@ -615,6 +628,12 @@ class Trainer:
         lam_p, lam_s, order = float(cfg.lambda_pdice), float(cfg.lambda_smooth), int(cfg.smooth_order)
         ncc_kw = dict(lambda_dice_tmpl=float(cfg.lambda_dice_tmpl), lambda_ncc_tmpl=float(cfg.lambda_ncc_tmpl),
                       lambda_ncc_pair=float(cfg.lambda_ncc_pair), ncc_window=self.ncc_window)
+        lean = bool(cfg.lean_sampler)            # trace-time switches (design 3.3 / 3.4)
+        if lean:
+            ncc_kw["lean_sampler"] = True
+        if cfg.lean_losses:
+            ncc_kw["lean_losses"] = True
+        cascade_kw = {"lean": True} if lean else {}
         w = self._task_weight(task)
         norm_on = self.task_grad_norm > 0      # trace-time switch: off adds no op
         cascade = self.cascade                 # trace-time switch (design section 5): None adds no op
@@ -639,7 +658,7 @@ class Trainer:
             with tf.GradientTape() as tape:
                 out = model(x_in, task=task, training=True)
                 if cascade is not None:           # composed field; losses on the ORIGINAL batch
-                    u, u_inv = diffeo.compose_cascade(U, U_inv, out["u"], out["u_inv"])
+                    u, u_inv = diffeo.compose_cascade(U, U_inv, out["u"], out["u_inv"], **cascade_kw)
                     out = dict(out, u=u, u_inv=u_inv, u_res=out["u"])
                 terms = losses.deform_loss(out, batch, lam_p, lam_s, order, **ncc_kw)
                 objective = terms["loss"]
@@ -1265,14 +1284,9 @@ class Trainer:
 
     @staticmethod
     def _bn_layers(parts):
-        """Unique `BatchNormWithSeparateAffine` layers inside `parts` (stable order)."""
-        out, seen = [], set()
-        for part in parts:
-            for m in [part] + list(part.submodules):
-                if isinstance(m, L.BatchNormWithSeparateAffine) and id(m) not in seen:
-                    seen.add(id(m))
-                    out.append(m)
-        return out
+        """Unique `BatchNormWithSeparateAffine` layers inside `parts` (stable order;
+        `models.layers.batch_norm_layers`)."""
+        return L.batch_norm_layers(list(parts))
 
     def _recal_input(self, task, inputs):
         """Eager input path of one recalibration batch, exactly as the cascade training step:

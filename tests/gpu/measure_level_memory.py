@@ -1,57 +1,104 @@
 #!/usr/bin/env python
-"""GPU memory and step time of one training step per task at a pyramid level (milestone 8).
+"""GPU memory and step time of one training step per task at a pyramid level (milestones 8, 9).
 
 Not part of unittest discovery. Runs locally (GTX 1080, WSL tf_gpu) and on the cluster (inside
-tf10_nv.sif, job slurm/m8_memory.sh) on ONE GPU, e.g.:
+tf10_nv.sif, jobs slurm/m8_memory.sh and slurm/m9_memory.sh) on ONE GPU, e.g.:
 
     python tests/gpu/measure_level_memory.py --level 2 --tasks deform --n 2,4,8 --widths default \
         --cascade true --gradient-checkpointing none,both --amp false,true --val-pass true \
         --lambda-ncc-template 1 --lambda-ncc-pair 1 --out memory_level2.json
+    python tests/gpu/measure_level_memory.py --level 1 --tasks deform --n 2,3,4 --widths f0d1 \
+        --cascade true --gradient-checkpointing full --amp true --lean-sampler true \
+        --split-group-conv true --integration-steps 6,7 --val-pass true --val-pair-chunk 4 \
+        --lambda-ncc-template 1 --lambda-ncc-pair 1 --out memory_m9.json
 
-Same structure as the milestone-6 `measure_deform_memory.py` (kept as is for reproducibility).
-For every configuration (task x widths x cascade x gradient checkpointing x AMP x N) it builds
-the trainable level-`--level` model (deform decoder always on, i.e. the three-task model; widths
-default = full, narrow = `tests.runtime_helpers.NARROW`, tiny = `tests.runtime_helpers.TINY`),
-with `--cascade true` also a `models.cascade.FrozenStage.from_model` of a random level-4 model
-of the same config (float32 always), and a `Trainer` with ratio <task>:1 (Adam 3e-4, global
-clip 12) on synthetic data (no DALI): linear `tests.runtime_helpers.synthetic_group(level, n,
-task)`, deform `fd.synthetic_deform_group(level, n)` (labels 0..8, 19 one-hot channels). It runs
---warmup-steps steps (trace, cuDNN setup), then --steps measured steps; TF's allocator statistics
-(`tf.config.experimental.get_memory_info('GPU:0')`, reset before the measured steps) give the
-peak. Gradient checkpointing applies to deform only (linear configs use 'none'). `--amp true`
-sets `mixed_float16` before building the trainable model and uses a LossScaleOptimizer (the
-frozen stage stays float32); the policy is reset to float32 after each configuration.
+Same structure as the milestone-6 `measure_deform_memory.py` (kept as is for reproducibility);
+milestone 9 extensions: `.agents/tasks/milestone-9/design-m9-phase1.md` sections 5.1 / 5.2.
+For every configuration (task x widths x cascade x gradient checkpointing x AMP x T x lean
+sampler x lean losses x split group conv x N) it builds the trainable level-`--level` model
+(deform decoder always on, i.e. the three-task model) and a `Trainer` with ratio <task>:1 (Adam
+3e-4, global clip 12) on synthetic data (no DALI): linear `tests.runtime_helpers.synthetic_group
+(level, n, task)`, deform `fd.synthetic_deform_group(level, n)` (labels 0..8, 19 one-hot
+channels). It runs --warmup-steps steps (trace, cuDNN setup), then --steps measured steps; TF's
+allocator statistics (`tf.config.experimental.get_memory_info('GPU:0')`, reset before the
+measured steps) give the peak. Gradient checkpointing and the lean sampler / lean losses apply to
+deform only (linear configs use 'none' / false); split group conv applies to every task. `--amp
+true` sets `mixed_float16` before building the trainable model and uses a LossScaleOptimizer (the
+frozen stages stay float32); the policy is reset to float32 after each configuration.
 
-An OOM (ResourceExhaustedError) is recorded per configuration (status 'oom'); larger N of the
-same configuration are then 'skipped'. Any other exception gives status 'error' (repr; the
-traceback goes to stderr) and the next configuration runs.
+Widths: `narrow` = `tests.runtime_helpers.NARROW`, `tiny` = `tests.runtime_helpers.TINY`,
+`default` = `ModelConfig()` (decoder widths None = half the encoder widths; the same model as
+the `default` preset), any other `models.width_presets` name, or `custom` (needs --filters and
+--decoder-widths; the widths key is ``custom:f=16-32-...;d=...``).
+
+Build (R1.3 fix, design 2.4): EVERY model (trainable, frozen level 4, stand-in level 4 / 2) is
+built with `build_model(min(N, --build-n))` (default 2). The variables do not depend on N and the
+build runs with training=False, so it has no numerical effect on the measured steps; a build
+forward can no longer be recorded as a training-configuration failure. Records store `build_n`.
+
+Cascade: `--cascade true` at level 2 = a `models.cascade.FrozenStage` of a random float32
+level-4 model; at level 1 = `tests/gpu/frozen_chain_standin.FrozenChainStandIn` (random float32
+level-4 and level-2 models, `PREV_LEVEL` patched to {2: 4, 1: 2} while the configuration runs;
+design 5.2); invalid at level 4. `cascade_kind` = none | frozen4 | standin_chain_4_2. For cascade
+configurations with training status 'ok', `frozen_ms` = median of the frozen forward alone, and
+`frozen_peak_mb` = the allocator peak of one frozen forward with the trainer, model, optimizer
+slots and batch still alive (frozen_status ok | oom | error; an OOM there leaves the training
+status unchanged).
+
+Status per configuration: 'ok' | 'oom' (ResourceExhaustedError) | 'limit' (an
+InvalidArgumentError / InternalError / UnknownError / ValueError whose message names a 32-bit
+size limit: "2^31", "2**31", "INT_MAX", "2147483647" or "num_elements") | 'error' (anything
+else; repr, the traceback goes to stderr) | 'skipped' (larger N of a configuration after an
+'oom' or 'limit').
 
 `--val-pass true` (deform only): after the measured steps (also after a training OOM),
 `reset_memory_stats`, then one validation pass on the synthetic group as `_val_deform_errors`
 does it: the eval-mode `trainer._val_deform_fn(n)` forward (cascade branch with --cascade true)
-followed by `trainer._deform_errors(labels, u, u_inv, v, v_raw, seed=0, chunk=16, images=images)`
-(eager warps, pair chunks of 16). Records val_peak_mb, val_status ('ok' | 'oom' | 'error') and
-val_ms (wall time of that first pass, incl. the validation function's trace); an OOM there does not mark the training configuration as OOM. null for linear tasks or
-without --val-pass.
+followed by `trainer._deform_errors(labels, u, u_inv, v, v_raw, seed=0, chunk=--val-pair-chunk,
+images=images)` (eager warps). Records val_peak_mb, val_status ('ok' | 'oom' | 'error') and
+val_ms (wall time of that first pass, incl. the validation function's trace); an OOM there does
+not mark the training configuration as OOM. null for linear tasks or without --val-pass.
 
-`--integration-steps` (default 0 = the ModelConfig default, 7) is a local-testing knob (a
-level-2 TINY deform step with T = 7 needs more than the 6000 MB GTX 1080 cap); it is part of the
-configuration key.
+`--integration-steps` (comma list; 0 = the ModelConfig default, resolved before the record is
+written, tool-only convention: main.py's 0 means T = 0) is a grid axis.
+
+Predictions: `predicted_peak_mb`, `predicted_phase`, `pred_over_meas` (= predicted / measured
+peak), `largest_tensor_elems`, `largest_tensor_desc` from `models.memory_model.predict` (margin
+0) with the stored coefficients (--coefficients, default models/memory_coefficients.json); null
+with a stderr warning if the file is missing.
 
 JSON (``--out``): {"environment": {...}, "results": [{level, task, n, widths, cascade,
-gradient_checkpointing, amp, lambda_ncc_tmpl, lambda_ncc_pair, integration_steps, params,
-frozen_params, status ('ok' | 'oom' | 'error' | 'skipped'), peak_mb (measured steps),
-warmup_peak_mb, resident_mb (allocated after the warm-up: weights of both stages, optimizer
-slots, batch), step_ms (median), step_ms_mean, step_ms_all, frozen_ms (median of the frozen
-forward alone, cascade only, else null), trace_counts, finite, loss, val_peak_mb, val_status,
-val_ms, error}]}. With an existing --out file the new results are merged (same configuration key
-replaced), so several invocations build one table. main(argv) returns 0 unless it crashes (2
-without a GPU).
+gradient_checkpointing, amp, lambda_ncc_tmpl, lambda_ncc_pair, integration_steps, lean_sampler,
+lean_losses, split_group_conv, val_pair_chunk, cascade_kind, build_n, params, frozen_params,
+status, peak_mb (measured steps), warmup_peak_mb, resident_mb (allocated after the warm-up:
+weights of all stages, optimizer slots, batch), step_ms (median), step_ms_mean, step_ms_all,
+frozen_ms, frozen_peak_mb, frozen_status, trace_counts, finite, loss, val_peak_mb, val_status,
+val_ms, predicted_peak_mb, predicted_phase, pred_over_meas, largest_tensor_elems,
+largest_tensor_desc, wall_s, error}]}. The output is merged and written atomically AFTER EVERY
+configuration (`<out>.tmp.<pid>`, flush + fsync, `os.replace`; an OSError is fatal): records
+with the same configuration key (KEY_FIELDS; old records without the milestone-9 fields read as
+lean/split false, val_pair_chunk 16, cascade_kind frozen4/none from `cascade`, integration_steps
+0 = the resolved T) are replaced, new ones appended, so several invocations build one table and
+a killed job loses at most the configuration being measured. main(argv) returns 0 unless it
+crashes (2 without a GPU).
+
+`--isolate true` (milestone-9 FEAT-004 fix; default false = the in-process loop above): every
+configuration (one N) runs in its OWN Python child process (`sys.executable` this script, single
+values on every axis, `--isolate false`, the same --out). Reason: in one process the allocator
+keeps memory across configurations even after `clear_session()` + `gc.collect()` (local GTX hold-out:
+`resident_mb` 73 -> 329 MB over 48 narrow configurations, 424 -> 1602 MB over 16 default ones), which
+inflates later peaks. The child measures and writes its record (atomic merge as above); the parent
+reads it back by configuration key for the skip-after-OOM rule, and writes an 'error' record
+("child exit code <rc>") if the child crashed without writing one. The parent never touches the GPU
+allocator. Cost: one interpreter + TF + CUDA start per configuration (~20-40 s).
 """
 import argparse
+import contextlib
 import gc
+import importlib.util
 import json
 import os
+import subprocess
 import sys
 import time
 import traceback
@@ -69,7 +116,13 @@ from models.precision import configure_tf_precision  # noqa: E402
 MB = float(2 ** 20)
 TASKS = ("rigid", "affine", "deform")
 WIDTHS = ("narrow", "default", "tiny")
+CUSTOM = "custom"
 DEFORM = "deform"
+COEFFICIENTS = os.path.join(REPO, "models", "memory_coefficients.json")
+STANDIN_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frozen_chain_standin.py")
+CASCADE_KINDS = {(2, True): "frozen4", (1, True): "standin_chain_4_2"}
+MODEL_CASCADE = {"none": "none", "frozen4": "frozen4", "standin_chain_4_2": "chain42"}
+LIMIT_SUBSTRINGS = ("2^31", "2**31", "INT_MAX", "2147483647", "num_elements")
 
 
 def configure_gpu(limit_mb):
@@ -101,8 +154,30 @@ def csv_list(s):
     return [x.strip() for x in str(s).split(",") if x.strip()]
 
 
+def width_names():
+    from models import width_presets as WP
+    return tuple(WIDTHS) + tuple(p for p in WP.PRESETS if p not in WIDTHS)
+
+
+def custom_key(filters, decoder_widths):
+    return "custom:f=%s;d=%s" % ("-".join(str(int(x)) for x in filters),
+                                 "-".join(str(int(x)) for x in decoder_widths))
+
+
+def _parse_custom(widths):
+    """'custom:f=a-b-...;d=a-b-...' -> (filters tuple, decoder_widths tuple)."""
+    body = widths[len(CUSTOM) + 1:]
+    parts = dict(p.split("=", 1) for p in body.split(";") if "=" in p)
+    if "f" not in parts or "d" not in parts:
+        raise ValueError("custom widths key needs f= and d=, got %r" % widths)
+    return (tuple(int(x) for x in parts["f"].split("-")), tuple(int(x) for x in parts["d"].split("-")))
+
+
 def model_config(widths, integration_steps=0):
+    """Three-task ModelConfig (deform decoder on, dropout 0) of a widths key; integration_steps
+    0 = the ModelConfig default."""
     from models.config import ModelConfig
+    from models import width_presets as WP
     from tests.runtime_helpers import NARROW, TINY
     kw = {"deform_decoder": True, "dropout": 0.0}
     if integration_steps:
@@ -112,9 +187,36 @@ def model_config(widths, integration_steps=0):
     elif widths == "tiny":
         kw.update(TINY)
         kw["dropout"] = 0.0
+    elif str(widths).startswith(CUSTOM + ":"):
+        f, d = _parse_custom(widths)
+        kw.update(filters=f, decoder_widths=d)
     elif widths != "default":
-        raise ValueError("widths must be one of %s, got %r" % (WIDTHS, widths))
+        if widths not in WP.PRESETS:
+            raise ValueError("widths must be one of %s or %s:f=..;d=.., got %r" % (width_names(), CUSTOM, widths))
+        kw.update(WP.preset_kwargs(widths))
     return ModelConfig(**kw)
+
+
+def classify_error(e):
+    """'oom' | 'limit' | 'error' (design 5.1, review F14)."""
+    if isinstance(e, tf.errors.ResourceExhaustedError):
+        return "oom"
+    limit_types = (tf.errors.InvalidArgumentError, tf.errors.InternalError, tf.errors.UnknownError, ValueError)
+    if isinstance(e, limit_types) and any(s in str(e) for s in LIMIT_SUBSTRINGS):
+        return "limit"
+    return "error"
+
+
+def gpu_family(name):
+    """memory_model GPU name of a TF device name."""
+    s = str(name or "").upper()
+    if "1080" in s:
+        return "gtx1080"
+    if "A100" in s:
+        return "a100"
+    if "A6000" in s:
+        return "a6000"
+    return "rtx8000"
 
 
 def _peak_mb():
@@ -125,7 +227,19 @@ def _current_mb():
     return tf.config.experimental.get_memory_info("GPU:0")["current"] / MB
 
 
-def _val_pass(trainer, n, images, labels):
+def _first_line(e):
+    s = str(e).strip()
+    return (s.splitlines()[0] if s else repr(e))[:300]
+
+
+def _standin_module():
+    spec = importlib.util.spec_from_file_location("frozen_chain_standin", STANDIN_PATH)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _val_pass(trainer, n, images, labels, chunk=16):
     """One deform validation pass (eval forward + eager metrics) -> (status, peak_mb, ms, error)."""
     try:
         tf.config.experimental.reset_memory_stats("GPU:0")
@@ -133,17 +247,17 @@ def _val_pass(trainer, n, images, labels):
         fn = trainer._val_deform_fn(int(n))
         out = fn(tf.constant(images))
         trainer._deform_errors(labels, out["u"], out["u_inv"], out["v"].numpy(), out["v_raw"].numpy(),
-                               seed=0, chunk=16, images=images)
+                               seed=0, chunk=int(chunk), images=images)
         return "ok", _peak_mb(), (time.time() - t0) * 1e3, None
     except tf.errors.ResourceExhaustedError as e:
-        return "oom", None, None, str(e).strip().splitlines()[0][:300]
+        return "oom", None, None, _first_line(e)
     except Exception as e:  # noqa: BLE001
         traceback.print_exc()
         return "error", None, None, repr(e)[:300]
 
 
 def measure(base, warmup_steps, steps, val_pass, seed=0):
-    """One configuration -> result dict (status 'ok' or 'oom'; other exceptions propagate)."""
+    """One configuration -> result dict (status 'ok', 'oom' or 'limit'; other exceptions propagate)."""
     from data_loading import params as P
     from models import cascade as CS
     from models import transforms as tfm
@@ -156,8 +270,9 @@ def measure(base, warmup_steps, steps, val_pass, seed=0):
 
     res = dict(base)
     level, task, n = int(base["level"]), base["task"], int(base["n"])
+    build_n = int(base["build_n"])
     shape = tuple(P.LEVEL_SHAPE[level])
-    for k in ("frozen_ms", "val_peak_mb", "val_status", "val_ms"):
+    for k in ("frozen_ms", "frozen_peak_mb", "frozen_status", "val_peak_mb", "val_status", "val_ms"):
         res[k] = None
     if task == DEFORM:
         group = fd.synthetic_deform_group(level, n, seed=seed)
@@ -175,23 +290,34 @@ def measure(base, warmup_steps, steps, val_pass, seed=0):
                       log_every=1, task_ratio={task: 1.0}, seed=seed, amp=bool(base["amp"]),
                       lambda_ncc_tmpl=float(base["lambda_ncc_tmpl"]),
                       lambda_ncc_pair=float(base["lambda_ncc_pair"]),
+                      val_pair_chunk=int(base["val_pair_chunk"]),
+                      lean_sampler=bool(base["lean_sampler"]), lean_losses=bool(base["lean_losses"]),
                       schedule=ScheduleConfig("constant", base_lr=3e-4, total_steps=total + 1,
                                               warmup_steps=0))
     mp = tf.keras.mixed_precision
     frozen = None
     trainer = model = batch = None
+    stack = contextlib.ExitStack()
     try:
-        if base["cascade"]:
-            m4 = GroupRegLevelModel(CS.FROZEN_LEVEL, cfg_m).build_model(2)   # random level-4 weights
-            frozen = CS.FrozenStage.from_model(m4)
+        if base["cascade"] and level == 1:
+            sc = _standin_module()
+            frozen = sc.build_standin(cfg_m, build_n=build_n)
+            stack.enter_context(sc.patched_prev_level())
+            res["frozen_params"] = frozen.n_params
+        elif base["cascade"]:
+            with CS._float32_policy():                                 # random level-4 weights
+                m4 = GroupRegLevelModel(CS.FROZEN_LEVEL, cfg_m, gradient_checkpointing="none"
+                                        ).build_model(build_n)
+            frozen = CS.FrozenStage(m4)
             del m4
             res["frozen_params"] = int(sum(int(np.prod(v.shape)) for v in frozen.model.weights))
         else:
             res["frozen_params"] = None
         if base["amp"]:
             mp.set_global_policy("mixed_float16")
-        model = GroupRegLevelModel(level, cfg_m, gradient_checkpointing=base["gradient_checkpointing"]
-                                   ).build_model(n)
+        model = GroupRegLevelModel(level, cfg_m, gradient_checkpointing=base["gradient_checkpointing"],
+                                   lean_sampler=bool(base["lean_sampler"]),
+                                   split_group_conv=bool(base["split_group_conv"])).build_model(build_n)
         res["params"] = int(sum(int(np.prod(v.shape)) for v in model.trainable_variables))
         trainer = Trainer(model, O.make_optimizer("adam", lr=3e-4, amp=bool(base["amp"])),
                           {task: fd.FixedGroupSource(group["batch"])}, S, cfg, cascade=frozen)
@@ -216,31 +342,48 @@ def measure(base, warmup_steps, steps, val_pass, seed=0):
             res["finite"] = bool(out["finite"])
             res["trace_counts"] = dict(trainer.trace_counts)
             res["status"] = "ok"
-        except tf.errors.ResourceExhaustedError as e:
-            res["status"] = "oom"
-            res["error"] = str(e).strip().splitlines()[0][:300]
+        except Exception as e:  # noqa: BLE001
+            st = classify_error(e)
+            if st == "error":
+                raise
+            res["status"] = st
+            res["error"] = _first_line(e)
         if res["status"] == "ok" and frozen is not None:
             x = tf.constant(images)
+
             def frozen_fwd(t):
                 if task == DEFORM:
                     return frozen.deform(t)["U"]
                 return frozen.linear(t, task)
 
             ffn = tf.function(frozen_fwd)
-            ffn(x).numpy()                                         # trace
-            ft = []
-            for _ in range(max(int(steps), 1)):
-                t0 = time.time()
+            try:
+                ffn(x).numpy()                                     # trace
+                ft = []
+                for _ in range(max(int(steps), 1)):
+                    t0 = time.time()
+                    ffn(x).numpy()
+                    ft.append((time.time() - t0) * 1e3)
+                res["frozen_ms"] = float(np.median(ft))
+                tf.config.experimental.reset_memory_stats("GPU:0")
                 ffn(x).numpy()
-                ft.append((time.time() - t0) * 1e3)
-            res["frozen_ms"] = float(np.median(ft))
+                res["frozen_peak_mb"] = _peak_mb()
+                res["frozen_status"] = "ok"
+            except tf.errors.ResourceExhaustedError as e:
+                res["frozen_status"] = "oom"
+                res["frozen_error"] = _first_line(e)
+            except Exception as e:  # noqa: BLE001
+                traceback.print_exc()
+                res["frozen_status"] = "error"
+                res["frozen_error"] = repr(e)[:300]
             del ffn, x
         if val_pass and task == DEFORM:
-            st, pk, ms, err = _val_pass(trainer, n, images, labels)
+            st, pk, ms, err = _val_pass(trainer, n, images, labels, chunk=base["val_pair_chunk"])
             res["val_status"], res["val_peak_mb"], res["val_ms"] = st, pk, ms
             if err:
                 res["val_error"] = err
     finally:
+        stack.close()
         mp.set_global_policy("float32")
         del trainer, model, batch, group, frozen
     return res
@@ -251,44 +394,247 @@ def free_memory():
     gc.collect()
 
 
+# ----------------------------------------------------------------------------- predictions
+def load_coefficients(path):
+    """Stored memory-model coefficients, or None (stderr warning) if the file is missing."""
+    from models import memory_model as MM
+    if not path or not os.path.exists(path):
+        print("WARNING: memory-model coefficients %r not found; predicted_* fields are null" % (path,),
+              file=sys.stderr)
+        return None
+    return MM.load_coefficients(path)
+
+
+def predicted_fields(base, gpu, coeffs):
+    """predicted_peak_mb, predicted_phase, largest_tensor_elems, largest_tensor_desc (null without
+    coefficients or if the model cannot predict the configuration)."""
+    out = {"predicted_peak_mb": None, "predicted_phase": None, "largest_tensor_elems": None,
+           "largest_tensor_desc": None}
+    if coeffs is None:
+        return out
+    try:
+        from models import memory_model as MM
+        w = MM.Workload(base["level"], base["task"], base["n"],
+                        model_config=model_config(base["widths"], base["integration_steps"]),
+                        checkpointing=base["gradient_checkpointing"], amp=bool(base["amp"]),
+                        integration_steps=int(base["integration_steps"]),
+                        lncc=bool(float(base["lambda_ncc_tmpl"]) > 0 or float(base["lambda_ncc_pair"]) > 0),
+                        lean_sampler=bool(base["lean_sampler"]), lean_losses=bool(base["lean_losses"]),
+                        split_group_conv=bool(base["split_group_conv"]),
+                        cascade=MODEL_CASCADE[base["cascade_kind"]],
+                        val_pair_chunk=int(base["val_pair_chunk"]), build_n=int(base["build_n"]), gpu=gpu)
+        p = MM.predict(w, coeffs, margin=0.0)
+        out["predicted_peak_mb"] = float(p["peak_gib"] * 1024.0)
+        out["predicted_phase"] = p["peak_phase"]
+        out["largest_tensor_elems"] = int(p["largest_tensor"]["elements"])
+        out["largest_tensor_desc"] = p["largest_tensor"].get("desc")
+    except Exception as e:  # noqa: BLE001
+        print("WARNING: memory-model prediction failed for %s: %r" % (base, e), file=sys.stderr)
+    return out
+
+
+# ----------------------------------------------------------------------------- merge + write
 KEY_FIELDS = ("level", "task", "n", "widths", "cascade", "gradient_checkpointing", "amp",
-              "lambda_ncc_tmpl", "lambda_ncc_pair", "integration_steps")
+              "lambda_ncc_tmpl", "lambda_ncc_pair", "integration_steps", "lean_sampler", "lean_losses",
+              "split_group_conv", "val_pair_chunk", "cascade_kind")
+
+
+def _resolved_t(r):
+    t = r.get("integration_steps", 0)
+    if not t:
+        try:
+            t = model_config(r.get("widths", "default"), 0).integration_steps
+        except Exception:  # noqa: BLE001  (unknown widths key: keep the stored value)
+            pass
+    return t
+
+
+def _key_value(r, k):
+    if k in ("lean_sampler", "lean_losses", "split_group_conv"):
+        return r.get(k, False)
+    if k == "val_pair_chunk":
+        return r.get(k, 16)
+    if k == "cascade_kind":
+        return r.get(k, "frozen4" if r.get("cascade") else "none")
+    if k == "integration_steps":
+        return _resolved_t(r)
+    return r.get(k)
 
 
 def config_key(r):
-    return tuple(str(r.get(k)) for k in KEY_FIELDS)
+    """Configuration key; missing milestone-9 fields of old records read with their defaults."""
+    return tuple(str(_key_value(r, k)) for k in KEY_FIELDS)
 
 
 def _sort_key(r):
-    return tuple(str(r.get(k)) for k in KEY_FIELDS if k != "n") + (int(r.get("n", 0)),)
+    return tuple(str(_key_value(r, k)) for k in KEY_FIELDS if k != "n") + (int(r.get("n", 0)),)
+
+
+def write_merged(path, env, records):
+    """Merge ``records`` into the JSON at ``path`` (same config_key replaced) and write it
+    atomically: <path>.tmp.<pid> in the same folder, flush + fsync, os.replace. OSError is fatal
+    (propagates); the temp file is removed in ``finally``."""
+    merged = {}
+    order = []
+    if os.path.exists(path):
+        with open(path) as f:
+            old = json.load(f)
+        for r in old.get("results", []):
+            k = config_key(r)
+            if k not in merged:
+                order.append(k)
+            merged[k] = r
+    for r in records:
+        k = config_key(r)
+        if k not in merged:
+            order.append(k)
+        merged[k] = r
+    out = {"environment": env, "results": sorted((merged[k] for k in order), key=_sort_key)}
+    folder = os.path.dirname(os.path.abspath(path))
+    os.makedirs(folder, exist_ok=True)
+    tmp = "%s.tmp.%d" % (os.path.abspath(path), os.getpid())
+    try:
+        with open(tmp, "w") as f:
+            json.dump(out, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+
+
+def _null_record(base, status, error):
+    r = dict(base, status=status, error=error)
+    for k in ("frozen_ms", "frozen_peak_mb", "frozen_status", "val_peak_mb", "val_status", "val_ms"):
+        r.setdefault(k, None)
+    return r
+
+
+def _b(x):
+    return "true" if x else "false"
+
+
+def child_argv(a, base, val_pass):
+    """argv of the `--isolate true` child that measures exactly the configuration ``base``."""
+    w = base["widths"]
+    if str(w).startswith(CUSTOM + ":"):
+        f, d = _parse_custom(w)
+        widths = [CUSTOM, "--filters", ",".join(str(x) for x in f),
+                  "--decoder-widths", ",".join(str(x) for x in d)]
+    else:
+        widths = [w]
+    return ([sys.executable, os.path.abspath(__file__), "--isolate", "false",
+             "--level", str(base["level"]), "--tasks", base["task"], "--n", str(base["n"]), "--widths"]
+            + widths
+            + ["--cascade", _b(base["cascade"]), "--gradient-checkpointing", base["gradient_checkpointing"],
+               "--amp", _b(base["amp"]), "--lean-sampler", _b(base["lean_sampler"]),
+               "--lean-losses", _b(base["lean_losses"]), "--split-group-conv", _b(base["split_group_conv"]),
+               "--lambda-ncc-template", repr(float(base["lambda_ncc_tmpl"])),
+               "--lambda-ncc-pair", repr(float(base["lambda_ncc_pair"])),
+               "--val-pass", _b(val_pass), "--val-pair-chunk", str(base["val_pair_chunk"]),
+               "--integration-steps", str(base["integration_steps"]), "--build-n", str(a.build_n),
+               "--warmup-steps", str(a.warmup_steps), "--steps", str(a.steps),
+               "--gpu-memory-limit-mb", str(a.gpu_memory_limit_mb), "--coefficients", str(a.coefficients),
+               "--seed", str(a.seed), "--out", a.out])
+
+
+def _read_record(path, base):
+    """The record of configuration ``base`` in the JSON at ``path`` (None if absent)."""
+    if not os.path.exists(path):
+        return None
+    with open(path) as f:
+        d = json.load(f)
+    k = config_key(base)
+    for r in d.get("results", []):
+        if config_key(r) == k:
+            return r
+    return None
+
+
+def measure_isolated(a, base, val_pass):
+    """Run ``base`` in a child process -> (record, written_by_child). A crashed child (non-zero
+    exit or no record) gives an 'error' record that the caller writes."""
+    old = _read_record(a.out, base)
+    t0 = time.time()
+    rc = subprocess.run(child_argv(a, base, val_pass), stdin=subprocess.DEVNULL).returncode
+    r = _read_record(a.out, base)
+    fresh = r is not None and (old is None or r != old)
+    if rc == 0 and fresh:
+        return r, True
+    r = _null_record(base, "error", "child exit code %d%s" % (rc, "" if fresh else ", no record written"))
+    r["wall_s"] = time.time() - t0
+    return r, False
+
+
+def _parse_widths(ap, a):
+    names = width_names()
+    out = []
+    for w in csv_list(a.widths):
+        if w == CUSTOM:
+            if not a.filters or not a.decoder_widths:
+                ap.error("--widths custom needs --filters and --decoder-widths")
+            try:
+                f = [int(x) for x in csv_list(a.filters)]
+                d = [int(x) for x in csv_list(a.decoder_widths)]
+            except ValueError:
+                ap.error("--filters / --decoder-widths must be comma lists of integers")
+            if len(f) != 6 or len(d) != 5 or min(f + d) < 1:
+                ap.error("--filters needs 6 and --decoder-widths 5 integers >= 1")
+            out.append(custom_key(f, d))
+        elif w in names:
+            out.append(w)
+        else:
+            ap.error("--widths %r not in %s or %s" % (w, names, CUSTOM))
+    return out
 
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--level", type=int, choices=(4, 2), default=2)
+    ap.add_argument("--level", type=int, choices=(4, 2, 1), default=2)
     ap.add_argument("--tasks", default="rigid,affine,deform", help="comma-separated: rigid, affine, deform")
     ap.add_argument("--n", default="2,4", help="comma-separated group sizes")
-    ap.add_argument("--widths", default="default", help="comma-separated: narrow, default, tiny")
+    ap.add_argument("--widths", default="default",
+                    help="comma-separated: narrow, default, tiny, a models.width_presets name, or custom")
+    ap.add_argument("--filters", default=None, help="--widths custom: 6 encoder widths (comma list)")
+    ap.add_argument("--decoder-widths", default=None, help="--widths custom: 5 decoder widths (comma list)")
     ap.add_argument("--cascade", default="true",
-                    help="comma-separated true/false (true: frozen level-4 stage, --level 2 only)")
+                    help="comma-separated true/false (true: frozen level-4 stage at --level 2, the "
+                         "frozen-chain stand-in at --level 1; invalid at level 4)")
     ap.add_argument("--gradient-checkpointing", default="none",
-                    help="comma-separated: none, integrator, decoder, both (deform only; linear uses none)")
+                    help="comma-separated: none, integrator, decoder, both, full (deform only; linear uses none)")
     ap.add_argument("--amp", default="false", help="comma-separated true/false (mixed_float16)")
+    ap.add_argument("--lean-sampler", default="false", help="comma-separated true/false (deform only)")
+    ap.add_argument("--lean-losses", default="false", help="comma-separated true/false (deform only)")
+    ap.add_argument("--split-group-conv", default="false", help="comma-separated true/false")
     ap.add_argument("--lambda-ncc-template", type=float, default=0.0,
                     help="LNCC template weight of the measured deform loss (0 = off; m8 recipe 1)")
     ap.add_argument("--lambda-ncc-pair", type=float, default=0.0, help="LNCC pairwise weight (0 = off)")
     ap.add_argument("--val-pass", default="false",
                     help="true: also measure one deform validation pass (deform configs only)")
-    ap.add_argument("--integration-steps", type=int, default=0,
-                    help="scaling-and-squaring steps T (0 = ModelConfig default; local-testing knob)")
+    ap.add_argument("--val-pair-chunk", type=int, default=16, help="pair chunk of the validation pass (>= 1)")
+    ap.add_argument("--integration-steps", default="0",
+                    help="comma-separated scaling-and-squaring steps T (0 = the ModelConfig default, "
+                         "tool-only convention; resolved before the record is written)")
+    ap.add_argument("--build-n", type=int, default=2,
+                    help="every model is built with build_model(min(N, build_n)) (R1.3 fix)")
     ap.add_argument("--warmup-steps", type=int, default=2, help="unmeasured steps first (trace, cuDNN)")
     ap.add_argument("--steps", type=int, default=10, help="measured steps after the warm-up")
     ap.add_argument("--gpu-memory-limit-mb", type=int, default=0,
                     help="fixed TF logical-device limit (0: memory growth, e.g. on the cluster)")
+    ap.add_argument("--coefficients", default=COEFFICIENTS, help="memory-model coefficients JSON")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", required=True, help="JSON output (merged with an existing file)")
+    ap.add_argument("--isolate", default="false",
+                    help="true: every configuration (one N) in its own child process (no memory carried "
+                         "over between configurations; slurm/m9_memory.sh)")
     a = ap.parse_args(argv)
-    configure_gpu(a.gpu_memory_limit_mb)
+    try:
+        a.isolate = str2bool(a.isolate)
+    except ValueError as e:
+        ap.error("--isolate: %s" % e)
+    if not a.isolate:
+        configure_gpu(a.gpu_memory_limit_mb)
     from models.group_net import GRADIENT_CHECKPOINTING
 
     tasks = csv_list(a.tasks)
@@ -298,97 +644,139 @@ def main(argv=None):
     ns = sorted(int(x) for x in csv_list(a.n))
     if not ns or min(ns) < 2:
         ap.error("--n needs group sizes >= 2")
-    widths = csv_list(a.widths)
-    for w in widths:
-        if w not in WIDTHS:
-            ap.error("--widths %r not in %s" % (w, WIDTHS))
+    widths = _parse_widths(ap, a)
     ckpts = csv_list(a.gradient_checkpointing)
     for c in ckpts:
         if c not in GRADIENT_CHECKPOINTING:
             ap.error("--gradient-checkpointing %r not in %s" % (c, GRADIENT_CHECKPOINTING))
+
+    def bool_axis(flag, value):         # comma list of true/false; errors name the option (R2.6)
+        try:
+            return [str2bool(x) for x in csv_list(value)]
+        except ValueError as e:
+            ap.error("%s: %s" % (flag, e))
+
+    cascades = bool_axis("--cascade", a.cascade)
+    amps = bool_axis("--amp", a.amp)
+    lean_samplers = bool_axis("--lean-sampler", a.lean_sampler)
+    lean_losses = bool_axis("--lean-losses", a.lean_losses)
+    splits = bool_axis("--split-group-conv", a.split_group_conv)
     try:
-        cascades = [str2bool(x) for x in csv_list(a.cascade)]
-        amps = [str2bool(x) for x in csv_list(a.amp)]
         val_pass = str2bool(a.val_pass)
     except ValueError as e:
-        ap.error(str(e))
-    if a.level != 2 and any(cascades):
-        ap.error("--cascade true needs --level 2 (the frozen stage is level 4)")
+        ap.error("--val-pass: %s" % e)
+    try:
+        t_list = [int(x) for x in csv_list(a.integration_steps)]
+    except ValueError:
+        ap.error("--integration-steps must be a comma list of integers")
+    if not t_list or min(t_list) < 0:
+        ap.error("--integration-steps needs integers >= 0")
+    if a.level == 4 and any(cascades):
+        ap.error("--cascade true needs --level 2 or 1 (level 4 has no previous stage)")
     if a.steps < 1 or a.warmup_steps < 1:
         ap.error("--steps and --warmup-steps must be >= 1")
+    if a.build_n < 1:
+        ap.error("--build-n must be >= 1")
+    if a.val_pair_chunk < 1:
+        ap.error("--val-pair-chunk must be >= 1")
     gpus = tf.config.list_physical_devices("GPU")
     if not gpus:
         print("no GPU visible", file=sys.stderr)
         return 2
+    gpu_name = tf.config.experimental.get_device_details(gpus[0]).get("device_name")
     env = {"python": sys.version.split()[0], "tensorflow": tf.__version__, "numpy": np.__version__,
-           "gpu": tf.config.experimental.get_device_details(gpus[0]).get("device_name"),
-           "gpu_memory_limit_mb": a.gpu_memory_limit_mb, "level": a.level, "warmup_steps": a.warmup_steps,
-           "measured_steps": a.steps, "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
+           "gpu": gpu_name, "gpu_memory_limit_mb": a.gpu_memory_limit_mb, "level": a.level,
+           "warmup_steps": a.warmup_steps, "measured_steps": a.steps, "build_n": a.build_n,
+           "val_pair_chunk": a.val_pair_chunk, "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
            "tf_cudnn_use_autotune": os.environ.get("TF_CUDNN_USE_AUTOTUNE")}
     print("environment: %s" % env, flush=True)
+    coeffs = load_coefficients(a.coefficients)
+    family = gpu_family(gpu_name)
 
-    results = []
     for task in tasks:
-        task_ckpts = ckpts if task == DEFORM else ["none"]
+        is_deform = task == DEFORM
+        task_ckpts = ckpts if is_deform else ["none"]
+        task_ls = lean_samplers if is_deform else [False]
+        task_ll = lean_losses if is_deform else [False]
         for w in widths:
+            t_axis = []
+            for t in t_list:
+                rt = int(t) if t else int(model_config(w, 0).integration_steps)
+                if rt not in t_axis:
+                    t_axis.append(rt)
             for casc in cascades:
                 for c in task_ckpts:
                     for amp in amps:
-                        oom_at = None
-                        for n in ns:
-                            base = {"level": a.level, "task": task, "n": n, "widths": w, "cascade": casc,
-                                    "gradient_checkpointing": c, "amp": amp,
-                                    "lambda_ncc_tmpl": a.lambda_ncc_template,
-                                    "lambda_ncc_pair": a.lambda_ncc_pair,
-                                    "integration_steps": a.integration_steps}
-                            if oom_at is not None:
-                                results.append(dict(base, status="skipped", error="OOM at N = %d" % oom_at,
-                                                    val_peak_mb=None, val_status=None, val_ms=None))
-                                continue
-                            t0 = time.time()
-                            try:
-                                r = measure(base, a.warmup_steps, a.steps, val_pass, a.seed)
-                            except tf.errors.ResourceExhaustedError as e:
-                                r = dict(base, status="oom", error=str(e).strip().splitlines()[0][:300],
-                                         val_peak_mb=None, val_status=None, val_ms=None)
-                            except Exception as e:  # noqa: BLE001
-                                traceback.print_exc()
-                                r = dict(base, status="error", error=repr(e)[:300],
-                                         val_peak_mb=None, val_status=None, val_ms=None)
-                            if r["status"] == "oom":
-                                oom_at = n
-                            r["wall_s"] = time.time() - t0
-                            free_memory()
-                            results.append(r)
-                            tag = "%-6s N=%-3d %-7s casc=%-5s ckpt=%-10s amp=%-5s" % (task, n, w, casc, c, amp)
-                            if r["status"] == "ok":
-                                fz = "" if r["frozen_ms"] is None else "  frozen %6.1f ms" % r["frozen_ms"]
-                                val = ""
-                                if r.get("val_status") is not None:
-                                    val = "  val %s" % r["val_status"]
-                                    if r["val_status"] == "ok":
-                                        val += " peak %8.1f MB %7.1f ms" % (r["val_peak_mb"], r["val_ms"])
-                                print("%s peak %8.1f MB (warm-up %8.1f, resident %7.1f)  step %7.1f ms%s%s"
-                                      % (tag, r["peak_mb"], r["warmup_peak_mb"], r["resident_mb"],
-                                         r["step_ms"], fz, val), flush=True)
-                            else:
-                                print("%s %s: %s (val %s)" % (tag, r["status"].upper(), r.get("error"),
-                                                              r.get("val_status")), flush=True)
-
-    merged = {}
-    if os.path.exists(a.out):
-        with open(a.out) as f:
-            old = json.load(f)
-        for r in old.get("results", []):
-            merged[config_key(r)] = r
-    for r in results:
-        merged[config_key(r)] = r
-    out = {"environment": env, "results": sorted(merged.values(), key=_sort_key)}
-    os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
-    with open(a.out, "w") as f:
-        json.dump(out, f, indent=2)
+                        for T in t_axis:
+                            for ls in sorted(set(task_ls), key=task_ls.index):
+                                for ll in sorted(set(task_ll), key=task_ll.index):
+                                    for sp in sorted(set(splits), key=splits.index):
+                                        _run_ns(a, env, coeffs, family, task, w, casc, c, amp, T, ls, ll, sp,
+                                                ns, val_pass)
     print("written %s" % a.out)
     return 0
+
+
+def _run_ns(a, env, coeffs, family, task, w, casc, c, amp, T, ls, ll, sp, ns, val_pass):
+    """All N of one configuration (larger N skipped after 'oom' / 'limit'); writes after each."""
+    stop_at = None
+    for n in ns:
+        base = {"level": a.level, "task": task, "n": n, "widths": w, "cascade": casc,
+                "gradient_checkpointing": c, "amp": amp, "lambda_ncc_tmpl": a.lambda_ncc_template,
+                "lambda_ncc_pair": a.lambda_ncc_pair, "integration_steps": T, "lean_sampler": ls,
+                "lean_losses": ll, "split_group_conv": sp, "val_pair_chunk": a.val_pair_chunk,
+                "cascade_kind": CASCADE_KINDS.get((a.level, bool(casc)), "none"),
+                "build_n": min(n, a.build_n)}
+        pred = predicted_fields(base, family, coeffs)
+        if stop_at is not None:
+            r = _null_record(base, "skipped", "%s at N = %d" % (stop_at[0].upper(), stop_at[1]))
+        elif a.isolate:
+            r, by_child = measure_isolated(a, base, val_pass)
+            if r["status"] in ("oom", "limit"):
+                stop_at = (r["status"], n)
+            if by_child:
+                continue                     # the child wrote and printed its record
+        else:
+            t0 = time.time()
+            try:
+                r = measure(base, a.warmup_steps, a.steps, val_pass, a.seed)
+            except Exception as e:  # noqa: BLE001
+                st = classify_error(e)
+                if st == "error":
+                    traceback.print_exc()
+                    r = _null_record(base, "error", repr(e)[:300])
+                else:
+                    r = _null_record(base, st, _first_line(e))
+            if r["status"] in ("oom", "limit"):
+                stop_at = (r["status"], n)
+            r["wall_s"] = time.time() - t0
+            free_memory()
+        r.update(pred)
+        meas = r.get("peak_mb")
+        r["pred_over_meas"] = (float(pred["predicted_peak_mb"]) / float(meas)
+                               if pred["predicted_peak_mb"] is not None and meas else None)
+        write_merged(a.out, env, [r])
+        tag = "%-6s N=%-3d %-8s casc=%-5s ckpt=%-10s amp=%-5s T=%d ls=%d ll=%d sp=%d" % (
+            task, n, w, casc, c, amp, T, ls, ll, sp)
+        pr = "" if pred["predicted_peak_mb"] is None else "  pred %8.1f MB (%s)" % (
+            pred["predicted_peak_mb"], pred["predicted_phase"])
+        if r["status"] == "ok":
+            fz = "" if r["frozen_ms"] is None else "  frozen %6.1f ms" % r["frozen_ms"]
+            if r.get("frozen_status") not in (None, "ok"):
+                fz += "  frozen %s" % r["frozen_status"]
+            elif r.get("frozen_peak_mb") is not None:
+                fz += " peak %8.1f MB" % r["frozen_peak_mb"]
+            val = ""
+            if r.get("val_status") is not None:
+                val = "  val %s" % r["val_status"]
+                if r["val_status"] == "ok":
+                    val += " peak %8.1f MB %7.1f ms" % (r["val_peak_mb"], r["val_ms"])
+            print("%s peak %8.1f MB (warm-up %8.1f, resident %7.1f)  step %7.1f ms%s%s%s"
+                  % (tag, r["peak_mb"], r["warmup_peak_mb"], r["resident_mb"], r["step_ms"], fz, val, pr),
+                  flush=True)
+        else:
+            print("%s %s: %s (val %s)%s" % (tag, r["status"].upper(), r.get("error"), r.get("val_status"), pr),
+                  flush=True)
 
 
 if __name__ == "__main__":

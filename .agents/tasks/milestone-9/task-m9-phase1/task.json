@@ -1,0 +1,7 @@
+{
+  "task_id": "task-m9-phase1",
+  "task_description": "Milestone 9 Phase 1 (level-1 memory design): per-tensor-limit reproducer and measurement-tool n_build fix (R1); off-by-default memory knobs: width presets, --gradient-checkpointing full with BN updated once, T=6 support/verdict, lean trilinear sampler, lean losses, split group-mean conv (R2); pure-Python calibrated memory model with checked-in calibration, level-1 grid and one recommendation (R3); level-1 measurement tooling and slurm/m9_memory.sh (R4); report and design.md update (R6). R5 (3-level cascade, level-1 DALI/validation, retraining) is design-only and NOT implemented. Plan: .agents/tasks/milestone-9/plan.md (items 1-21).",
+  "status": "pending",
+  "feature_order": ["FEAT-001", "FEAT-002", "FEAT-003", "FEAT-004"],
+  "blocked_reason": null
+}

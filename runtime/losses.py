@@ -114,27 +114,56 @@ def soft_dice(a, b, eps=1e-5, exclude_background=True):
                     tf.ones_like(count))
 
 
-def template_dice_loss(warped, eps=1e-5):
-    """(loss, dice [N], template) with template = mean_i warped_i (gradients flow through it)."""
+def _soft_dice_lean(a, b, eps=1e-5, exclude_background=True):
+    """`soft_dice` without materialised channel slices or broadcast copies (milestone 9 design
+    3.4): the sums run over all channels (b, e.g. a [1, X, Y, Z, C] template, broadcasts
+    implicitly), then the background column of the [N, C] results is dropped."""
+    a = _float(a)
+    b = tf.cast(b, a.dtype)
+    axes = [1, 2, 3]
+    inter = tf.reduce_sum(a * b, axis=axes)
+    total = tf.reduce_sum(a, axis=axes) + tf.reduce_sum(b, axis=axes)
+    if exclude_background:
+        inter, total = inter[..., 1:], total[..., 1:]
+    dice = (2.0 * inter + eps) / (total + eps)
+    present = tf.cast(total > PRESENT_THRESHOLD, a.dtype)
+    count = tf.reduce_sum(present, axis=-1)
+    return tf.where(count > 0, tf.reduce_sum(dice * present, axis=-1) / tf.maximum(count, 1.0),
+                    tf.ones_like(count))
+
+
+def template_dice_loss(warped, eps=1e-5, lean=False):
+    """(loss, dice [N], template) with template = mean_i warped_i (gradients flow through it).
+    ``lean``: `_soft_dice_lean` with the [1, ...] template broadcast implicitly."""
     warped = _float(warped)
     template = tf.reduce_mean(warped, axis=0, keepdims=True)
-    dice = soft_dice(warped, tf.broadcast_to(template, tf.shape(warped)), eps)
+    if lean:
+        dice = _soft_dice_lean(warped, template, eps)
+    else:
+        dice = soft_dice(warped, tf.broadcast_to(template, tf.shape(warped)), eps)
     return tf.reduce_mean(1.0 - dice), dice, template
 
 
-def pair_dice_loss(onehot, u, u_inv, pair_i, pair_j, eps=1e-5, disp=None, return_moved=False):
+def pair_dice_loss(onehot, u, u_inv, pair_i, pair_j, eps=1e-5, disp=None, return_moved=False,
+                   lean_sampler=False, lean_losses=False):
     """(loss, dice [P]): warp(onehot_i, compose(u_i, u_inv_j)) vs onehot_j over the pairs.
 
     ``disp`` (optional): the pairwise displacements [P, X, Y, Z, 3] if already computed
     (`diffeo.pairwise_displacement`, shared with the pairwise LNCC). ``return_moved``: also
-    return the moved and target one-hots, (loss, dice, moved, target).
+    return the moved and target one-hots, (loss, dice, moved, target). ``lean_sampler``: the
+    warps use the lean sampler (the one-hot without an input gradient); ``lean_losses``:
+    `_soft_dice_lean` (milestone 9 design 3.3 / 3.4; both default False = today's ops).
     """
     onehot = _float(onehot)
     if disp is None:
-        disp = diffeo.pairwise_displacement(u, u_inv, pair_i, pair_j)
-    moved = diffeo.warp(tf.gather(onehot, tf.reshape(pair_i, [-1])), disp)
+        disp = diffeo.pairwise_displacement(u, u_inv, pair_i, pair_j, lean=lean_sampler)
+    if lean_sampler:
+        moved = diffeo.warp(tf.gather(onehot, tf.reshape(pair_i, [-1])), disp, lean=True,
+                            lean_images_grad=False)
+    else:
+        moved = diffeo.warp(tf.gather(onehot, tf.reshape(pair_i, [-1])), disp)
     target = tf.gather(onehot, tf.reshape(pair_j, [-1]))
-    dice = soft_dice(moved, target, eps)
+    dice = _soft_dice_lean(moved, target, eps) if lean_losses else soft_dice(moved, target, eps)
     if return_moved:
         return tf.reduce_mean(1.0 - dice), dice, moved, target
     return tf.reduce_mean(1.0 - dice), dice
@@ -277,11 +306,23 @@ def masked_mean(m, w):
     return tf.reduce_sum(m * w, axis=axes) / tf.maximum(tf.reduce_sum(w, axis=axes), 1.0)
 
 
-def template_ncc_loss(warped_img, fg_tmpl, window, leave_one_out=True, eps=NCC_EPS):
+def _local_ncc_maybe_lean(a, b, window, eps, lean):
+    """`local_ncc`, under tf.recompute_grad when ``lean`` (milestone 9 design 3.4: its box
+    filters and moments are recomputed in the backward instead of kept)."""
+    if not lean:
+        return local_ncc(a, b, window, eps)
+    return tf.recompute_grad(lambda x, y: local_ncc(x, y, window, eps))(a, b)
+
+
+def template_ncc_loss(warped_img, fg_tmpl, window, leave_one_out=True, eps=NCC_EPS,
+                      lean_sampler=False, lean=False):
     """(loss, ncc [N]) of the warped images [N, X, Y, Z(, 1)] vs the intensity template, with
     gradients through the template. ``leave_one_out``: T_-i = (sum_j W_j - W_i) / (N - 1) (the
     inclusive mean's self term gives a ~1/N floor even for unrelated images); else the mean of
-    all N. ROI from ``fg_tmpl`` [1 | N, X, Y, Z] (the warped one-hot template's foreground)."""
+    all N. ROI from ``fg_tmpl`` [1 | N, X, Y, Z] (the warped one-hot template's foreground).
+    ``lean``: `local_ncc` under tf.recompute_grad. ``lean_sampler`` is accepted for symmetry with
+    `pair_ncc_loss`; the template image warp is done by the caller (`deform_loss`)."""
+    del lean_sampler
     w = _as_volume(warped_img)
     total = tf.reduce_sum(w, axis=0, keepdims=True)
     n = tf.cast(tf.shape(w)[0], w.dtype)
@@ -290,47 +331,64 @@ def template_ncc_loss(warped_img, fg_tmpl, window, leave_one_out=True, eps=NCC_E
     else:
         template = total / n
     roi = ncc_roi(tf.cast(_float(fg_tmpl), w.dtype), window)
-    ncc = masked_mean(local_ncc(w, template, window, eps), roi)
+    ncc = masked_mean(_local_ncc_maybe_lean(w, template, window, eps, lean), roi)
     return tf.reduce_mean(1.0 - ncc), ncc
 
 
-def pair_ncc_loss(images, disp, pair_i, pair_j, fg_moved, fg_target, window, eps=NCC_EPS):
+def pair_ncc_loss(images, disp, pair_i, pair_j, fg_moved, fg_target, window, eps=NCC_EPS,
+                  lean_sampler=False, lean=False):
     """(loss, ncc [P]): warp(image_i, disp_p) vs image_j over the pairs (``disp`` from
     `diffeo.pairwise_displacement`, shared with the pairwise Dice). ROI from
-    max(fg_moved, fg_target) [P, X, Y, Z] (foreground of the moved one-hot_i and of one-hot_j)."""
+    max(fg_moved, fg_target) [P, X, Y, Z] (foreground of the moved one-hot_i and of one-hot_j).
+    ``lean_sampler``: the image warp uses the lean sampler without an image gradient; ``lean``:
+    `local_ncc` under tf.recompute_grad (both default False = today's ops)."""
     images = _as_volume(images)
-    moved = diffeo.warp(tf.gather(images, tf.reshape(pair_i, [-1])), tf.cast(disp, images.dtype))
+    if lean_sampler:
+        moved = diffeo.warp(tf.gather(images, tf.reshape(pair_i, [-1])), tf.cast(disp, images.dtype),
+                            lean=True, lean_images_grad=False)
+    else:
+        moved = diffeo.warp(tf.gather(images, tf.reshape(pair_i, [-1])), tf.cast(disp, images.dtype))
     target = tf.gather(images, tf.reshape(pair_j, [-1]))
     fg = tf.maximum(tf.cast(_float(fg_moved), images.dtype), tf.cast(_float(fg_target), images.dtype))
     roi = ncc_roi(fg, window)
-    ncc = masked_mean(local_ncc(moved, target, window, eps), roi)
+    ncc = masked_mean(_local_ncc_maybe_lean(moved, target, window, eps, lean), roi)
     return tf.reduce_mean(1.0 - ncc), ncc
 
 
 def deform_loss(out, batch, lambda_pdice=1.0, lambda_smooth=0.5, smooth_order=1,
-                lambda_dice_tmpl=1.0, lambda_ncc_tmpl=0.0, lambda_ncc_pair=0.0, ncc_window=5):
+                lambda_dice_tmpl=1.0, lambda_ncc_tmpl=0.0, lambda_ncc_pair=0.0, ncc_window=5,
+                lean_sampler=False, lean_losses=False):
     """Total deformable loss from a model output (``u``, ``u_inv``) and a `DeformPostprocess`
     batch (``onehot``, ``pair_i``, ``pair_j``; ``images`` only when an LNCC weight is > 0).
 
     Returns dict(loss, tmpl, pdice, smooth, soft_dice_tmpl (mean), soft_dice_pair (mean)) and,
     per active LNCC term, ncc_tmpl / ncc_pair (mean LNCC) and ncc_tmpl_loss / ncc_pair_loss.
     With the default weights the graph is the milestone-6 one (extra terms are static Python
-    choices).
+    choices). Memory knobs (milestone 9 design 3.3 / 3.4, default False = today's ops):
+    ``lean_sampler`` = every warp uses the lean sampler (data volumes without an input
+    gradient, the pairwise field composition with it); ``lean_losses`` = Dice without slices /
+    broadcast copies and LNCC under tf.recompute_grad.
     """
     lam_dt, lam_nt, lam_np = float(lambda_dice_tmpl), float(lambda_ncc_tmpl), float(lambda_ncc_pair)
     if (lam_nt > 0 or lam_np > 0) and "images" not in batch:
         raise ValueError("deform_loss: an LNCC weight is > 0 but the batch has no 'images'")
+    lean_kw = {"lean_sampler": True} if lean_sampler else {}
+    if lean_losses:
+        lean_kw["lean_losses"] = True
     u = _float(out["u"])
     u_inv = tf.cast(out["u_inv"], u.dtype)
     onehot = tf.cast(batch["onehot"], u.dtype)
-    warped = diffeo.warp(onehot, u)
-    tmpl, dice_t, template = template_dice_loss(warped)
-    if lam_np > 0:
-        disp = diffeo.pairwise_displacement(u, u_inv, batch["pair_i"], batch["pair_j"])
-        pdice, dice_p, moved_oh, target_oh = pair_dice_loss(onehot, u, u_inv, batch["pair_i"], batch["pair_j"],
-                                                            disp=disp, return_moved=True)
+    if lean_sampler:
+        warped = diffeo.warp(onehot, u, lean=True, lean_images_grad=False)
     else:
-        pdice, dice_p = pair_dice_loss(onehot, u, u_inv, batch["pair_i"], batch["pair_j"])
+        warped = diffeo.warp(onehot, u)
+    tmpl, dice_t, template = template_dice_loss(warped, lean=bool(lean_losses))
+    if lam_np > 0:
+        disp = diffeo.pairwise_displacement(u, u_inv, batch["pair_i"], batch["pair_j"], lean=bool(lean_sampler))
+        pdice, dice_p, moved_oh, target_oh = pair_dice_loss(onehot, u, u_inv, batch["pair_i"], batch["pair_j"],
+                                                            disp=disp, return_moved=True, **lean_kw)
+    else:
+        pdice, dice_p = pair_dice_loss(onehot, u, u_inv, batch["pair_i"], batch["pair_j"], **lean_kw)
     smooth = smoothness_loss(u, smooth_order)
     tmpl_term = tmpl if lam_dt == 1.0 else tf.constant(lam_dt, u.dtype) * tmpl
     loss = (tmpl_term + tf.constant(float(lambda_pdice), u.dtype) * pdice
@@ -339,13 +397,22 @@ def deform_loss(out, batch, lambda_pdice=1.0, lambda_smooth=0.5, smooth_order=1,
            "soft_dice_tmpl": tf.reduce_mean(dice_t), "soft_dice_pair": tf.reduce_mean(dice_p)}
     if lam_nt > 0 or lam_np > 0:
         images = tf.cast(_float(batch["images"]), u.dtype)
+    ncc_kw = {}
+    if lean_sampler:
+        ncc_kw["lean_sampler"] = True
+    if lean_losses:
+        ncc_kw["lean"] = True
     if lam_nt > 0:
-        nt_loss, ncc_t = template_ncc_loss(diffeo.warp(images, u), foreground(template), ncc_window)
+        if lean_sampler:
+            warped_img = diffeo.warp(images, u, lean=True, lean_images_grad=False)
+        else:
+            warped_img = diffeo.warp(images, u)
+        nt_loss, ncc_t = template_ncc_loss(warped_img, foreground(template), ncc_window, **ncc_kw)
         loss = loss + tf.constant(lam_nt, u.dtype) * nt_loss
         res.update(ncc_tmpl=tf.reduce_mean(ncc_t), ncc_tmpl_loss=nt_loss)
     if lam_np > 0:
         np_loss, ncc_p = pair_ncc_loss(images, disp, batch["pair_i"], batch["pair_j"], foreground(moved_oh),
-                                       foreground(target_oh), ncc_window)
+                                       foreground(target_oh), ncc_window, **ncc_kw)
         loss = loss + tf.constant(lam_np, u.dtype) * np_loss
         res.update(ncc_pair=tf.reduce_mean(ncc_p), ncc_pair_loss=np_loss)
     res["loss"] = loss

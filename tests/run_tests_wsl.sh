@@ -8,7 +8,8 @@
 #    plus the TF-free numpy references, in the bgr_preproc38 env (Python 3.8, numpy 1.21.1,
 #    scipy 1.4.1, no TF), as a stand-in for the container's Python 3.8.10. TF-free imports of
 #    runtime.args / runtime.schedulers and `main.py --help`. `bash -n` on the GPU runner scripts
-#    and the SLURM template.
+#    and the SLURM scripts. The TF-free unit tests (memory model, width presets, step times,
+#    SLURM scripts) with a check that TensorFlow was not imported.
 # 2. The full unittest suite in the tf_gpu env (TF 2.10, Python 3.9). That env crashes when the
 #    GPU is hidden, so CUDA_VISIBLE_DEVICES is left alone. Neither env has nvidia.dali, so the
 #    DALI-dependent tests skip. tests/gpu/ (DALI GPU verification) is not part of discovery.
@@ -17,7 +18,7 @@ cd "$REPO"
 source ~/miniconda3/etc/profile.d/conda.sh
 export PYTHONDONTWRITEBYTECODE=1
 
-PYFILES="models/*.py data_loading/*.py runtime/*.py main.py tests/*.py tests/gpu/*.py"
+PYFILES="models/*.py data_loading/*.py runtime/*.py main.py tests/*.py tests/gpu/*.py scripts/memory_model.py scripts/step_times_from_metrics.py"
 status=0
 echo "=== [1/2] py3.8 syntax check + numpy references (bgr_preproc38) ==="
 conda activate bgr_preproc38
@@ -34,9 +35,19 @@ python tests/np_reference.py || status=1
 python -c "import data_loading.params, data_loading.dali_loader as d; print('data_loading imports without TF/DALI; DALI_AVAILABLE =', d.DALI_AVAILABLE)" || status=1
 python -c "import runtime.args, runtime.schedulers, sys; assert 'tensorflow' not in sys.modules; print('runtime.args / runtime.schedulers import without TF')" || status=1
 python main.py --help >/dev/null && echo "main.py --help OK (no TF)" || status=1
-for s in tests/gpu/run_verify_glacier.sh tests/gpu/run_overfit_glacier.sh slurm/train_debug.sh slurm/m7_three_task.sh slurm/m8_memory.sh slurm/m8_level2_cascade.sh; do
+for s in tests/gpu/run_verify_glacier.sh tests/gpu/run_overfit_glacier.sh slurm/train_debug.sh slurm/m7_three_task.sh slurm/m8_memory.sh slurm/m8_level2_cascade.sh slurm/m9_memory.sh; do
     bash -n "$s" && echo "bash -n $s OK" || status=1
 done
+# TF-free unit tests (milestone 9: memory model, width presets, step times, SLURM scripts) in the
+# py3.8 env; TensorFlow must not be imported.
+python - <<'EOF' || status=1
+import sys, unittest
+names = ["tests.test_memory_model", "tests.test_width_presets", "tests.test_step_times", "tests.test_slurm_scripts"]
+result = unittest.TextTestRunner(verbosity=1).run(unittest.defaultTestLoader.loadTestsFromNames(names))
+assert "tensorflow" not in sys.modules, "tensorflow was imported by the TF-free tests"
+print("TF-free tests OK without TF (%d tests)" % result.testsRun if result.wasSuccessful() else "TF-free tests FAILED")
+sys.exit(0 if result.wasSuccessful() else 1)
+EOF
 conda deactivate
 
 echo "=== [2/2] unittest suite (tf_gpu) ==="

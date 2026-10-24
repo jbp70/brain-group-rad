@@ -1,0 +1,4 @@
+graph mode: level 2, N 12, widths default, task rigid (+ deform forward), amp False; tf.Graph + placeholder; 7023 ops
+op outputs with more than 2147483647 elements: 1
+   1. ConcatV2               group_reg_level_model_1/deform_decoder/d2/concat                       [12, 80, 112, 96, 256]       float32    2642411520 elements    10.57 GB
+hypothesis limit: 2147483647 elements (int32 index); run mode decides

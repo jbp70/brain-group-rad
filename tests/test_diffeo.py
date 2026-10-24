@@ -7,17 +7,11 @@ import unittest
 from tests import tf_setup  # noqa: F401  (log level, TF32 off, GPU memory growth)
 import numpy as np
 import tensorflow as tf
-from scipy.ndimage import gaussian_filter, map_coordinates
+from scipy.ndimage import map_coordinates
 
 from models import diffeo as D
 from models import layers as L
-
-
-def smooth_field(shape, rng, n=1, sigma=3.0, max_vox=2.0):
-    """[n, X, Y, Z, 3] Gaussian-filtered noise scaled so max_voxel |v| = max_vox (float64)."""
-    v = np.stack([np.stack([gaussian_filter(rng.normal(size=shape), sigma, mode="nearest")
-                            for _ in range(3)], axis=-1) for _ in range(n)])
-    return v * (max_vox / np.linalg.norm(v, axis=-1).max())
+from tests.field_helpers import smooth_field
 
 
 def grid(shape):

@@ -1,0 +1,11 @@
+{
+  "verdict": "APPROVED",
+  "findings": [
+    {"id": "N1", "severity": "NIT", "summary": "4.1 says skip_grad_bound=False / fwd_transient_bound=False select the conservative variants; it is the True settings."},
+    {"id": "N2", "severity": "NIT", "summary": "U4 says the lean sampler keeps no index tensors, but v5 models 168 B of int64 GPU indices; add the rationale for int64 over int32 (HostMemory int32 kernels) in 3.3."},
+    {"id": "N3", "severity": "NIT", "summary": "The order-independent forward bound omits an overlapping second sampler forward (~+1.5 GiB at f0d1 N4); add it or rename the bound an estimate. No decision changes (42.5 <= 44)."},
+    {"id": "N4", "severity": "NIT", "summary": "recommendation.json records only timed-rule level-1 peaks; add the forward-bound peak and margin values, the LLS alternative and the A100 bound verdict."},
+    {"id": "N5", "severity": "NIT", "summary": "m9_memory.sh step 2c comment still calls fr50 + lean losses 'the N 5-6 alternative', which v5 withdrew; relabel it as the Fw-cap check."}
+  ],
+  "reviewDoc": "d:\\Research\\Brain_Registration_Projects\\brain-group-rad\\.agents\\tasks\\milestone-9/design-review.md"
+}

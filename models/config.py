@@ -88,6 +88,10 @@ class ModelConfig:
             raise ValueError("filters needs 6 entries (stem, L2..L6), got {}".format(self.filters))
         if not self.reductions or not self.dense:
             raise ValueError("reductions and dense must be non-empty")
+        for name in ("filters", "reductions", "dense"):
+            vals = getattr(self, name)
+            if any(isinstance(v, bool) or int(v) != v or v < 1 for v in vals):
+                raise ValueError("{} entries must be integers >= 1, got {}".format(name, vals))
         if self.group_config not in GROUP_CONFIGS:
             raise ValueError("group_config must be one of {}".format(GROUP_CONFIGS))
         if self.block not in BLOCKS:

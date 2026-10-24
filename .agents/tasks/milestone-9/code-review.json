@@ -1,0 +1,21 @@
+{
+  "verdict": "APPROVED",
+  "findings": [
+    {
+      "severity": "NIT",
+      "title": "m9_memory.sh step 2 re-measures the 2p priority configurations",
+      "detail": "KEY_FIELDS excludes val_pass, so f0d1 T7 N 3/4/5 with $KNOBS and --val-pair-chunk 4 has the same record key in step 2p and step 2. Step 2 re-runs them (about 18-30 min), and a hard-crashed re-run child makes the parent write an 'error' record that replaces the good 2p record (measure_isolated + write_merged). Drop those N at T 7 for the center widths from step 2, or skip keys already recorded as 'ok'."
+    },
+    {
+      "severity": "NIT",
+      "title": "Retraining plan is only a one-line pointer in report.md",
+      "detail": "The R5 section of report.md names design-m9-phase1.md 6.4 but gives none of the plan. Add the level 4 -> 2 -> 1 summary (script, group sizes, steps, GPU, wall time) so Jay can review it from the report."
+    },
+    {
+      "severity": "NIT",
+      "title": "Recommended config exceeds the budget under the forward bound with margin",
+      "detail": "f0d1 LS N 4: deform_peak_fwd_bound_margin_gib 44.39 > 44 GiB (documented; fallback lean_losses true, measured in step 3). Check this case in the cluster results before fixing deform N 4."
+    }
+  ],
+  "reviewDoc": "d:\\Research\\Brain_Registration_Projects\\brain-group-rad\\.agents\\tasks\\milestone-9\\code-review.md"
+}

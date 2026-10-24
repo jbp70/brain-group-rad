@@ -51,9 +51,11 @@ Deformable pipeline (milestone 6; real val cases of level `--level` with `labels
       boundaries); |T - I| within the residual ranges (params.DEFAULT_DEFORM_RESIDUAL_RANGES).
 Select checks with --checks (e.g. h,i,j,k). All temporary files go to a fresh folder under
 --scratch (never /tmp), removed at the end.
---level {4,2} (default 4; milestone 8) runs the checks at that pyramid level: main() rebinds the
-module globals LEVEL, SHAPE, SPACING (`_set_level`) right after parsing, and the template mask
-is read for that level (`_template_brain`). Check a (pixel center) is level-independent.
+--level {4,2,1} (default 4; milestone 8, level 1 milestone 9 design 5.4) runs the checks at that
+pyramid level: main() rebinds the module globals LEVEL, SHAPE, SPACING (`_set_level`) right
+after parsing, and the template mask is read for that level (`_template_brain`; level 1 reads
+template_mask.npy, suffix ''). Check a (pixel center) is level-independent. Level 1 is
+unverified until the m9 memory job runs it (slurm/m9_memory.sh step 1).
 """
 import argparse
 import gc
@@ -942,8 +944,9 @@ def main():
                     "over 20 synthetic groups per task at 10 iterations, G 30 deg / Rt 20 deg, float64; "
                     ".agents/tasks/milestone-5/measure_bary.py)")
     ap.add_argument("--keep-tmp", action="store_true")
-    ap.add_argument("--level", type=int, choices=(4, 2), default=4,
-                    help="pyramid level of the checks (milestone 8: 2 for the level-2 cascade)")
+    ap.add_argument("--level", type=int, choices=(4, 2, 1), default=4,
+                    help="pyramid level of the checks (milestone 8: 2 for the level-2 cascade; "
+                         "milestone 9: 1, full resolution)")
     args = ap.parse_args()
     _set_level(args.level)
     checks = set(c.strip() for c in args.checks.split(",") if c.strip())

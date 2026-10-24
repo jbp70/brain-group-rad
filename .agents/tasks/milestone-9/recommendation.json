@@ -1,0 +1,372 @@
+{
+ "provisional": true,
+ "margin": 0.15,
+ "n_target": 4,
+ "coefficients": "models/memory_coefficients.json",
+ "widths": "f0d1",
+ "filters": [
+  16,
+  64,
+  128,
+  192,
+  256,
+  384
+ ],
+ "decoder_widths": [
+  128,
+  96,
+  64,
+  32,
+  8
+ ],
+ "integration_steps": 7,
+ "knobs": {
+  "amp": true,
+  "gradient_checkpointing": "full",
+  "lean_sampler": true,
+  "lean_losses": false,
+  "split_group_conv": true
+ },
+ "level1": {
+  "deform_n": 4,
+  "n_target": 4,
+  "linear_n": 16,
+  "val_pair_chunk": 16,
+  "deform_peak_gib": 34.988,
+  "deform_peak_margin_gib": 40.236,
+  "deform_peak_phase": "D",
+  "linear_peak_gib": 13.512,
+  "deform_peak_fwd_bound_gib": 38.603,
+  "deform_peak_fwd_bound_margin_gib": 44.393,
+  "bound_alt_knobs": {
+   "lean_losses": true
+  },
+  "n_no_margin": 5,
+  "a100": {
+   "deform_n_margin": 3,
+   "deform_n_no_margin": 4,
+   "linear_n": 16,
+   "deform_n_no_margin_fwd_bound": 3
+  }
+ },
+ "level2": {
+  "recipe": "m8",
+  "deform_n": 8,
+  "linear_n": 16,
+  "amp": true,
+  "gradient_checkpointing": "both",
+  "deform_peak_gib": 25.571,
+  "linear_peak_gib": 7.26,
+  "largest_deform_n": {
+   "both": 9,
+   "full": 13
+  }
+ },
+ "level4": {
+  "recipe": "m7",
+  "deform_n": 16,
+  "linear_n": 32,
+  "amp": false,
+  "gradient_checkpointing": "none",
+  "deform_peak_gib": 33.082,
+  "linear_peak_gib": 21.118,
+  "largest_deform_n": {
+   "none": 17
+  }
+ },
+ "recipe_flags": [],
+ "step_s": {
+  "rtx8000": {
+   "l4_deform": [
+    1.79,
+    5.36
+   ],
+   "l4_linear": [
+    0.84,
+    2.51
+   ],
+   "l2_deform": [
+    3.39,
+    10.17
+   ],
+   "l2_linear": [
+    0.46,
+    1.37
+   ],
+   "l1_deform": [
+    11.42,
+    34.25
+   ],
+   "l1_linear": [
+    0.54,
+    1.63
+   ],
+   "source": "model (pre-measurement)"
+  },
+  "a100": {
+   "l4_deform": [
+    1.25,
+    3.75
+   ],
+   "l4_linear": [
+    0.53,
+    1.58
+   ],
+   "l2_deform": [
+    2.37,
+    7.12
+   ],
+   "l2_linear": [
+    0.29,
+    0.87
+   ],
+   "l1_deform": [
+    7.99,
+    23.98
+   ],
+   "l1_linear": [
+    0.34,
+    1.03
+   ],
+   "source": "model (pre-measurement)"
+  }
+ },
+ "level1_long_run_h": {
+  "rtx8000": [
+   13.8,
+   41.3
+  ],
+  "a100": [
+   9.7,
+   29.2
+  ]
+ },
+ "m7_consistency": {
+  "mode": "r_task",
+  "ratio": 1.1222655748587445,
+  "s": null,
+  "a100": {
+   "rigid": 1.131002146690519,
+   "affine": 1.131002146690519,
+   "deform": 2.5724742503433378
+  }
+ },
+ "per_n": [
+  {
+   "n": 2,
+   "widths": "default",
+   "knobs": {
+    "lean_sampler": true,
+    "lean_losses": false,
+    "split_group_conv": false
+   },
+   "integration_steps": 7,
+   "peak_gib": 24.427,
+   "peak_margin_gib": 28.091,
+   "phase": "D",
+   "params": 29628638,
+   "a100": true,
+   "a100_no_margin": true,
+   "val_pair_chunk": 16
+  },
+  {
+   "n": 3,
+   "widths": "default",
+   "knobs": {
+    "lean_sampler": true,
+    "lean_losses": false,
+    "split_group_conv": true
+   },
+   "integration_steps": 7,
+   "peak_gib": 34.259,
+   "peak_margin_gib": 39.398,
+   "phase": "D",
+   "params": 29628638,
+   "a100": false,
+   "a100_no_margin": true,
+   "val_pair_chunk": 16
+  },
+  {
+   "n": 4,
+   "widths": "f0d1",
+   "knobs": {
+    "lean_sampler": true,
+    "lean_losses": false,
+    "split_group_conv": true
+   },
+   "integration_steps": 7,
+   "peak_gib": 34.988,
+   "peak_margin_gib": 40.236,
+   "phase": "D",
+   "params": 29537166,
+   "a100": false,
+   "a100_no_margin": true,
+   "val_pair_chunk": 16
+  },
+  {
+   "n": 5,
+   "widths": null
+  },
+  {
+   "n": 6,
+   "widths": null
+  },
+  {
+   "n": 7,
+   "widths": null
+  },
+  {
+   "n": 8,
+   "widths": null
+  }
+ ],
+ "per_n_skip_bound": [
+  {
+   "n": 2,
+   "widths": "default",
+   "knobs": {
+    "lean_sampler": true,
+    "lean_losses": false,
+    "split_group_conv": false
+   },
+   "integration_steps": 7,
+   "peak_gib": 25.515,
+   "peak_margin_gib": 29.343,
+   "phase": "D",
+   "params": 29628638,
+   "a100": true,
+   "a100_no_margin": true,
+   "val_pair_chunk": 16
+  },
+  {
+   "n": 3,
+   "widths": "default",
+   "knobs": {
+    "lean_sampler": true,
+    "lean_losses": false,
+    "split_group_conv": true
+   },
+   "integration_steps": 7,
+   "peak_gib": 35.891,
+   "peak_margin_gib": 41.275,
+   "phase": "D",
+   "params": 29628638,
+   "a100": false,
+   "a100_no_margin": true,
+   "val_pair_chunk": 16
+  },
+  {
+   "n": 4,
+   "widths": "f0d1",
+   "knobs": {
+    "lean_sampler": true,
+    "lean_losses": false,
+    "split_group_conv": true
+   },
+   "integration_steps": 7,
+   "peak_gib": 36.344,
+   "peak_margin_gib": 41.795,
+   "phase": "D",
+   "params": 29537166,
+   "a100": false,
+   "a100_no_margin": false,
+   "val_pair_chunk": 16
+  },
+  {
+   "n": 5,
+   "widths": null
+  },
+  {
+   "n": 6,
+   "widths": null
+  },
+  {
+   "n": 7,
+   "widths": null
+  },
+  {
+   "n": 8,
+   "widths": null
+  }
+ ],
+ "per_n_fwd_bound": [
+  {
+   "n": 2,
+   "widths": "default",
+   "knobs": {
+    "lean_sampler": true,
+    "lean_losses": false,
+    "split_group_conv": false
+   },
+   "integration_steps": 7,
+   "peak_gib": 24.427,
+   "peak_margin_gib": 28.091,
+   "phase": "D",
+   "params": 29628638,
+   "a100": true,
+   "a100_no_margin": true,
+   "val_pair_chunk": 16
+  },
+  {
+   "n": 3,
+   "widths": "default",
+   "knobs": {
+    "lean_sampler": true,
+    "lean_losses": false,
+    "split_group_conv": true
+   },
+   "integration_steps": 7,
+   "peak_gib": 34.259,
+   "peak_margin_gib": 39.398,
+   "phase": "D",
+   "params": 29628638,
+   "a100": false,
+   "a100_no_margin": true,
+   "val_pair_chunk": 16
+  },
+  {
+   "n": 4,
+   "widths": "f0d1",
+   "knobs": {
+    "lean_sampler": true,
+    "lean_losses": true,
+    "split_group_conv": true
+   },
+   "integration_steps": 7,
+   "peak_gib": 34.988,
+   "peak_margin_gib": 40.236,
+   "phase": "D",
+   "params": 29537166,
+   "a100": false,
+   "a100_no_margin": true,
+   "val_pair_chunk": 16
+  },
+  {
+   "n": 5,
+   "widths": null
+  },
+  {
+   "n": 6,
+   "widths": null
+  },
+  {
+   "n": 7,
+   "widths": null
+  },
+  {
+   "n": 8,
+   "widths": null
+  }
+ ],
+ "holdout_gate": {
+  "evaluated": true,
+  "passed": true,
+  "one_sided": true,
+  "max_under_err": 0.12979874995223611,
+  "max_abs_err": 0.520215568915409,
+  "n_over": 18,
+  "symmetric_passed": false
+ },
+ "t6_allowed": true,
+ "warnings": []
+}

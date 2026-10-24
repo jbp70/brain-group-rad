@@ -38,6 +38,7 @@ import numpy as np
 import tensorflow as tf
 
 from data_loading import params as P
+from models import checkpointing
 from models import diffeo
 from models import layers as L
 from models import transforms as tfm
@@ -48,7 +49,7 @@ DEFORM_TASK = "deform"
 ALL_TASKS = TASKS + (DEFORM_TASK,)
 ENCODER_LAYERS = ("stem", "l2", "l3", "l4", "l5", "l6")
 DECODER_STAGES = ("d5", "d4", "d3", "d2", "d1")
-GRADIENT_CHECKPOINTING = ("none", "integrator", "decoder", "both")
+GRADIENT_CHECKPOINTING = ("none", "integrator", "decoder", "both", "full")
 BOTTLENECK_SHAPE = (5, 7, 6)
 
 
@@ -252,17 +253,29 @@ class GroupRegLevelModel(tf.keras.Model):
     in central space (A = I). The linear decoder does not run for 'deform' (its variables get
     no gradient), and the deform decoder does not run for the linear tasks.
 
-    gradient_checkpointing ('none' | 'integrator' | 'decoder' | 'both'; a Python attribute read
-    at call time, not part of ModelConfig) wraps `diffeo.exp_and_inverse` and/or the deform
-    decoder in tf.recompute_grad. Recomputing the decoder in training mode runs its BatchNorm
-    layers twice per step, so their moving statistics are updated twice (gradients unaffected).
+    gradient_checkpointing ('none' | 'integrator' | 'decoder' | 'both' | 'full'; a Python
+    attribute read at call time, not part of ModelConfig) wraps `diffeo.exp_and_inverse` and/or
+    the deform decoder in tf.recompute_grad. Recomputing the decoder in training mode runs its
+    BatchNorm layers twice per step, so with 'decoder' / 'both' their moving statistics are
+    updated twice (gradients unaffected; kept so the m8 recipe reproduces). 'full' (milestone 9,
+    design 3.2; deform task only, linear calls unchanged) recomputes the encoder (returning the 6
+    skips), the deform decoder and the integrator as two blocks exp(v) / exp(-v), with
+    `models.checkpointing.recompute`: every BN moving statistic is updated exactly once per step,
+    from the forward pass. It takes the recompute path only once the encoder and the deform
+    decoder are built (the build pass runs directly).
+
+    lean_sampler (Python attribute, default False; milestone 9 design 3.3): the integrator uses
+    the lean trilinear sampler (`models.layers.sample_voxel_coords(lean=True)`) in every
+    checkpointing mode. split_group_conv (default False; design 3.5): `layers.set_split_group_conv`
+    on every pre-activation group block (same variables). Neither is part of ModelConfig.
 
     Hooks: the linear cascade (design 4.7, milestone 8) warps the inputs by the previous level's
     A^-1 and composes Center(R A_prev) outside this single-level model; the deformable cascade
     composes fields with `models.diffeo.compose_cascade`.
     """
 
-    def __init__(self, level, config=None, gradient_checkpointing="none", **kwargs):
+    def __init__(self, level, config=None, gradient_checkpointing="none", lean_sampler=False,
+                 split_group_conv=False, **kwargs):
         super().__init__(**kwargs)
         self.level = P.check_level(level)
         self.config = config or ModelConfig()
@@ -270,6 +283,8 @@ class GroupRegLevelModel(tf.keras.Model):
             raise ValueError("gradient_checkpointing must be one of {}, got {!r}".format(
                 GRADIENT_CHECKPOINTING, gradient_checkpointing))
         self.gradient_checkpointing = gradient_checkpointing
+        self.lean_sampler = bool(lean_sampler)
+        self.split_group_conv = bool(split_group_conv)
         self.input_shape_level = tuple(P.LEVEL_SHAPE[self.level])
         self.spacing = P.LEVEL_SPACING[self.level]
         self.encoder = GroupEncoder(self.level, self.config, name="encoder")
@@ -277,6 +292,8 @@ class GroupRegLevelModel(tf.keras.Model):
         self.centering = tfm.GroupCentering(iters=self.config.centering_iters, name="centering")
         self.deform_decoder = (DeformDecoder(self.level, self.config, name="deform_decoder")
                                if self.config.deform_decoder else None)
+        if self.split_group_conv:
+            L.set_split_group_conv(self, True)
 
     def call(self, images, task="rigid", training=None, return_warped=False):
         if task == DEFORM_TASK:
@@ -297,8 +314,12 @@ class GroupRegLevelModel(tf.keras.Model):
             raise ValueError("gradient_checkpointing must be one of {}, got {!r}".format(
                 GRADIENT_CHECKPOINTING, mode))
         x = tf.cast(images, self.compute_dtype)
-        bottleneck, skips = self.encoder(x, training=training)
-        decoder = self.deform_decoder
+        encoder, decoder = self.encoder, self.deform_decoder
+        steps = self.config.integration_steps
+        lean = self.lean_sampler
+        if mode == "full" and encoder.built and decoder.built:
+            return self._call_deform_full(images, x, training, return_warped)
+        bottleneck, skips = encoder(x, training=training)
         # Variables must exist before tf.recompute_grad (first call runs the decoder directly).
         if mode in ("decoder", "both") and decoder.built:
             def run_decoder(*s):
@@ -307,13 +328,42 @@ class GroupRegLevelModel(tf.keras.Model):
         else:
             v_raw, dec_feat = decoder(skips, training=training)
         v = diffeo.center_velocities(v_raw)
-        steps = self.config.integration_steps
         if mode in ("integrator", "both"):
             def run_integrator(vel):
-                return diffeo.exp_and_inverse(vel, steps)
+                return diffeo.exp_and_inverse(vel, steps, lean=lean)
             u, u_inv = tf.recompute_grad(run_integrator)(v)
         else:
-            u, u_inv = diffeo.exp_and_inverse(v, steps)
+            u, u_inv = diffeo.exp_and_inverse(v, steps, lean=lean)
+        return self._deform_outputs(images, v_raw, v, u, u_inv, dec_feat, bottleneck, skips,
+                                    return_warped)
+
+    def _call_deform_full(self, images, x, training, return_warped):
+        """'full' (design 3.2): recomputed encoder (6 skips), recomputed decoder (both with the BN
+        statistics updated once), then exp(v) and exp(-v) as two separate recompute blocks."""
+        encoder, decoder = self.encoder, self.deform_decoder
+        steps = self.config.integration_steps
+        lean = self.lean_sampler
+        enc_bn = L.batch_norm_layers(encoder)
+        dec_bn = L.batch_norm_layers(decoder)
+
+        def run_encoder(inp):
+            return encoder(inp, training=training)[1]
+
+        def run_decoder(*s):
+            return decoder(list(s), training=training)
+
+        def run_integrator(vel):
+            return diffeo.integrate_svf(vel, steps, lean=lean)
+
+        skips = list(checkpointing.recompute(run_encoder, enc_bn, training)(x))
+        v_raw, dec_feat = checkpointing.recompute(run_decoder, dec_bn, training)(*skips)
+        v = diffeo.center_velocities(v_raw)
+        u = tf.recompute_grad(run_integrator)(v)
+        u_inv = tf.recompute_grad(run_integrator)(-v)
+        return self._deform_outputs(images, v_raw, v, u, u_inv, dec_feat, skips[5], skips,
+                                    return_warped)
+
+    def _deform_outputs(self, images, v_raw, v, u, u_inv, dec_feat, bottleneck, skips, return_warped):
         out = {"v_raw": v_raw, "v": v, "u": u, "u_inv": u_inv, "dec_feat": dec_feat,
                "bottleneck": bottleneck, "skips": skips}
         if return_warped:

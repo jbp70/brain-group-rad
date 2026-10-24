@@ -1,0 +1,123 @@
+{
+ "version": 1,
+ "coefficients": {
+  "c_net": 0.9989882666770555,
+  "c_enc32": 1.0641910032682085,
+  "c_enc16": 0.7488069156980376,
+  "c_loss": 0.5305942804042407,
+  "c_rec": 0.9124342830981996,
+  "c_warp": 1.1970918307449887,
+  "c_bwd": 2.6941550773123226,
+  "c0_cluster": 0.1031919686906933,
+  "c0_gtx1080": 0.09042579952845844
+ },
+ "initial": {
+  "c_net": 1.0,
+  "c_enc32": 1.0,
+  "c_enc16": 1.0,
+  "c_loss": 1.0,
+  "c_rec": 1.0,
+  "c_warp": 1.0,
+  "c_bwd": 2.0,
+  "c0_cluster": 0.3,
+  "c0_gtx1080": 0.1
+ },
+ "bounds": {
+  "c_net": [
+   0.6,
+   2.0
+  ],
+  "c_enc32": [
+   0.6,
+   1.6
+  ],
+  "c_enc16": [
+   0.6,
+   1.6
+  ],
+  "c_loss": [
+   0.0,
+   1.0
+  ],
+  "c_rec": [
+   0.5,
+   2.0
+  ],
+  "c_warp": [
+   0.6,
+   2.0
+  ],
+  "c_bwd": [
+   0.0,
+   4.0
+  ],
+  "c0_cluster": [
+   0.0,
+   2.0
+  ],
+  "c0_gtx1080": [
+   0.0,
+   1.0
+  ]
+ },
+ "at_bound": [],
+ "fit_tolerance": 0.15,
+ "n_ok": 45,
+ "n_oom": 7,
+ "err_range": [
+  -0.03662516877357603,
+  0.02094814614189554
+ ],
+ "prefit_err_range": [
+  -0.09491930248132686,
+  0.13716831116471428
+ ],
+ "leave_one_mode_out": {
+  "fp32_none": {
+   "l2_deform_fp32_none_n2": -0.001696486855201734,
+   "l2_deform_fp32_none_n3": 0.009485618776439253,
+   "l2_deform_fp32_none_n4": 0.004229183597609803
+  },
+  "fp32_integrator": {
+   "l2_deform_fp32_integrator_n2": 0.019487783406939973,
+   "l2_deform_fp32_integrator_n4": 0.016167545983808686,
+   "l2_deform_fp32_integrator_n6": 0.02624013029266199
+  },
+  "fp32_both": {
+   "l2_deform_fp32_both_n2": 0.01994841604237554,
+   "l2_deform_fp32_both_n3": 0.025449837338614233,
+   "l2_deform_fp32_both_n4": 0.015386338954201141,
+   "l2_deform_fp32_both_n6": 0.025343645633347484
+  },
+  "amp_none": {
+   "l2_deform_amp_none_n2": -0.00670994807525248,
+   "l2_deform_amp_none_n4": -0.028438935058498167,
+   "l2_deform_amp_none_n6": 0.006110853350392311
+  },
+  "amp_integrator": {
+   "l2_deform_amp_integrator_n2": -0.027575975779515382,
+   "l2_deform_amp_integrator_n4": -0.010630129102225511,
+   "l2_deform_amp_integrator_n6": -0.007845299826489181,
+   "l2_deform_amp_integrator_n8": -0.00885486024414272
+  },
+  "amp_both": {
+   "l2_deform_amp_both_n2": -0.06482654444705989,
+   "l2_deform_amp_both_n4": -0.05687974394437788,
+   "l2_deform_amp_both_n6": -0.054030890933982195,
+   "l2_deform_amp_both_n8": -0.04574969290653991
+  }
+ },
+ "holdout": {
+  "evaluated": true,
+  "passed": true,
+  "one_sided": true,
+  "max_under_err": 0.12979874995223611,
+  "max_abs_err": 0.520215568915409,
+  "n_over": 18,
+  "symmetric_passed": false,
+  "margin": 0.15
+ },
+ "warmup_excess_gib": 0.207462890625,
+ "failures": [],
+ "calibration": "models/memory_calibration.json"
+}

@@ -35,6 +35,12 @@ Pattern from the rigid project's ``runtime/args.py`` (argparse + ``str2bool``). 
 * level cascade (milestone 8, `.agents/tasks/milestone-8/design.md` §10): --cascade-from None
   (off), --cascade-skip-prob 0, --bn-recal-batches 0 (off), --bn-recal-freeze true,
   --val-pair-chunk 16. With these defaults every run is unchanged (level-4 runs bit-identical).
+* memory knobs (milestone 9, `.agents/tasks/milestone-9/design-m9-phase1.md` §3): --lean-sampler
+  false, --lean-losses false, --split-group-conv false, --gradient-checkpointing none ('full'
+  added). None is a ModelConfig field; with the defaults levels 4 and 2 are bit-identical.
+  'full' and the two lean flags need 'deform' in --task-ratio. --filters (6 entries),
+  --reductions and --dense (>= 1 entries) must be >= 1; `models.width_presets` has named width
+  presets that expand to --filters / --decoder-widths.
 """
 import argparse
 import collections
@@ -252,8 +258,21 @@ def build_parser():
                    help="small random residual affine in the deformable pipeline (images linear, "
                    "labels nearest, same matrix)")
     g.add_argument("--deform-group-size", type=int, default=None, help="deform group size (default --group-size)")
-    g.add_argument("--gradient-checkpointing", default="none", choices=["none", "integrator", "decoder", "both"],
-                   help="tf.recompute_grad around the SVF integrator and/or the deform decoder (memory)")
+    g.add_argument("--gradient-checkpointing", default="none",
+                   choices=["none", "integrator", "decoder", "both", "full"],
+                   help="tf.recompute_grad around the SVF integrator and/or the deform decoder (memory). "
+                   "'full' (milestone 9): encoder, deform decoder and the two integrator blocks "
+                   "exp(v) / exp(-v), with the BN moving statistics updated exactly once per step "
+                   "(decoder / both update the decoder's statistics twice); deform task only")
+    g.add_argument("--lean-sampler", type=str2bool, default=False,
+                   help="memory knob (milestone 9): custom-gradient trilinear sampler that keeps no "
+                   "corner tensors under the tape (same forward values); deform task only")
+    g.add_argument("--lean-losses", type=str2bool, default=False,
+                   help="memory knob (milestone 9): Dice without materialised slices / broadcast and "
+                   "LNCC under tf.recompute_grad; deform task only")
+    g.add_argument("--split-group-conv", type=str2bool, default=False,
+                   help="memory knob (milestone 9): group blocks compute conv(x) + conv(group mean) "
+                   "instead of conv(concat(x, mean)); same variables and checkpoints")
     g.add_argument("--overfit-dice-threshold", type=float, default=0.9,
                    help="overfit stop for deform: window mean soft template Dice >= this ...")
     g.add_argument("--overfit-fold-max", type=float, default=0.001,
@@ -411,6 +430,17 @@ def parse_args(argv=None):
         parser.error("--deform-group-size must be >= 2 (pairwise loss), got %d" % args.deform_group_size)
     if deform and args.deform_decoder == "false":
         parser.error("'deform' in --task-ratio needs the deform decoder (--deform-decoder auto or true)")
+    if not deform:
+        if args.gradient_checkpointing == "full":
+            parser.error("--gradient-checkpointing full needs 'deform' in --task-ratio")
+        for flag in ("lean_sampler", "lean_losses"):
+            if getattr(args, flag):
+                parser.error("--%s needs 'deform' in --task-ratio" % flag.replace("_", "-"))
+    if len(args.filters) != 6 or any(w < 1 for w in args.filters):
+        parser.error("--filters needs 6 values >= 1 (stem, L2..L6), got %r" % (args.filters,))
+    for flag, vals in (("--reductions", args.reductions), ("--dense", args.dense)):
+        if not vals or any(w < 1 for w in vals):
+            parser.error("%s needs at least one value, all >= 1, got %r" % (flag, vals))
     if args.decoder_widths is not None and (len(args.decoder_widths) != 5
                                             or any(w < 1 for w in args.decoder_widths)):
         parser.error("--decoder-widths needs 5 positive values (D5..D1), got %r" % (args.decoder_widths,))
@@ -615,7 +645,8 @@ def train_config_from_args(args):
                        overfit_dice_threshold=args.overfit_dice_threshold,
                        overfit_fold_max=args.overfit_fold_max,
                        val_deform_max_pairs=args.val_deform_max_pairs,
-                       cascade_skip_prob=args.cascade_skip_prob, val_pair_chunk=args.val_pair_chunk)
+                       cascade_skip_prob=args.cascade_skip_prob, val_pair_chunk=args.val_pair_chunk,
+                       lean_sampler=bool(args.lean_sampler), lean_losses=bool(args.lean_losses))
 
 
 def args_to_dict(args):

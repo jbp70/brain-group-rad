@@ -149,6 +149,48 @@ class TestDeformMain(MainCase):
                   "val_deform/ncc_template", "val_deform/ncc_pair", "val_deform/ncc_template_identity"):
             self.assertTrue(any(k in r["data"] for r in lines[1:]), k)
 
+    def test_memory_knobs_dry_run(self):
+        # Milestone 9 (design 3.8): every memory knob on, through main.py (Dice + LNCC); the
+        # knobs land in config.json args, not in model_config.
+        rc = M.main(["--overfit-one-group", "--overfit-synthetic", "--dry-run", "--group-size", "4",
+                     "--task-ratio", "rigid:1,deform:1", "--results", os.path.join(self.tmp, "results"),
+                     "--run-name", "dknobs", "--gradient-checkpointing", "full", "--lean-sampler", "true",
+                     "--lean-losses", "true", "--split-group-conv", "true", "--lambda-ncc-template", "1",
+                     "--lambda-ncc-pair", "1", "--val-png", "false"] + NARROW_ARGS + COMMON)
+        self.assertEqual(rc, 0)
+        with open(os.path.join(self.run_dir("dknobs"), "config.json")) as f:
+            cfg = json.load(f)
+        self.assertEqual((cfg["args"]["gradient_checkpointing"], cfg["args"]["lean_sampler"],
+                          cfg["args"]["lean_losses"], cfg["args"]["split_group_conv"]), ("full", True, True, True))
+        for k in ("lean_sampler", "lean_losses", "split_group_conv", "gradient_checkpointing"):
+            self.assertNotIn(k, cfg["model_config"])
+        lines = self.read_metrics("dknobs")
+        self.assertTrue(any("train_deform/ncc_pair" in r["data"] for r in lines[1:]))
+
+    def test_build_n(self):
+        from runtime import args as A
+        base = ["--data", "x", "--task-ratio", "rigid:1,deform:1", "--group-size", "16", "--deform-group-size", "8"]
+        self.assertEqual(M._build_n(A.parse_args(base)), 8)                     # today's rule
+        self.assertEqual(M._build_n(A.parse_args(base + ["--split-group-conv", "true"])), 2)
+        self.assertEqual(M._build_n(A.parse_args(["--data", "x", "--group-size", "16"])), 16)
+        self.assertEqual(M._build_n(A.parse_args(["--data", "x", "--group-size", "16",
+                                                  "--split-group-conv", "true"])), 2)
+        self.assertEqual(M._build_n(A.parse_args(["--data", "x", "--level", "1", "--split-group-conv", "true"])), 2)
+
+    def test_trainer_lean_mismatch(self):
+        from tests.runtime_helpers import narrow_config, synthetic_group
+        from models.group_net import GroupRegLevelModel
+        from runtime import fixed_data as fd
+        from runtime import optimizers as O
+        from runtime.run import Trainer, TrainConfig
+        g = synthetic_group(4, 4, "rigid")
+        for model_lean, cfg_lean in ((False, True), (True, False)):
+            model = GroupRegLevelModel(4, narrow_config(deform_decoder=True), lean_sampler=model_lean).build_model(2)
+            with self.assertRaises(ValueError) as cm:
+                Trainer(model, O.make_optimizer("adam", lr=1e-3), {"rigid": fd.FixedGroupSource(g["batch"])},
+                        g["S"], TrainConfig(group_size=4, lean_sampler=cfg_lean))
+            self.assertIn("lean_sampler: model %s vs TrainConfig %s" % (model_lean, cfg_lean), str(cm.exception))
+
     def test_deform_real_data_overfit_path(self):
         root = write_fake_export(self.tmp, n_train=5, n_val=2, labels=True)
         rc = M.main(["--overfit-one-group", "--data", root, "--group-size", "4", "--task-ratio", "deform:1",

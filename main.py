@@ -59,6 +59,20 @@ DALI_MISSING_MSG = ("main.py: nvidia.dali is not importable ({err}). The DALI tr
                     "no DALI needed).")
 
 
+def _build_n(args):
+    """Group size of the build pass (`GroupRegLevelModel.build_model`). The variables do not
+    depend on N; with deform the build pass (rigid + deform forward) uses the smaller of the two
+    group sizes, so a large linear N does not size the deform forward. With --split-group-conv the
+    build forward is the unsplit path (the variables are created there), so it runs at
+    min(n_build, 2) to keep its group concat small (milestone 9 design 2.4, 3.5)."""
+    n_build = args.group_size
+    if A.DEFORM_TASK in args.task_ratio_parsed:
+        n_build = min(n_build, args.deform_group_size)
+    if getattr(args, "split_group_conv", False):
+        n_build = min(n_build, 2)
+    return n_build
+
+
 def _build_overfit_data(args, level, tf_mods):
     """One fixed group per trained task (same real or synthetic images), rendered TF-side.
 
@@ -230,13 +244,9 @@ def main(argv=None):
         sources, val_sets, S, data_desc, controls = _build_dali_data(args, level, tf_mods, start_step)
 
     model_cfg = A.model_config_from_args(args)
-    # The variables do not depend on N; with deform the build pass (rigid + deform forward) uses
-    # the smaller of the two group sizes, so a large linear N does not size the deform forward.
-    n_build = args.group_size
-    if A.DEFORM_TASK in args.task_ratio_parsed:
-        n_build = min(n_build, args.deform_group_size)
-    model = GroupRegLevelModel(level, model_cfg, gradient_checkpointing=args.gradient_checkpointing
-                               ).build_model(n_build)
+    model = GroupRegLevelModel(level, model_cfg, gradient_checkpointing=args.gradient_checkpointing,
+                               lean_sampler=args.lean_sampler, split_group_conv=args.split_group_conv
+                               ).build_model(_build_n(args))
     counts = model.count_params_by_part()
     init_info = None
     if args.init_weights:

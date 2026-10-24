@@ -106,7 +106,8 @@ def transform_image(images, matrices, spacing, displacement=None, interpolation=
 BOUNDARIES = ("zero", "border")
 
 
-def sample_voxel_coords(images, coords, interpolation="linear", fill_value=0.0, boundary="zero"):
+def sample_voxel_coords(images, coords, interpolation="linear", fill_value=0.0, boundary="zero",
+                        lean=False, lean_images_grad=True):
     """Sample images at per-voxel input coordinates (the shared core of every pull warp).
 
     out_i[y] = images_i(coords_i[y]) for every output voxel y.
@@ -123,6 +124,13 @@ def sample_voxel_coords(images, coords, interpolation="linear", fill_value=0.0, 
         "border" = coordinates clipped to [0, n - 1] per axis before interpolation (edge
         replication; a constant volume stays exactly constant). Used for displacement fields.
 
+      lean: (milestone 9 design 3.3, linear mode only; ignored for "nearest", which has no
+        gradient) use `_sample_linear_lean`: the same forward values (bitwise), but no corner
+        tensor is kept for the backward, which recomputes the corner math one corner at a time.
+        False (default) runs the code below unchanged.
+      lean_images_grad: with ``lean``, False returns no gradient for ``images`` (data volumes:
+        one-hots, images) and builds no input-gradient op; ignored without ``lean``.
+
     Output dtype: floating inputs keep their dtype (blending in the coords dtype); integer and
     bool inputs come back in their dtype in nearest mode. See `transform_image` for memory.
     """
@@ -137,6 +145,8 @@ def sample_voxel_coords(images, coords, interpolation="linear", fill_value=0.0, 
     cdt = coords.dtype
     if cdt not in (tf.float32, tf.float64):
         raise ValueError("coords must be float32 or float64, got {}".format(cdt))
+    if lean and interpolation == "linear":
+        return _sample_linear_lean(images, coords, fill_value, boundary, lean_images_grad)
     border = boundary == "border"
     if border:
         upper = tf.constant([float(n - 1) for n in spatial], cdt)
@@ -203,6 +213,176 @@ def sample_voxel_coords(images, coords, interpolation="linear", fill_value=0.0, 
     if in_dtype.is_floating:
         out = tf.cast(out, in_dtype)
     return out
+
+
+# ============================================================================ lean sampler
+# Milestone 9 design 3.3 (`.agents/tasks/milestone-9/design-m9-phase1.md`). The lean sampler
+# computes its corner indices in int64, which TF keeps on the GPU: int32 elementwise kernels are
+# registered with host memory on GPU, so the default path's int32 index tensors live on the host
+# (design U4). int32 would also be correct here (N * V1 <= 5.5e7 < 2^31 rows); int64 was chosen
+# so the index math stays on the device, next to the gathers. This GPU-resident int64 transient
+# (168 B per output voxel and image in the forward) is modelled explicitly (design 2.1, phase
+# Fw); pinning int32 indices to the GPU is a listed Fw remedy next to forward corner sequencing.
+
+# Tests only: False drops the dy-dependent zero added to the backward's coordinates, so the
+# graph-mode memory test can report whether Grappler's dedup merges the recomputed corner math
+# with the forward (design U18). Never change it in training code.
+_DY_DEP = True
+
+
+def _lean_setup(images, coords, boundary):
+    """Shared static values: (spatial, cdt, border, channels, flat [N*V, C] in cdt, base int64
+    [N, 1, 1, 1], strides, upper or None)."""
+    spatial = _static_spatial_shape(images)
+    cdt = coords.dtype
+    border = boundary == "border"
+    channels = images.shape[-1] if images.shape[-1] is not None else tf.shape(images)[-1]
+    flat = tf.reshape(tf.cast(images, cdt), [-1, channels])
+    sx = spatial[1] * spatial[2]
+    vox = spatial[0] * sx
+    n_img = tf.cast(tf.shape(images)[0], tf.int64)
+    base = tf.reshape(tf.range(n_img, dtype=tf.int64) * vox, [-1, 1, 1, 1])
+    upper = tf.constant([float(n - 1) for n in spatial], cdt) if border else None
+    return spatial, cdt, border, channels, flat, base, (sx, spatial[2], 1), upper
+
+
+def _lean_linear_forward(images, coords, fill_value, boundary):
+    """Today's trilinear forward (same float ops in the same order, so bitwise the same values)
+    with int64 index math."""
+    spatial, cdt, border, channels, flat, base, strides, upper = _lean_setup(images, coords, boundary)
+    in_dtype = images.dtype
+    if border:
+        coords = tf.clip_by_value(coords, tf.zeros_like(upper), upper)
+    fill = tf.cast(fill_value, cdt)
+    lo = tf.floor(tf.clip_by_value(coords, -2.0, max(spatial) + 1.0))
+    frac = coords - lo
+    lo_i = tf.cast(lo, tf.int64)
+    corners = []
+    for a in range(3):
+        i0 = lo_i[..., a]
+        i1 = i0 + 1
+        f = frac[..., a]
+        if border:
+            w0, w1 = 1.0 - f, f
+        else:
+            v0 = tf.cast(tf.logical_and(i0 >= 0, i0 <= spatial[a] - 1), cdt)
+            v1 = tf.cast(tf.logical_and(i1 >= 0, i1 <= spatial[a] - 1), cdt)
+            w0, w1 = (1.0 - f) * v0, f * v1
+        corners.append(((tf.clip_by_value(i0, 0, spatial[a] - 1) * strides[a], w0),
+                        (tf.clip_by_value(i1, 0, spatial[a] - 1) * strides[a], w1)))
+    out = None
+    wsum = None
+    for ox, wx in corners[0]:
+        for oy, wy in corners[1]:
+            wxy = wx * wy
+            oxy = base + ox + oy
+            for oz, wz in corners[2]:
+                w = wxy * wz
+                term = w[..., None] * tf.gather(flat, oxy + oz)
+                out = term if out is None else out + term
+                wsum = w if wsum is None else wsum + w
+    if fill_value != 0 and not border:
+        out = out + fill * (1.0 - wsum)[..., None]
+    if in_dtype.is_floating:
+        out = tf.cast(out, in_dtype)
+    return out
+
+
+def _lean_axis_terms(coords, spatial):
+    """lo (int64) and frac per output voxel, [N, X', Y', Z', 3]; nothing per corner yet."""
+    lo = tf.floor(tf.clip_by_value(coords, -2.0, max(spatial) + 1.0))
+    return tf.cast(lo, tf.int64), coords - lo
+
+
+def _lean_corner(lo_i, frac, k, spatial, strides, base, border, cdt):
+    """Corner k (bits x, y, z = k // 4 % 2, k // 2 % 2, k % 2, the forward's loop order): flat
+    int64 index, weight w_k = (w_x w_y) w_z and the three partials d w_k / d frac_a."""
+    bits = ((k >> 2) & 1, (k >> 1) & 1, k & 1)
+    idx = base
+    ws, dws = [], []
+    for a in range(3):
+        i = lo_i[..., a] + 1 if bits[a] else lo_i[..., a]
+        f = frac[..., a]
+        if border:
+            ws.append(f if bits[a] else 1.0 - f)
+            dws.append(1.0 if bits[a] else -1.0)
+        else:
+            v = tf.cast(tf.logical_and(i >= 0, i <= spatial[a] - 1), cdt)
+            ws.append(f * v if bits[a] else (1.0 - f) * v)
+            dws.append(v if bits[a] else -v)
+        idx = idx + tf.clip_by_value(i, 0, spatial[a] - 1) * strides[a]
+    w = ws[0] * ws[1] * ws[2]
+    partials = [dws[0] * (ws[1] * ws[2]), ws[0] * dws[1] * ws[2], (ws[0] * ws[1]) * dws[2]]
+    return idx, w, partials
+
+
+def _lean_linear_backward(images, coords, dy, fill_value, boundary, images_grad):
+    """Backward of `_sample_linear_lean`: (d images or None, d coords).
+
+    Recomputes the corner math from ``coords + dep(dy)`` (dep is always 0, a data dependency
+    only, as TF 2.10's tf.recompute_grad does for its block inputs) so Grappler cannot merge it
+    with the forward ops, and accumulates the 8 corners sequentially: every op of corner k is
+    created under a control dependency on the accumulators of corner k - 1 (d coords, plus
+    d flat when ``images_grad``), so at most one corner's temporaries are alive (design 3.3).
+    """
+    spatial, cdt, border, channels, flat, base, strides, upper = _lean_setup(images, coords, boundary)
+    dy = tf.cast(dy, cdt)
+    coords_b = coords
+    if _DY_DEP:
+        elem = tf.reduce_max(tf.reshape(dy, [-1])[:1])
+        elem_ok = tf.cast(elem, tf.bool)
+        dep = tf.where(tf.equal(elem_ok, elem_ok), 0.0, float("nan"))   # always 0
+        coords_b = coords + tf.cast(dep, cdt)
+    c = tf.clip_by_value(coords_b, tf.zeros_like(upper), upper) if border else coords_b
+    lo_i, frac = _lean_axis_terms(c, spatial)
+    # Fill value (zero mode): out += fill (1 - sum_k w_k), so d out / d f = sum_k (g_k - fill) dw_k.
+    fill_dy = None
+    if fill_value != 0 and not border:
+        fill_dy = tf.cast(fill_value, cdt) * tf.reduce_sum(dy, axis=-1)
+    n_rows = tf.shape(flat)[0]
+    d_coords, d_flat = None, None
+    for k in range(8):
+        accs = []
+        if d_coords is not None:
+            accs = [d_coords] if d_flat is None else [d_coords, d_flat]
+        with tf.control_dependencies(accs):     # corner k starts after corner k-1 is accumulated
+            idx, w, partials = _lean_corner(lo_i, frac, k, spatial, strides, base, border, cdt)
+            g = tf.gather(flat, idx)                                    # [N, X', Y', Z', C]
+            s = tf.reduce_sum(dy * g, axis=-1)
+            if fill_dy is not None:
+                s = s - fill_dy
+            d_k = tf.stack([s * p for p in partials], axis=-1)
+            d_coords = d_k if d_coords is None else d_coords + d_k
+            if images_grad:
+                seg = tf.math.unsorted_segment_sum(tf.reshape(dy * w[..., None], [-1, channels]),
+                                                   tf.reshape(idx, [-1]), n_rows)
+                d_flat = seg if d_flat is None else d_flat + seg
+    if border:
+        # As TF's clip_by_value gradient: zero outside [0, n - 1], passed at equality.
+        inside = tf.logical_and(coords_b >= 0.0, coords_b <= upper)
+        d_coords = tf.where(inside, d_coords, tf.zeros_like(d_coords))
+    d_images = None
+    if images_grad:
+        d_images = tf.cast(tf.reshape(d_flat, tf.shape(images)), images.dtype)
+    return d_images, d_coords
+
+
+def _sample_linear_lean(images, coords, fill_value=0.0, boundary="zero", images_grad=True):
+    """Trilinear `sample_voxel_coords` (linear mode) as a tf.custom_gradient function that
+    captures only ``images`` and ``coords``: no corner tensor outlives the forward. The backward
+    is `_lean_linear_backward`. ``images_grad`` False (or non-float images): no images gradient."""
+    images_grad = bool(images_grad) and images.dtype.is_floating
+
+    @tf.custom_gradient
+    def lean(img, crd):
+        out = _lean_linear_forward(img, crd, fill_value, boundary)
+
+        def grad(dy):
+            return _lean_linear_backward(img, crd, dy, fill_value, boundary, images_grad)
+
+        return out, grad
+
+    return lean(images, coords)
 
 
 # ============================================================================ trilinear x2
@@ -376,6 +556,31 @@ def set_bn_stats_frozen(layer, frozen=True):
     return count
 
 
+def batch_norm_layers(layer):
+    """Unique `BatchNormWithSeparateAffine` layers inside `layer` (a layer or a list of layers;
+    stable order). Used by the BN recalibration and by `models.checkpointing.recompute`."""
+    parts = layer if isinstance(layer, (list, tuple)) else [layer]
+    out, seen = [], set()
+    for part in parts:
+        for m in [part] + list(part.submodules):
+            if isinstance(m, BatchNormWithSeparateAffine) and id(m) not in seen:
+                seen.add(id(m))
+                out.append(m)
+    return out
+
+
+def set_split_group_conv(layer, on=True):
+    """Set `split_group` on every `GroupConvBlock` inside `layer` with ``group=True`` and
+    ``pre_activation=True`` (milestone 9 design 3.5; the stem, whose concat has 2 channels, is
+    excluded). Read at trace time: re-trace tf.functions after changing it. Returns the count."""
+    count = 0
+    for m in [layer] + list(layer.submodules):
+        if isinstance(m, GroupConvBlock) and m.group and m.pre_activation:
+            m.split_group = bool(on)
+            count += 1
+    return count
+
+
 def group_mean_concat(x):
     """concat(x_i, mean_j x_j) on the last axis; mean over the group (batch) axis 0, N dynamic."""
     mean = tf.reduce_mean(x, axis=0, keepdims=True)
@@ -393,12 +598,12 @@ class _PreActivation(tf.keras.layers.Layer):
         self.act = (tf.keras.layers.ReLU(negative_slope=self.negative_slope, name="act")
                     if self.pre_activation else None)
 
-    def _pre(self, x, training):
+    def _pre(self, x, training, concat=True):
         if self.norm is not None:
             x = self.norm(x, training=training)
         if self.act is not None:
             x = self.act(x)
-        if self.group:
+        if self.group and concat:
             x = group_mean_concat(x)
         return x
 
@@ -419,6 +624,12 @@ class GroupConvBlock(_PreActivation):
       norm: 'batch' (BatchNormWithSeparateAffine), 'instance' or 'none'.
       pre_activation: False skips norm and act (the encoder stem: a plain conv on the image).
       negative_slope: LeakyReLU slope (0 = ReLU, the rigid project's default).
+
+    ``split_group`` (Python attribute, default False, read at trace time; set with
+    `set_split_group_conv`; milestone 9 design 3.5): with ``group=True`` and a built conv the
+    block computes conv(x, K[..., :C, :]) + conv(mean, K[..., C:, :]) + bias instead of
+    conv(concat(x, mean)), so the doubled-channel tensor is never built. Same variables (the
+    first call always takes the standard path); equal up to float rounding.
     """
 
     def __init__(self, filters, kernel_size=3, strides=1, group=True, norm="batch",
@@ -426,12 +637,28 @@ class GroupConvBlock(_PreActivation):
                  seed=None, **kwargs):
         super().__init__(**kwargs)
         self._init_pre(norm, negative_slope, bn_momentum, bn_epsilon, group, pre_activation)
+        self.strides = int(strides)
+        self.split_group = False
         self.conv = tf.keras.layers.Conv3D(
             filters, kernel_size, strides=strides, padding="same", use_bias=True,
             kernel_initializer=KaimingNormal(negative_slope, seed), name="conv")
 
     def call(self, x, training=None):
+        if self.split_group and self.group and self.conv.built:
+            return self._split_call(x, training)
         return self.conv(self._pre(x, training))
+
+    def _split_call(self, x, training):
+        """conv(concat(x, mean)) as conv_a(x) + conv_b(mean): compute dtype, the layer's strides,
+        'SAME' padding, NDHWC."""
+        x = self._pre(x, training, concat=False)
+        channels = int(x.shape[-1])
+        mean = tf.reduce_mean(x, axis=0, keepdims=True)
+        k = tf.cast(self.conv.kernel, x.dtype)
+        strides = [1, self.strides, self.strides, self.strides, 1]
+        y = (tf.nn.conv3d(x, k[..., :channels, :], strides, "SAME")
+             + tf.nn.conv3d(mean, k[..., channels:, :], strides, "SAME"))
+        return tf.nn.bias_add(y, tf.cast(self.conv.bias, x.dtype))
 
     def group_overhead_params(self):
         return self._overhead(self.conv.kernel)

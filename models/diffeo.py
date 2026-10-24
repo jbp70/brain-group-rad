@@ -31,12 +31,17 @@ def _as_field(u, dtype=None):
     return tf.cast(u, dtype or _field_dtype(u))
 
 
-def warp(vol, u, interpolation="linear", boundary="zero", fill_value=0.0):
+def warp(vol, u, interpolation="linear", boundary="zero", fill_value=0.0, lean=False,
+         lean_images_grad=True):
     """Pull warp: out(x) = vol(x + u(x)). vol [N, X, Y, Z, C], u [N, X', Y', Z', 3] (voxels).
 
     The output has u's spatial shape. float16 volumes are warped in float32 and returned as
     float32; other float dtypes are kept; integer labels in nearest mode stay integer.
     ``boundary`` 'zero' (images, one-hots; ``fill_value`` outside) or 'border' (fields).
+    ``lean`` / ``lean_images_grad``: the lean trilinear sampler (milestone 9 design 3.3; same
+    forward values, no corner tensors kept for the backward; False = today's sampler) and, with
+    it, whether ``vol`` gets a gradient (False for data volumes). The other functions of this
+    module pass ``lean`` through (default False everywhere).
     """
     vol = tf.convert_to_tensor(vol)
     if vol.dtype == tf.float16:
@@ -46,28 +51,31 @@ def warp(vol, u, interpolation="linear", boundary="zero", fill_value=0.0):
     if u.shape.rank != 5 or u.shape[-1] != 3 or any(v is None for v in spatial):
         raise ValueError("u must be [N, X, Y, Z, 3] with static spatial dims, got {}".format(u.shape))
     coords = L.index_grid(spatial, u.dtype)[None] + u
+    if lean:
+        return L.sample_voxel_coords(vol, coords, interpolation=interpolation, fill_value=fill_value,
+                                     boundary=boundary, lean=True, lean_images_grad=lean_images_grad)
     return L.sample_voxel_coords(vol, coords, interpolation=interpolation, fill_value=fill_value,
                                  boundary=boundary)
 
 
-def warp_field(field, u):
+def warp_field(field, u, lean=False):
     """Resample a field (any channel count) at x + u(x) with border clamping."""
     field = tf.convert_to_tensor(field)
     u = tf.convert_to_tensor(u)
     dt = _field_dtype(field, u)
-    return warp(tf.cast(field, dt), tf.cast(u, dt), boundary="border")
+    return warp(tf.cast(field, dt), tf.cast(u, dt), boundary="border", lean=lean)
 
 
-def compose(u_a, u_b):
+def compose(u_a, u_b, lean=False):
     """Displacement of phi_a o phi_b (phi_b applied first): u_b + u_a(x + u_b(x))."""
     u_a = tf.convert_to_tensor(u_a)
     u_b = tf.convert_to_tensor(u_b)
     dt = _field_dtype(u_a, u_b)
     u_a, u_b = tf.cast(u_a, dt), tf.cast(u_b, dt)
-    return u_b + warp_field(u_a, u_b)
+    return u_b + warp_field(u_a, u_b, lean=lean)
 
 
-def integrate_svf(v, steps=7):
+def integrate_svf(v, steps=7, lean=False):
     """exp(v) by scaling and squaring: u = v / 2^T, then T times u <- compose(u, u)."""
     steps = int(steps)
     if steps < 0:
@@ -77,14 +85,14 @@ def integrate_svf(v, steps=7):
         return v
     u = v / (2.0 ** steps)
     for _ in range(steps):
-        u = compose(u, u)
+        u = compose(u, u, lean=lean)
     return u
 
 
-def exp_and_inverse(v, steps=7):
+def exp_and_inverse(v, steps=7, lean=False):
     """(exp(v), exp(-v)): forward displacement and its exact-by-construction inverse."""
     v = _as_field(v)
-    return integrate_svf(v, steps), integrate_svf(-v, steps)
+    return integrate_svf(v, steps, lean=lean), integrate_svf(-v, steps, lean=lean)
 
 
 def center_velocities(v):
@@ -141,7 +149,7 @@ def folding_fraction(u, mask=None):
     return tf.reduce_sum(fold * m, axis=[1, 2, 3]) / tf.maximum(tf.reduce_sum(m, axis=[1, 2, 3]), 1.0)
 
 
-def pairwise_displacement(u, u_inv, i, j):
+def pairwise_displacement(u, u_inv, i, j, lean=False):
     """Image j coords -> image i coords: compose(u[i], u_inv[j]) -> [P, X, Y, Z, 3].
 
     i, j: scalar indices or index vectors of equal length P (a scalar gives P = 1).
@@ -149,16 +157,16 @@ def pairwise_displacement(u, u_inv, i, j):
     """
     i = tf.reshape(tf.convert_to_tensor(i), [-1])
     j = tf.reshape(tf.convert_to_tensor(j), [-1])
-    return compose(tf.gather(u, i), tf.gather(u_inv, j))
+    return compose(tf.gather(u, i), tf.gather(u_inv, j), lean=lean)
 
 
-def compose_cascade(u_prev_up, u_inv_prev_up, u_new, u_inv_new):
+def compose_cascade(u_prev_up, u_inv_prev_up, u_new, u_inv_new, lean=False):
     """Milestone-8 cascade: (phi_prev o exp(v_new), exp(-v_new) o phi_prev^-1).
 
     ``u_prev_up``/``u_inv_prev_up`` are the previous level's fields already upsampled with
     `upsample_displacement`. Returns (u, u_inv).
     """
-    return compose(u_prev_up, u_new), compose(u_inv_new, u_inv_prev_up)
+    return compose(u_prev_up, u_new, lean=lean), compose(u_inv_new, u_inv_prev_up, lean=lean)
 
 
 def to_mm(u, spacing):
