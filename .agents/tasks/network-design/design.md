@@ -274,7 +274,11 @@ Measured (level-4 grid 40×56×48, smooth random v with max 2 voxels, T = 7, 3-v
 - **Dispatch:** the Trainer branches once, at trace time, on `n_stages` (0 none, 1 `FrozenStage`, 2 `FrozenChain`); single-stage (level-2) runs build today's ops, keys and records.
 - **Validation:** `val_<set>_frozen/...` = levels 4 + 2 composed, `val_<set>_frozen4/...` = level 4 alone (both cached per set), `val/wall_s` logged at level 1 only. `val_deform_frozen/{centrality_mm, raw_centrality_mm}` describe the level-2 residual SVF only.
 - **Resume / provenance:** both frozen stages restored from the run checkpoint and fingerprint-checked per stage; BN recalibration once at the start of a fresh run, never on resume (milestone-8 rules); `slurm/m9_level1_cascade.sh` skips its `CASCADE_FROM` guard on requeue.
-- *Deviation:* the level-1 recipe uses skip probability **0** (as in the milestone-8 runs), not the 0.15 default above. Skip of the last frozen stage (level 2: A_prev = A4, U = U4) is implemented (`--cascade-skip-prob`), so 0.15 can be tried without code changes; to be confirmed with Jay.
+- *Deviation:* the level-1 recipe uses skip probability **0** (as in the milestone-8 runs), not the 0.15 default above. Skip of the last frozen stage (level 2: A_prev = A4, U = U4) is implemented (`--cascade-skip-prob`), so 0.15 can be tried without code changes. *Jay (2026-10-24): keep 0 for now.*
+- **Planned skip schedule (Jay, 2026-10-24; not implemented yet):** set per task head and per frozen stage.
+  - Rigid/affine heads: level-4 stage skip **0.0**, never skipped, because it corrects most of the linear error and must always run; level-2 stage skip **0.15**.
+  - Deformable head: level-4 and level-2 stages skip **0.15** each, since deformation can be learned at any scale.
+  - Needs per-task, per-stage skip probabilities. Today there's a single `--cascade-skip-prob`, which only skips the last frozen stage. Skipping level 4 means A_prev = I, U = 0 for the whole frozen chain. Skipping level 2 alone means A_prev = A4, U = up(u4).
 
 ---
 
