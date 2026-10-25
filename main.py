@@ -40,6 +40,21 @@ into `FrozenStage.from_config`, its fingerprint must match (RuntimeError), the B
 re-applied iff the SAVED ``bn_recalibration.freeze`` is true (the current --bn-recal-* flags are
 ignored), and the three provenance blocks are carried over verbatim.
 
+3-level cascade (milestone 9 phase 2, `.agents/tasks/milestone-9-phase2/design-m9-phase2.md`
+§4.3); the source is a level-2 CASCADE run (its ``model`` + stored ``frozen_stage``)::
+
+    python main.py --data <export_root> --level 1 --cascade-from <m8 level-2 run>/ckpt/best \
+        --task-ratio rigid:1,affine:1,deform:2 --group-size 16 --deform-group-size 4 --amp true \
+        --gradient-checkpointing full --lean-sampler true --split-group-conv true --bn-recal-batches 64
+
+Fresh: `models.cascade.FrozenChain.from_checkpoint` (level-4 weights checked against the source
+config.json ``cascade.fingerprint``; any failure -> SystemExit "main.py: --cascade-from ..."), the
+level-1 model copies the level-2 weights, the ``cascade`` record gains ``S_rel_diff_vs_level2``,
+``skip_stage`` 2 and ``stages`` (level 4 / key ``frozen_stage``, level 2 / key ``model``, with
+fingerprints and origins); run-checkpoint keys ``frozen_stage_4`` / ``frozen_stage_2``. Resume:
+config.json must hold ``cascade.stages`` (RuntimeError), every stage fingerprint is checked
+(`_check_cascade_fingerprints`, RuntimeError naming the level).
+
 Order: parse args (no TF) -> DALI check (unless overfit mode) -> configure_tf_precision() (TF32
 off, memory growth) -> seeds -> mixed_float16 / XLA flags -> [cascade: fresh/resume decision,
 source check] -> data -> model -> [cascade: frozen stage] -> optimizer -> run dir, logger,
@@ -231,8 +246,12 @@ def main(argv=None):
         cascade_resume = bool(args.resume) and C.peek_last_step(os.path.join(run_root, "ckpt", "last")) > 0
         if cascade_resume:
             saved_cfg = _saved_cascade_config(os.path.join(run_root, "config.json"))
+            if args.level == 1 and not saved_cfg["cascade"].get("stages"):
+                raise RuntimeError("resume of a level-1 cascade run without config.json cascade.stages: %s"
+                                   % os.path.join(run_root, "config.json"))
         else:
-            cascade_src = _load_cascade_source(C, args.cascade_from, A.model_config_from_args(args))
+            cascade_src = _load_cascade_source(C, args.cascade_from, A.model_config_from_args(args),
+                                               level=args.level)
     if args.overfit_one_group:
         sources, val_sets, S, data_desc = _build_overfit_data(args, level, tf_mods)
     else:
@@ -259,11 +278,43 @@ def main(argv=None):
             init_info["source_config"] = os.path.abspath(init_info["source_config"])
     frozen, cascade_rec = None, None
     if cascade_on:
-        from models.cascade import FrozenStage
+        from models.cascade import FrozenChain, FrozenStage
+        chain = level == 1                       # milestone 9 phase 2: frozen 4 -> 2 chain
         if cascade_resume:
-            # Random init; the run checkpoint (key frozen_stage) restores it below.
-            frozen = FrozenStage.from_config(model_cfg)
+            # Random init; the run checkpoint (key frozen_stage, or frozen_stage_4 / frozen_stage_2
+            # for a chain) restores it below.
+            frozen = FrozenChain.from_config(model_cfg) if chain else FrozenStage.from_config(model_cfg)
             cascade_rec = saved_cfg["cascade"]
+        elif chain:
+            prefix, src_cfg, src_info = cascade_src
+            upstream = src_info["upstream_cascade"]
+            try:
+                frozen = FrozenChain.from_checkpoint(prefix, src_cfg, upstream["fingerprint"])
+            except ValueError as e:
+                raise SystemExit("main.py: --cascade-from %s: %s" % (args.cascade_from, e))
+            model.copy_weights_from(frozen.source_model)
+            init_info = C.cascade_init_record(model, src_info)
+            s_rel4 = s_rel2 = None
+            if not args.overfit_one_group:
+                # Real data: level-4 / level-2 S (template_mask_{4,2}.npy) vs this run's level-1 S.
+                tdir = os.path.join(args.data, dm.TEMPLATE_DIR)
+                s1 = np.asarray(S, np.float64)
+                Sk = {k: np.asarray(postprocess.brain_S_matrix(k, tdir), np.float64) for k in (4, 2)}
+                s_rel4 = float(np.linalg.norm(s1 - Sk[4]) / np.linalg.norm(Sk[4]))
+                s_rel2 = float(np.linalg.norm(s1 - Sk[2]) / np.linalg.norm(Sk[2]))
+            fps = frozen.fingerprints
+            cascade_rec = {"source_checkpoint": src_info["checkpoint"], "source_config": src_info["source_config"],
+                           "source_level": int(src_info["source_level"]),
+                           "source_step": int(src_info["source_step"]), "fingerprint": frozen.fingerprint,
+                           "S_rel_diff_vs_level4": s_rel4, "S_rel_diff_vs_level2": s_rel2,
+                           "skip_prob": float(args.cascade_skip_prob), "skip_stage": 2,
+                           "stages": [
+                               {"level": 4, "checkpoint_key": "frozen_stage", "fingerprint": fps[4],
+                                "origin_checkpoint": upstream.get("source_checkpoint"),
+                                "origin_step": upstream.get("source_step")},
+                               {"level": 2, "checkpoint_key": "model", "fingerprint": fps[2],
+                                "origin_checkpoint": src_info["checkpoint"],
+                                "origin_step": int(src_info["source_step"])}]}
         else:
             prefix, src_cfg, src_info = cascade_src
             frozen = FrozenStage.from_checkpoint(prefix, src_cfg)
@@ -300,7 +351,8 @@ def main(argv=None):
                   or None)
     ckpt_extra = trainer.checkpoint_variables()
     if frozen is not None:
-        ckpt_extra = dict(ckpt_extra, frozen_stage=frozen.model)     # cascade runs only
+        # Cascade runs only: frozen_stage (level 2) or frozen_stage_4 / frozen_stage_2 (level 1).
+        ckpt_extra = dict(ckpt_extra, **frozen.checkpoint_extra())
     trainer.checkpoint = C.RunCheckpoint(paths["ckpt_last"], paths["ckpt_best"], model, optimizer,
                                          trainer.step, extra=ckpt_extra, extra_best=extra_best)
     resumed = False
@@ -318,7 +370,10 @@ def main(argv=None):
             if not resumed:
                 raise RuntimeError("resume of cascade run %s: no checkpoint restored from %s"
                                    % (paths["root"], paths["ckpt_last"]))
-            _check_cascade_fingerprint(cascade_rec.get("fingerprint"), frozen.fingerprint, paths["config"])
+            if cascade_rec.get("stages"):
+                _check_cascade_fingerprints(cascade_rec, frozen, paths["config"])
+            else:
+                _check_cascade_fingerprint(cascade_rec.get("fingerprint"), frozen.fingerprint, paths["config"])
             bn_saved = saved_cfg.get("bn_recalibration")
             if (bn_saved or {}).get("freeze") is True:
                 model.set_bn_stats_frozen(True)
@@ -494,11 +549,12 @@ def _init_weights_lines(info):
     return "\n".join(lines)
 
 
-def _load_cascade_source(C, path, model_cfg):
-    """Fresh cascade run: (prefix, source ModelConfig, info) of the level-4 source, checked
-    against this run's model config; any problem -> SystemExit (exit 1) with the message."""
+def _load_cascade_source(C, path, model_cfg, level=2):
+    """Fresh cascade run at `level`: (prefix, source ModelConfig, info) of the source run (level 4
+    for level 2, a level-2 cascade run for level 1), checked against this run's model config;
+    any problem -> SystemExit (exit 1) with the message."""
     try:
-        prefix, src_cfg, info = C.load_cascade_source(path)
+        prefix, src_cfg, info = C.load_cascade_source(path, level)
         C.check_cascade_config(model_cfg, src_cfg)
     except ValueError as e:
         msg = str(e)
@@ -523,20 +579,32 @@ FINGERPRINT_RTOL = 1e-12
 
 def _check_cascade_fingerprint(saved, current, path):
     """RuntimeError unless the restored frozen stage's `current` weight fingerprint matches the
-    `saved` config.json one (n_vars exact, abs_sum / sq_sum relative 1e-12)."""
-    def close(a, b):
-        try:
-            a, b = float(a), float(b)
-        except (TypeError, ValueError):
-            return False
-        return abs(a - b) <= FINGERPRINT_RTOL * max(abs(a), abs(b))
-
+    `saved` config.json one (n_vars exact, abs_sum / sq_sum relative 1e-12;
+    `runtime.checkpoint.fingerprints_match`)."""
+    from runtime import checkpoint as C
     saved = saved or {}
-    ok = (saved.get("n_vars") == current["n_vars"]
-          and all(close(saved.get(k), current[k]) for k in ("abs_sum", "sq_sum")))
-    if not ok:
+    if not C.fingerprints_match(saved, current, rtol=FINGERPRINT_RTOL):
         raise RuntimeError("resume of a cascade run: the frozen-stage weight fingerprint after the restore %s "
                            "differs from config.json cascade.fingerprint %s (%s)" % (current, saved, path))
+
+
+def _check_cascade_fingerprints(rec, frozen, path):
+    """Resume of a level-1 cascade run: RuntimeError naming the level unless every stage of
+    ``rec['stages']`` matches ``frozen.fingerprints[level]`` and the top-level
+    ``rec['fingerprint']`` matches ``frozen.fingerprint`` (level 2)."""
+    from runtime import checkpoint as C
+    current = frozen.fingerprints
+    for stage in rec.get("stages") or []:
+        lv = stage.get("level")
+        if lv not in current or not C.fingerprints_match(stage.get("fingerprint"), current[lv],
+                                                         rtol=FINGERPRINT_RTOL):
+            raise RuntimeError("resume of a cascade run: the frozen level-%s weight fingerprint after the restore "
+                               "%s differs from config.json cascade.stages %s (%s)"
+                               % (lv, current.get(lv), stage.get("fingerprint"), path))
+    if not C.fingerprints_match(rec.get("fingerprint"), frozen.fingerprint, rtol=FINGERPRINT_RTOL):
+        raise RuntimeError("resume of a cascade run: the frozen level-%d weight fingerprint after the restore %s "
+                           "differs from config.json cascade.fingerprint %s (%s)"
+                           % (frozen.level, frozen.fingerprint, rec.get("fingerprint"), path))
 
 
 def _cascade_lines(rec, resumed, saved_cfg):
@@ -546,6 +614,14 @@ def _cascade_lines(rec, resumed, saved_cfg):
         rec["source_level"], rec["source_checkpoint"], rec["source_step"], rec["source_config"]),
         "  fingerprint: %d vars, abs sum %.10g, sq sum %.10g; S rel diff vs level 4: %s; skip prob %g" % (
             fp["n_vars"], fp["abs_sum"], fp["sq_sum"], rec["S_rel_diff_vs_level4"], rec["skip_prob"])]
+    for st in rec.get("stages") or []:            # level-1 chain: one line per frozen stage
+        sfp = st.get("fingerprint") or {}
+        lines.append("  stage level %s (checkpoint key %s): %s vars, abs sum %.10g; origin %s (step %s)" % (
+            st.get("level"), st.get("checkpoint_key"), sfp.get("n_vars"), float(sfp.get("abs_sum") or 0.0),
+            st.get("origin_checkpoint"), st.get("origin_step")))
+    if "S_rel_diff_vs_level2" in rec:
+        lines.append("  S rel diff vs level 2: %s; skip stage %s" % (rec["S_rel_diff_vs_level2"],
+                                                                    rec.get("skip_stage")))
     if resumed:
         bn = (saved_cfg or {}).get("bn_recalibration") or {}
         lines.append("  resumed: frozen stage restored from the run checkpoint (source not read), fingerprint "

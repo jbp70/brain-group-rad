@@ -39,7 +39,12 @@ forward can no longer be recorded as a training-configuration failure. Records s
 Cascade: `--cascade true` at level 2 = a `models.cascade.FrozenStage` of a random float32
 level-4 model; at level 1 = `tests/gpu/frozen_chain_standin.FrozenChainStandIn` (random float32
 level-4 and level-2 models, `PREV_LEVEL` patched to {2: 4, 1: 2} while the configuration runs;
-design 5.2); invalid at level 4. `cascade_kind` = none | frozen4 | standin_chain_4_2. For cascade
+design 5.2; since phase 2 the patch is a no-op and the stand-in's ``n_stages`` = 2 makes the
+Trainer run its frozen-chain branches, the same as a real level-1 run with
+`models.cascade.FrozenChain`; the `--val-pass` eval forward then also returns the level-4-alone
+fields U4, U4_inv, V4 (the inputs of the ``val_<set>_frozen4`` baselines);
+no record-schema change, so records stay schema-compatible with job 10516237, but
+``val_peak_mb`` now includes the ``_frozen4`` fields, ~+1 GB at level-1 N 4); invalid at level 4. `cascade_kind` = none | frozen4 | standin_chain_4_2. For cascade
 configurations with training status 'ok', `frozen_ms` = median of the frozen forward alone, and
 `frozen_peak_mb` = the allocator peak of one frozen forward with the trainer, model, optimizer
 slots and batch still alive (frozen_status ok | oom | error; an OOM there leaves the training
@@ -62,6 +67,9 @@ not mark the training configuration as OOM. null for linear tasks or without --v
 `--integration-steps` (comma list; 0 = the ModelConfig default, resolved before the record is
 written, tool-only convention: main.py's 0 means T = 0) is a grid axis.
 
+`--min-pairs` (comma list of 1 / n, default 1; milestone 9 phase 2) is a grid axis: the training
+pair-count floor (`TrainConfig.min_pairs`), also passed to the memory-model Workload.
+
 Predictions: `predicted_peak_mb`, `predicted_phase`, `pred_over_meas` (= predicted / measured
 peak), `largest_tensor_elems`, `largest_tensor_desc` from `models.memory_model.predict` (margin
 0) with the stored coefficients (--coefficients, default models/memory_coefficients.json); null
@@ -69,7 +77,7 @@ with a stderr warning if the file is missing.
 
 JSON (``--out``): {"environment": {...}, "results": [{level, task, n, widths, cascade,
 gradient_checkpointing, amp, lambda_ncc_tmpl, lambda_ncc_pair, integration_steps, lean_sampler,
-lean_losses, split_group_conv, val_pair_chunk, cascade_kind, build_n, params, frozen_params,
+lean_losses, split_group_conv, val_pair_chunk, cascade_kind, build_n, min_pairs, params, frozen_params,
 status, peak_mb (measured steps), warmup_peak_mb, resident_mb (allocated after the warm-up:
 weights of all stages, optimizer slots, batch), step_ms (median), step_ms_mean, step_ms_all,
 frozen_ms, frozen_peak_mb, frozen_status, trace_counts, finite, loss, val_peak_mb, val_status,
@@ -77,7 +85,7 @@ val_ms, predicted_peak_mb, predicted_phase, pred_over_meas, largest_tensor_elems
 largest_tensor_desc, wall_s, error}]}. The output is merged and written atomically AFTER EVERY
 configuration (`<out>.tmp.<pid>`, flush + fsync, `os.replace`; an OSError is fatal): records
 with the same configuration key (KEY_FIELDS; old records without the milestone-9 fields read as
-lean/split false, val_pair_chunk 16, cascade_kind frozen4/none from `cascade`, integration_steps
+lean/split false, val_pair_chunk 16, min_pairs '1', cascade_kind frozen4/none from `cascade`, integration_steps
 0 = the resolved T) are replaced, new ones appended, so several invocations build one table and
 a killed job loses at most the configuration being measured. main(argv) returns 0 unless it
 crashes (2 without a GPU).
@@ -290,7 +298,7 @@ def measure(base, warmup_steps, steps, val_pass, seed=0):
                       log_every=1, task_ratio={task: 1.0}, seed=seed, amp=bool(base["amp"]),
                       lambda_ncc_tmpl=float(base["lambda_ncc_tmpl"]),
                       lambda_ncc_pair=float(base["lambda_ncc_pair"]),
-                      val_pair_chunk=int(base["val_pair_chunk"]),
+                      val_pair_chunk=int(base["val_pair_chunk"]), min_pairs=str(base.get("min_pairs", "1")),
                       lean_sampler=bool(base["lean_sampler"]), lean_losses=bool(base["lean_losses"]),
                       schedule=ScheduleConfig("constant", base_lr=3e-4, total_steps=total + 1,
                                               warmup_steps=0))
@@ -422,7 +430,8 @@ def predicted_fields(base, gpu, coeffs):
                         lean_sampler=bool(base["lean_sampler"]), lean_losses=bool(base["lean_losses"]),
                         split_group_conv=bool(base["split_group_conv"]),
                         cascade=MODEL_CASCADE[base["cascade_kind"]],
-                        val_pair_chunk=int(base["val_pair_chunk"]), build_n=int(base["build_n"]), gpu=gpu)
+                        val_pair_chunk=int(base["val_pair_chunk"]), build_n=int(base["build_n"]), gpu=gpu,
+                        min_pairs=str(base.get("min_pairs", "1")))
         p = MM.predict(w, coeffs, margin=0.0)
         out["predicted_peak_mb"] = float(p["peak_gib"] * 1024.0)
         out["predicted_phase"] = p["peak_phase"]
@@ -436,7 +445,7 @@ def predicted_fields(base, gpu, coeffs):
 # ----------------------------------------------------------------------------- merge + write
 KEY_FIELDS = ("level", "task", "n", "widths", "cascade", "gradient_checkpointing", "amp",
               "lambda_ncc_tmpl", "lambda_ncc_pair", "integration_steps", "lean_sampler", "lean_losses",
-              "split_group_conv", "val_pair_chunk", "cascade_kind")
+              "split_group_conv", "val_pair_chunk", "cascade_kind", "min_pairs")
 
 
 def _resolved_t(r):
@@ -454,6 +463,8 @@ def _key_value(r, k):
         return r.get(k, False)
     if k == "val_pair_chunk":
         return r.get(k, 16)
+    if k == "min_pairs":
+        return r.get(k, "1")
     if k == "cascade_kind":
         return r.get(k, "frozen4" if r.get("cascade") else "none")
     if k == "integration_steps":
@@ -536,6 +547,7 @@ def child_argv(a, base, val_pass):
                "--integration-steps", str(base["integration_steps"]), "--build-n", str(a.build_n),
                "--warmup-steps", str(a.warmup_steps), "--steps", str(a.steps),
                "--gpu-memory-limit-mb", str(a.gpu_memory_limit_mb), "--coefficients", str(a.coefficients),
+               "--min-pairs", str(base.get("min_pairs", "1")),
                "--seed", str(a.seed), "--out", a.out])
 
 
@@ -613,6 +625,8 @@ def main(argv=None):
     ap.add_argument("--val-pass", default="false",
                     help="true: also measure one deform validation pass (deform configs only)")
     ap.add_argument("--val-pair-chunk", type=int, default=16, help="pair chunk of the validation pass (>= 1)")
+    ap.add_argument("--min-pairs", default="1",
+                    help="comma-separated 1/n: training pair-count floor (main.py --min-pairs; default 1)")
     ap.add_argument("--integration-steps", default="0",
                     help="comma-separated scaling-and-squaring steps T (0 = the ModelConfig default, "
                          "tool-only convention; resolved before the record is written)")
@@ -661,6 +675,9 @@ def main(argv=None):
     lean_samplers = bool_axis("--lean-sampler", a.lean_sampler)
     lean_losses = bool_axis("--lean-losses", a.lean_losses)
     splits = bool_axis("--split-group-conv", a.split_group_conv)
+    min_pairs = csv_list(a.min_pairs)
+    if not min_pairs or any(m not in ("1", "n") for m in min_pairs):
+        ap.error("--min-pairs needs a comma list of 1 / n, got %r" % a.min_pairs)
     try:
         val_pass = str2bool(a.val_pass)
     except ValueError as e:
@@ -711,13 +728,14 @@ def main(argv=None):
                             for ls in sorted(set(task_ls), key=task_ls.index):
                                 for ll in sorted(set(task_ll), key=task_ll.index):
                                     for sp in sorted(set(splits), key=splits.index):
-                                        _run_ns(a, env, coeffs, family, task, w, casc, c, amp, T, ls, ll, sp,
-                                                ns, val_pass)
+                                        for mp in sorted(set(min_pairs), key=min_pairs.index):
+                                            _run_ns(a, env, coeffs, family, task, w, casc, c, amp, T, ls, ll,
+                                                    sp, ns, val_pass, mp)
     print("written %s" % a.out)
     return 0
 
 
-def _run_ns(a, env, coeffs, family, task, w, casc, c, amp, T, ls, ll, sp, ns, val_pass):
+def _run_ns(a, env, coeffs, family, task, w, casc, c, amp, T, ls, ll, sp, ns, val_pass, mp="1"):
     """All N of one configuration (larger N skipped after 'oom' / 'limit'); writes after each."""
     stop_at = None
     for n in ns:
@@ -726,7 +744,7 @@ def _run_ns(a, env, coeffs, family, task, w, casc, c, amp, T, ls, ll, sp, ns, va
                 "lambda_ncc_pair": a.lambda_ncc_pair, "integration_steps": T, "lean_sampler": ls,
                 "lean_losses": ll, "split_group_conv": sp, "val_pair_chunk": a.val_pair_chunk,
                 "cascade_kind": CASCADE_KINDS.get((a.level, bool(casc)), "none"),
-                "build_n": min(n, a.build_n)}
+                "build_n": min(n, a.build_n), "min_pairs": mp}
         pred = predicted_fields(base, family, coeffs)
         if stop_at is not None:
             r = _null_record(base, "skipped", "%s at N = %d" % (stop_at[0].upper(), stop_at[1]))

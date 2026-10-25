@@ -112,6 +112,130 @@ class TestPairs(unittest.TestCase):
         self.assertFalse(np.array_equal(a, b))
 
 
+def _is_single_cycle(i, j, n):
+    succ = dict(zip(i.tolist(), j.tolist()))
+    seen, cur = [], 0
+    while cur not in seen:
+        seen.append(cur)
+        cur = succ[cur]
+    return len(seen) == n and cur == 0
+
+
+class TestMinPairs(unittest.TestCase):
+    """--min-pairs (milestone 9 phase 2, design-m9-phase2 section 5): T-P1..T-P5."""
+
+    def test_counts_table(self):                                    # T-P1
+        want_1 = {2: 1, 3: 1, 4: 1, 5: 2, 6: 3, 8: 6, 10: 9, 11: 11, 12: 13, 16: 24, 32: 99}
+        want_n = {2: 2, 3: 3, 4: 4, 5: 5, 6: 6, 8: 8, 10: 10, 11: 11, 12: 13, 16: 24, 32: 99}
+        for n in want_1:
+            self.assertEqual(int(pp.num_pairs(n, 0.1, "1")), want_1[n], n)
+            self.assertEqual(int(pp.num_pairs(n, 0.1)), want_1[n], n)
+            self.assertEqual(int(pp.num_pairs(n, 0.1, "n")), want_n[n], n)
+        with self.assertRaises(ValueError):
+            pp.num_pairs(4, 0.1, "x")
+
+    def test_counts_match_memory_model(self):                       # T-P1 mirror
+        from models import memory_model as MM
+        for n in range(2, 41):
+            for p in (0.05, 0.1, 0.25, 1.0):
+                for m in pp.MIN_PAIRS:
+                    self.assertEqual(int(pp.num_pairs(n, p, m)), MM.num_pairs(n, p, m), (n, p, m))
+
+    def test_counts_match_checker(self):                            # T-P1 mirror (design section 9)
+        import importlib.util
+        from models import memory_model as MM
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gpu", "check_mixed_run.py")
+        spec = importlib.util.spec_from_file_location("check_mixed_run", path)
+        cmr = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cmr)
+        for n in range(2, 41):
+            for p in (0.05, 0.1, 0.25, 1.0):
+                for m in pp.MIN_PAIRS:
+                    floor = 1 if m == "1" else n
+                    self.assertEqual(cmr.expected_pairs(floor, n, p), int(pp.num_pairs(n, p, m)), (n, p, m))
+                    self.assertEqual(cmr.expected_pairs(floor, n, p), MM.num_pairs(n, p, m), (n, p, m))
+
+    def _check_cycle(self, i, j, n):
+        i, j = np.asarray(i), np.asarray(j)
+        self.assertEqual(sorted(i.tolist()), list(range(n)))
+        self.assertEqual(sorted(j.tolist()), list(range(n)))
+        self.assertTrue(np.all(i != j))
+        self.assertTrue(_is_single_cycle(i, j, n))
+
+    def test_cycle_eager_and_graph(self):                           # T-P2
+        for n in (2, 3, 4, 8, 11):
+            self.assertEqual(int(pp.num_pairs(n, 0.1, "n")), n)
+            g_graph = tf.random.Generator.from_seed(0)
+
+            @tf.function(input_signature=[tf.TensorSpec([], tf.int32)])
+            def draw(nn, g=g_graph):
+                i, j = pp.sample_pairs(g, nn, 0.1, "n")
+                self.assertEqual(i.shape.as_list(), [None])
+                return i, j
+
+            for seed in range(200):
+                i, j = pp.sample_pairs(tf.random.Generator.from_seed(seed), n, 0.1, "n")
+                self._check_cycle(i.numpy(), j.numpy(), n)
+                gi, gj = draw(tf.constant(n))
+                self._check_cycle(gi.numpy(), gj.numpy(), n)
+
+    def test_more_pairs_than_n_equal_today(self):                   # T-P3
+        for n in (12, 16):
+            for seed in range(5):
+                a = pp.sample_pairs(tf.random.Generator.from_seed(seed), n, 0.1, "1")
+                b = pp.sample_pairs(tf.random.Generator.from_seed(seed), n, 0.1, "n")
+                np.testing.assert_array_equal(a[0].numpy(), b[0].numpy())
+                np.testing.assert_array_equal(a[1].numpy(), b[1].numpy())
+
+    def test_generator_advance_unchanged(self):                     # T-P4
+        for n in (2, 4, 8, 16):
+            g1, gn = tf.random.Generator.from_seed(3), tf.random.Generator.from_seed(3)
+            pp.sample_pairs(g1, n, 0.1, "1")
+            pp.sample_pairs(gn, n, 0.1, "n")
+            np.testing.assert_array_equal(g1.state.numpy(), gn.state.numpy())
+            np.testing.assert_array_equal(pp.sample_flip_axes(g1).numpy(), pp.sample_flip_axes(gn).numpy())
+
+    def test_same_seed_same_pairs(self):                            # T-P5
+        for n in (4, 11):
+            a = pp.sample_pairs(tf.random.Generator.from_seed(9), n, 0.1, "n")
+            b = pp.sample_pairs(tf.random.Generator.from_seed(9), n, 0.1, "n")
+            np.testing.assert_array_equal(a[0].numpy(), b[0].numpy())
+            np.testing.assert_array_equal(a[1].numpy(), b[1].numpy())
+
+
+class TestMinPairsPostprocess(unittest.TestCase):
+    """T-P6: both postprocess classes with min_pairs='n' at N 4."""
+
+    def setUp(self):
+        self.n = 4
+        self.images = np.zeros((self.n,) + P.LEVEL_SHAPE[4] + (1,), np.float32)
+        self.labels = np.zeros((self.n,) + P.LEVEL_SHAPE[4] + (1,), np.uint8)
+
+    def test_deform_cycle(self):
+        post = pp.DeformPostprocess(4, seed=5, min_pairs="n")
+        self.assertEqual(post.min_pairs, "n")
+        self.assertEqual(pp.DeformPostprocess(4).min_pairs, "1")
+        out = post(self.images, self.labels)
+        i, j = out["pair_i"].numpy(), out["pair_j"].numpy()
+        self.assertEqual(len(i), 4)
+        self.assertEqual(sorted(i.tolist()), [0, 1, 2, 3])
+        self.assertEqual(sorted(j.tolist()), [0, 1, 2, 3])
+        self.assertTrue(_is_single_cycle(i, j, 4))
+        with self.assertRaises(ValueError):
+            pp.DeformPostprocess(4, min_pairs="x")
+
+    def test_linear_count(self):
+        t, rt = random_dali_batch(np.random.default_rng(2), "rigid", 4, self.n)
+        post = pp.LinearPostprocess("rigid", 4, seed=5, min_pairs="n")
+        self.assertEqual(post.min_pairs, "n")
+        out = post(self.images, t, rt)
+        self.assertEqual(out["pair_i"].shape[0], 4)
+        self.assertEqual(out["P_star"].shape[0], 4)
+        self.assertTrue(np.all(out["pair_i"].numpy() != out["pair_j"].numpy()))
+        with self.assertRaises(ValueError):
+            pp.LinearPostprocess("rigid", 4, min_pairs="x")
+
+
 class TestLinearPostprocess(unittest.TestCase):
     def setUp(self):
         self.rng = np.random.default_rng(21)

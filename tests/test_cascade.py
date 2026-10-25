@@ -1232,5 +1232,466 @@ class TestCascadeResume(CascadeTrainerCase):
         self.assertIn("resume of a cascade run without config.json cascade", str(cm.exception))
 
 
+# ============================================================ 3-level frozen chain (milestone 9 phase 2)
+# Design `.agents/tasks/milestone-9-phase2/design-m9-phase2.md` sections 2-3, tests T-C1..T-C9 and
+# T-V1. Level-1 tensors at N 2 with TINY widths; the trainable level-1 model uses the phase-2
+# recipe knobs (AMP, gradient checkpointing 'full', lean sampler, split group conv). Measured on the
+# GTX 1080 under the 6000 MB cap: the level-1 LINEAR train step (~1.1 GB) and the frozen chain run;
+# the level-1 DEFORM train step and the traced deform validation forward OOM even with every knob,
+# T 1 and 2 label classes. So the deform chain branches are checked by tracing the step / validation
+# functions (no execution) plus eager checks of the chain outputs and the baseline code.
+SHAPE1, SP1 = tuple(P.LEVEL_SHAPE[1]), P.LEVEL_SPACING[1]
+L1_CKPT = "full"
+_STANDIN_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gpu", "frozen_chain_standin.py")
+
+
+def standin_module():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("frozen_chain_standin", _STANDIN_PATH)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def chain_config(**kw):
+    d = dict(level=1, group_size=2, deform_group_size=2, steps=100, val_every=0, log_every=1,
+             task_ratio={"rigid": 1.0, "deform": 1.0}, seed=0, n_classes=N_CLASSES, lean_sampler=True, amp=True,
+             schedule=ScheduleConfig("constant", base_lr=1e-3, total_steps=100, warmup_steps=0))
+    d.update(kw)
+    return TrainConfig(**d)
+
+
+class _Level4Chain:
+    """Chain wrapper whose linear / deform return the level-4 stage alone (skip reference, T-C6)."""
+
+    level = 2
+    n_stages = 2
+
+    def __init__(self, chain):
+        self.chain = chain
+
+    @property
+    def models(self):
+        return self.chain.models
+
+    def linear(self, x, task):
+        return self.chain.linear_stages(x, task)["A4"]
+
+    def deform(self, x):
+        st = self.chain.deform_stages(x)
+        return {"U": st["U4"], "U_inv": st["U4_inv"], "V": st["V4"]}
+
+
+class _FakeStage:
+    """Only level / linear / deform (no n_stages): the single-stage path (T-C9)."""
+
+    level = 4
+
+    def linear(self, x, task):
+        raise AssertionError("not called")
+
+    def deform(self, x):
+        raise AssertionError("not called")
+
+
+class ChainCase(CascadeCase):
+    """Level-1 synthetic groups (rigid N 2, deform N 2) and TINY randomised level-4 / level-2 models."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.lgroup = synthetic_group(1, 2, "rigid", seed=0)
+        cls.dgroup1 = fd.synthetic_deform_group(1, 2, seed=0)
+        cls.batches1 = {"rigid": cls.lgroup["batch"], "deform": cls.dgroup1["batch"]}
+
+    def frozen_models(self, seed=3):
+        """(cfg, m4, m2): a randomised level-4 model and a level-2 copy perturbed again (so the
+        level-2 stage is not the level-4 one at another resolution)."""
+        cfg = tiny_config(**STAGE_KW)
+        m4 = GroupRegLevelModel(4, cfg).build_model(2)
+        randomize(m4, seed, 0.02)
+        m2 = GroupRegLevelModel(2, cfg).build_model(2)
+        m2.copy_weights_from(m4)
+        randomize(m2, seed + 1, 0.01)
+        return cfg, m4, m2
+
+    def chain(self, seed=3):
+        _, m4, m2 = self.frozen_models(seed)
+        return cascade.FrozenChain.from_models(m4, m2)
+
+    def level1_model(self, chain):
+        """Trainable level-1 copy of the chain's level-2 model under mixed_float16 (the recipe's
+        AMP; float32 level-1 deform forwards at N 2 exceed the 6000 MB cap), built at N 1."""
+        tf.keras.mixed_precision.set_global_policy("mixed_float16")     # restored in tearDown
+        m1 = GroupRegLevelModel(1, chain.model2.config, gradient_checkpointing=L1_CKPT,
+                                lean_sampler=True, split_group_conv=True).build_model(1)
+        m1.copy_weights_from(chain.model2)          # = FrozenChain.source_model (the stand-in has none)
+        return m1
+
+    def make1(self, cfg=None, chain=None, val_sets=None, logger=None):
+        cfg = cfg or chain_config()
+        chain = chain if chain is not None else self.chain()
+        sources = {t: fd.FixedGroupSource(b) for t, b in self.batches1.items() if t in cfg.task_ratio}
+        return Trainer(self.level1_model(getattr(chain, "chain", chain)),
+                       O.make_optimizer("adam", lr=1e-3, amp=True), sources, self.lgroup["S"], cfg,
+                       logger=logger, val_sets=val_sets, cascade=chain)
+
+    def val_sets1(self):
+        g, d = self.lgroup, self.dgroup1
+        return {"rigid": fd.ValidationSet.from_group(g["images"], g["T"], g["T_target"], "rigid", 1),
+                "deform": fd.DeformValidationSet.from_group(d["images"], d["labels"], 1)}
+
+
+class TestFrozenChain(ChainCase):
+    """T-C1, T-C2, T-C3, T-C5: constants, stand-in identity, 3-level composition, from_checkpoint."""
+
+    def test_constants(self):
+        self.assertEqual(cascade.PREV_LEVEL, {2: 4, 1: 2})
+        self.assertEqual(cascade.PREV_LEVEL, C.CASCADE_SOURCE_LEVEL)
+        self.assertEqual(cascade.FROZEN_LEVEL, 4)
+        self.assertEqual((cascade.FrozenChain.level, cascade.FrozenChain.n_stages), (2, 2))
+        self.assertEqual(cascade.FrozenStage.n_stages, 1)
+
+    def test_matches_standin(self):
+        """T-C2: FrozenChain and the phase-1 stand-in with the same weights -> max |diff| 0."""
+        sc = standin_module()
+        cfg, m4, m2 = self.frozen_models()
+        x = tf.constant(self.lgroup["images"])
+        dx = tf.constant(self.dgroup1["images"])
+        diffs = {}
+        with _OpDeterminism():
+            chain = cascade.FrozenChain.from_models(m4, m2)
+            m2c = cascade._build_frozen_model(cfg, level=2)
+            m2c.copy_weights_from(m2)
+            stand = sc.FrozenChainStandIn(cascade.FrozenStage.from_model(m4), m2c)
+            self.assertEqual(stand.n_stages, 2)
+            outs = []
+            for obj in (chain, stand):
+                o = {"linear/A": obj.linear(x, "rigid")}
+                st = obj.linear_stages(x, "rigid")
+                o.update({"linear_stages/A": st["A"], "linear_stages/A4": st["A4"]})
+                d = obj.deform(dx)
+                o.update({"deform/%s" % k: d[k] for k in ("U", "U_inv", "V")})
+                ds = obj.deform_stages(dx)
+                o.update({"deform_stages/%s" % k: ds[k] for k in ("U", "U_inv", "V", "U4", "U4_inv", "V4")})
+                outs.append({k: v.numpy() for k, v in o.items()})
+        for k in outs[0]:
+            diffs[k] = float(np.max(np.abs(outs[0][k] - outs[1][k])))
+        print("\n[T-C2] FrozenChain vs stand-in max |diff|: %s" % ", ".join(
+            "%s %.3g" % kv for kv in sorted(diffs.items())), file=sys.stderr)
+        for k, v in diffs.items():
+            self.assertEqual(v, 0.0, k)
+        self.assertEqual(outs[0]["deform/U"].shape, (2,) + SHAPE1 + (3,))
+        self.assertGreater(float(np.abs(outs[0]["deform/U"]).max()), 1e-3)
+        self.assertGreater(float(np.abs(outs[0]["linear_stages/A"] - outs[0]["linear_stages/A4"]).max()), 1e-4)
+
+    def test_three_level_linear_composition(self):
+        """T-C3: A4 = FrozenStage.linear(pool(x)); A2 = Center2(R2_raw A4); A1 = Center1(R1_raw A2)."""
+        chain = self.chain()
+        x = tf.constant(self.lgroup["images"])
+        st = chain.linear_stages(x, "affine")
+        x2 = cascade.pool_to_coarser(x)
+        a4 = chain.stage4.linear(x2, "affine").numpy()
+        np.testing.assert_array_equal(st["A4"].numpy(), a4)
+        np.testing.assert_array_equal(chain.linear(x, "affine").numpy(), st["A"].numpy())
+        iters = chain.model2.config.centering_iters
+        out2 = chain.model2(cascade.prewarp_linear(x2, tf.constant(a4), SP2), task="affine", training=False)
+        r2 = out2["A_raw"].numpy().astype(np.float64)
+        a2_ref, _ = np_center(r2 @ a4.astype(np.float64), iters)
+        err2 = float(np.max(np.abs(st["A"].numpy() - a2_ref)))
+        np.testing.assert_allclose(st["A"].numpy(), a2_ref, atol=1e-4)
+        m1 = self.level1_model(chain)
+        out1 = m1(cascade.prewarp_linear(x, st["A"], SP1), task="affine", training=False)
+        r1 = out1["A_raw"].numpy().astype(np.float64)
+        a1_ref, _ = np_center(r1 @ st["A"].numpy().astype(np.float64), iters)
+        c64 = tfm.GroupCentering(iters=iters, dtype="float64")
+        a1_64 = cascade.compose_linear(tf.constant(r1), tf.constant(st["A"].numpy().astype(np.float64)), c64).numpy()
+        np.testing.assert_allclose(a1_64, a1_ref, rtol=1e-5, atol=1e-8)
+        a1_32 = cascade.compose_linear(out1["A_raw"], st["A"], m1.centering).numpy()
+        err1 = float(np.max(np.abs(a1_32 - a1_ref)))
+        np.testing.assert_allclose(a1_32, a1_ref, atol=1e-4)
+        print("\n[T-C3] linear chain vs numpy float64: A2 max |diff| %.2e, A1 (float32) %.2e"
+              % (err2, err1), file=sys.stderr)
+        # deform_stages U4 = up(up(u4)) of the level-4 model on the twice-pooled images.
+        dx = tf.constant(self.dgroup1["images"])
+        ds = chain.deform_stages(dx)
+        out4 = chain.stage4.model(cascade.pool_to_coarser(cascade.pool_to_coarser(dx)), task="deform",
+                                  training=False)
+        up = diffeo.upsample_displacement
+        for k, s in (("U4", "u"), ("U4_inv", "u_inv"), ("V4", "v")):
+            np.testing.assert_allclose(ds[k].numpy(), up(up(out4[s])).numpy(), atol=1e-6, err_msg=k)
+
+    def test_from_checkpoint(self):
+        """T-C5: an m8-style checkpoint (model = level 2, frozen_stage = level 4) restores both;
+        every failure is a ValueError."""
+        cfg, m4, m2 = self.frozen_models()
+        prefix = tf.train.Checkpoint(model=m2, frozen_stage=m4).save(os.path.join(self.tmp, "m8", "ck"))
+        fp4 = C.weight_fingerprint(m4)
+        chain = cascade.FrozenChain.from_checkpoint(prefix, cfg, fp4)
+        for a, b in ((m4, chain.stage4.model), (m2, chain.model2)):
+            for va, vb in zip(a.weights, b.weights):
+                self.assertTrue(np.array_equal(va.numpy(), vb.numpy()), vb.name)
+        self.assertEqual(chain.fingerprints, {4: fp4, 2: C.weight_fingerprint(m2)})
+        self.assertEqual(chain.fingerprint, C.weight_fingerprint(m2))
+        self.assertIs(chain.source_model, chain.model2)
+        self.assertEqual(sorted(chain.checkpoint_extra()), ["frozen_stage_2", "frozen_stage_4"])
+        self.assertEqual(chain.models, [chain.stage4.model, chain.model2])
+        self.assertTrue(all(v.dtype == tf.float32 for m in chain.models for v in m.weights))
+        self.assertEqual([m.gradient_checkpointing for m in chain.models], ["none", "none"])
+        with self.assertRaises(ValueError) as cm:
+            cascade.FrozenChain.from_checkpoint(prefix, cfg, dict(fp4, abs_sum=fp4["abs_sum"] * 2.0))
+        self.assertIn("cascade.fingerprint", str(cm.exception))
+        only2 = tf.train.Checkpoint(model=m2).save(os.path.join(self.tmp, "only2", "ck"))
+        with self.assertRaises(ValueError) as cm:
+            cascade.FrozenChain.from_checkpoint(only2, cfg, fp4)
+        self.assertIn("AssertionError", str(cm.exception))
+        with self.assertRaises(ValueError) as cm:
+            cascade.FrozenChain.from_checkpoint(os.path.join(self.tmp, "missing", "ck-1"), cfg, fp4)
+        self.assertIn("NotFoundError", str(cm.exception))
+        print("\n[T-C5] missing prefix -> %s" % str(cm.exception)[:160], file=sys.stderr)
+        # Constructor checks: wrong levels / different configs.
+        with self.assertRaises(ValueError):
+            cascade.FrozenChain(cascade.FrozenStage(chain.stage4.model), chain.stage4.model)
+        other = cascade._build_frozen_model(tiny_config(**dict(STAGE_KW, integration_steps=4)), level=2)
+        with self.assertRaises(ValueError) as cm:
+            cascade.FrozenChain(chain.stage4, other)
+        self.assertIn("integration_steps", str(cm.exception))
+        # FrozenStage additions (pure).
+        fs = chain.stage4
+        self.assertIs(fs.source_model, fs.model)
+        self.assertEqual(fs.fingerprints, {4: fs.fingerprint})
+        self.assertEqual(list(fs.checkpoint_extra()), ["frozen_stage"])
+
+
+class TestThreeLevelRoundTrip(CascadeCase):
+    """T-C4: three-level deform composition / unrolled inverse on smooth synthetic fields at the
+    real level shapes (N 1)."""
+
+    def test_three_level_round_trip(self):
+        rng = np.random.default_rng(11)
+        v4 = fd.random_svf(SHAPE4, rng, 2.0)[None]
+        v2 = fd.random_svf(SHAPE2, rng, 2.0)[None]
+        v1 = fd.random_svf(SHAPE1, rng, 2.0)[None]
+        # Lean sampler throughout (same values as the default sampler, design-m9-phase1 3.3): the
+        # default sampler's level-1 index tensors exceed the 6000 MB cap.
+        up = diffeo.upsample_displacement
+        u4, u4i = diffeo.exp_and_inverse(tf.constant(v4), 7)
+        u2, u2i = diffeo.exp_and_inverse(tf.constant(v2), 7)
+        u1, u1i = diffeo.exp_and_inverse(tf.constant(v1), 7, lean=True)
+        c2, c2i = diffeo.compose_cascade(up(u4), up(u4i), u2, u2i)          # level 2
+        U, Ui = up(c2), up(c2i)                                             # level-1 voxels
+        del c2, c2i
+        u, ui = diffeo.compose_cascade(U, Ui, u1, u1i, lean=True)
+        del U, Ui
+        margin = int(np.ceil(float(np.linalg.norm(u.numpy(), axis=-1).max()))) + 3
+
+        def err(a, b):
+            norm = np.linalg.norm(interior(diffeo.compose(a, b, lean=True).numpy(), margin), axis=-1)
+            return float(norm.max()), float(norm.mean())
+
+        r = {"u o u_inv": err(u, ui), "u_inv o u": err(ui, u)}
+        del u, ui
+        U4, U4i = up(up(u4)), up(up(u4i))
+        r.update({"U4 o U4_inv": err(U4, U4i), "U4_inv o U4": err(U4i, U4)})
+        del U4, U4i
+        U2, U2i = up(u2), up(u2i)
+        r.update({"U2 o U2_inv": err(U2, U2i), "U2_inv o U2": err(U2i, U2)})
+        del U2, U2i
+        r.update({"u1 o u1_inv": err(u1, u1i), "u1_inv o u1": err(u1i, u1)})
+        print("\n[T-C4] three-level round trip (level-1 voxels, %d-voxel margin): %s" % (margin, "; ".join(
+            "%s max %.4f mean %.5f" % (k, a, b) for k, (a, b) in r.items())), file=sys.stderr)
+        for k, a, b, c in (("u o u_inv", "U4 o U4_inv", "U2 o U2_inv", "u1 o u1_inv"),
+                           ("u_inv o u", "U4_inv o U4", "U2_inv o U2", "u1_inv o u1")):
+            mx, mean = r[k]
+            self.assertLess(mx, margin, k)                     # far below the interior margin
+            self.assertLessEqual(mx, 0.5, k)
+            self.assertLessEqual(mean, 0.05, k)
+            # The composition adds no error beyond the sum of the stages' own inverse errors.
+            self.assertLessEqual(mx, 1.25 * (r[a][0] + r[b][0] + r[c][0]), k)
+            self.assertLessEqual(mean, 1.25 * (r[a][1] + r[b][1] + r[c][1]), k)
+
+
+class TestChainTrainer(ChainCase):
+    """T-C4 centering part, T-C6, T-C7, T-C9, T-V1: the level-1 Trainer with a FrozenChain (deform
+    steps traced, not executed: see the section comment)."""
+
+    def opt(self):
+        return O.make_optimizer("adam", lr=1e-3, amp=True)
+
+    def test_dispatch(self):
+        """T-C9: _n_stages from getattr(cascade, 'n_stages', 1); a chain needs a level-1 trainer."""
+        sc = standin_module()
+        chain = self.chain()
+        self.assertEqual(self.make1(chain=chain)._n_stages, 2)
+        stand = sc.FrozenChainStandIn(chain.stage4, chain.model2)
+        self.assertEqual(self.make1(chain=stand)._n_stages, 2)
+        m1 = self.level1_model(chain)
+        cfg1 = chain_config(task_ratio={"rigid": 1.0})
+        src1 = {"rigid": fd.FixedGroupSource(self.batches1["rigid"])}
+        self.assertEqual(Trainer(m1, self.opt(), src1, self.lgroup["S"], cfg1)._n_stages, 0)
+        with self.assertRaises(ValueError):                       # level 1 rejects a single stage
+            Trainer(m1, self.opt(), src1, self.lgroup["S"], cfg1, cascade=chain.stage4)
+        tf.keras.mixed_precision.set_global_policy("float32")
+        cfg2 = cascade_config(task_ratio={"rigid": 1.0})
+        g2 = synthetic_group(2, N2, "rigid", seed=0)
+        m2 = GroupRegLevelModel(2, tiny_config(**STAGE_KW)).build_model(2)
+        src2 = {"rigid": fd.FixedGroupSource(g2["batch"])}
+        opt2 = O.make_optimizer("adam", lr=1e-3)
+        self.assertEqual(Trainer(m2, opt2, src2, g2["S"], cfg2, cascade=chain.stage4)._n_stages, 1)
+        self.assertEqual(Trainer(m2, opt2, src2, g2["S"], cfg2, cascade=_FakeStage())._n_stages, 1)
+        for bad in (chain, stand):                                # a chain needs a level-1 trainer
+            with self.assertRaises(ValueError) as cm:
+                Trainer(m2, opt2, src2, g2["S"], cfg2, cascade=bad)
+            self.assertIn("level-1 trainer", str(cm.exception))
+
+    def test_residual_centering(self):
+        """T-C4 (centering): the trainable level-1 residual SVF has group mean ~0 and the composed
+        A is centred (Center1 applied again changes it by < tolerance)."""
+        chain = self.chain()
+        m1 = self.level1_model(chain)
+        dx = tf.constant(self.dgroup1["images"])
+        x_in = cascade.prewarp_deform(dx, chain.deform(dx)["U"])
+        out = m1(x_in, task="deform", training=False)
+        v, v_raw = out["v"].numpy(), out["v_raw"].numpy()
+        del out, x_in
+        mean_max = float(np.abs(v.mean(axis=0)).max())
+        raw_mean = float(np.abs(v_raw.mean(axis=0)).max())
+        v_max = float(np.abs(v).max())
+        x = tf.constant(self.lgroup["images"])
+        a_prev = chain.linear(x, "affine")
+        o1 = m1(cascade.prewarp_linear(x, a_prev, SP1), task="affine", training=False)
+        A = cascade.compose_linear(o1["A_raw"], a_prev, m1.centering)
+        again = float(tf.reduce_max(tf.abs(m1.centering(A) - A)))
+        print("\n[T-C4] level-1 residual: max |mean_i v_i| %.2e (raw %.2e, max |v| %.3g); re-centering the "
+              "composed A changes it by %.2e" % (mean_max, raw_mean, v_max, again), file=sys.stderr)
+        self.assertGreater(v_max, 0.0)
+        self.assertGreater(raw_mean, 10.0 * mean_max)               # the centering did something
+        self.assertLessEqual(mean_max, 1e-5 * v_max)
+        self.assertLess(again, 1e-5)
+
+    @staticmethod
+    def skip_ops(fn):
+        g = fn.get_concrete_function().graph
+        return [op.name for op in g.get_operations()
+                if any(p.startswith(cascade.SKIP_SCOPE) for p in op.name.split("/"))]
+
+    def test_skip_and_frozen_unchanged(self):
+        """T-C6 (p 0: no skip ops; forced skip = the level-4 stage alone) and T-C7 (the frozen chain
+        never changes: train steps, recalibrate_bn)."""
+        chain = self.chain()
+        fz = [v for m in chain.models for v in m.weights]
+        fz_refs = {v.ref() for v in fz}
+        before = _vals(fz)
+        tr0 = self.make1(chain=chain)
+        tr5 = self.make1(chain_config(cascade_skip_prob=0.5), chain=chain)
+        # Graphs (traced, the deform step is not executed): skip ops only with p > 0.
+        for t in ("rigid", "deform"):
+            self.assertEqual(self.skip_ops(tr0._steps[t]), [], t)
+            self.assertTrue(self.skip_ops(tr5._steps[t]), t)
+        tr5.rebuild_steps()
+        tr5.trace_counts = {t: 0 for t in tr5.trace_counts}
+        # Forced skip (linear, executed): the step equals a chain whose output is level 4 alone.
+        ref = self.make1(chain_config(task_ratio={"rigid": 1.0}), chain=_Level4Chain(chain))
+        self.assertEqual(ref._n_stages, 2)
+        rs = tr5.train_step("rigid", self.batches1["rigid"], skip=True)
+        rn = ref.train_step("rigid", self.batches1["rigid"])
+        print("\n[T-C6] rigid forced skip loss %.8g vs level-4-only chain %.8g" % (rs["loss"], rn["loss"]),
+              file=sys.stderr)
+        # (AMP: the first steps may be skipped by the loss-scale warm-up, so 'finite' is not
+        # required; the loss itself is finite.)
+        self.assertTrue(np.isfinite(rs["loss"]))
+        np.testing.assert_allclose(rs["loss"], rn["loss"], rtol=1e-4)
+        self.assertTrue(np.isfinite(tr5.train_step("rigid", self.batches1["rigid"], skip=False)["loss"]))
+        self.assertEqual(tr5.trace_counts["rigid"], 1)                 # no retrace on the skip value
+        self.assertTrue(np.isfinite(tr0.train_step("rigid", self.batches1["rigid"])["loss"]))
+        # Deform skip semantics on the chain outputs (eager): U = U4, U_inv = U4_inv when skipped.
+        st = chain.deform_stages(tf.constant(self.dgroup1["images"]))
+        for k, k4 in (("U", "U4"), ("U_inv", "U4_inv")):
+            np.testing.assert_array_equal(cascade.skip_to(tf.constant(True), st[k4], st[k]).numpy(), st[k4].numpy())
+            np.testing.assert_array_equal(cascade.skip_to(tf.constant(False), st[k4], st[k]).numpy(), st[k].numpy())
+        self.assertGreater(float(np.abs(st["U"].numpy() - st["U4"].numpy()).max()), 1e-4)
+        del st
+        # T-C7: the frozen chain never changes and is never in the optimizer.
+        self.assertTrue(_all_equal(before, fz))
+        for tr in (tr0, tr5, ref):
+            inner = getattr(tr.optimizer, "inner_optimizer", tr.optimizer)      # AMP: LossScaleOptimizer
+            self.assertTrue(inner.variables())
+            self.assertFalse(fz_refs & {v.ref() for v in inner.variables()})
+        rec = self.make1(chain_config(task_ratio={"rigid": 1.0}), chain=chain)
+        ev = rec.recalibrate_bn(2, freeze=False, val=False)
+        self.assertEqual(ev["batches"], {"rigid": 2})
+        self.assertTrue(_all_equal(before, fz))
+
+    def test_validation(self):
+        """T-V1: level-1 chain validation has the _frozen (4 + 2) and _frozen4 baselines and logs
+        val/wall_s. Rigid set end to end; deform: the traced eval forward's outputs and the
+        baseline code on the chain's frozen fields."""
+        from runtime.run import CHAIN_DEFORM_FROZEN_KEYS, VAL_WALL_KEY
+        logger = RunLogger(make_run_dir(self.tmp, "l1"), backend="jsonl", tensorboard=False, quiet=True)
+        vs = self.val_sets1()
+        tr = self.make1(chain_config(task_ratio={"rigid": 1.0}), val_sets={"rigid": vs["rigid"]}, logger=logger)
+        v = tr.validate(max_groups=1)
+        for pre in ("val_rigid", "val_rigid_frozen", "val_rigid_frozen4"):
+            for k in ("center_rms_mm", "pair_rms_mm", "center_rot_deg", "pair_trans_mm"):
+                self.assertTrue(np.isfinite(v["%s/%s" % (pre, k)]), (pre, k))
+        self.assertNotEqual(v["val_rigid_frozen/center_rms_mm"], v["val_rigid_frozen4/center_rms_mm"])
+        self.assertEqual(sorted(k.replace("_frozen4/", "_frozen/") for k in v if "_frozen4/" in k),
+                         sorted(k for k in v if "_frozen/" in k))
+        self.assertNotIn(VAL_WALL_KEY, v)
+        # The linear baselines are exactly the group errors of A (4 + 2) and A4 on the same group.
+        g = tr.val_sets["rigid"].groups[0]
+        st = tr.cascade.linear_stages(tf.constant(g["images"]), "rigid")
+        for key, pre in (("A", "val_rigid_frozen"), ("A4", "val_rigid_frozen4")):
+            a = st[key].numpy().astype(np.float64)
+            want = M.summarize(M.group_errors(a, g["A_star"], g["T_target"], tr.S_np, seed=0), pre)
+            for k, w in want.items():
+                self.assertAlmostEqual(v[k], w, delta=1e-4 * max(1.0, abs(w)), msg=k)
+        val = tr._validate_and_log(0)
+        self.assertGreater(val[VAL_WALL_KEY], 0.0)
+        self.assertIn(VAL_WALL_KEY, tr.val_history[-1])
+        recs = [r["data"] for r in CascadeTrainerCase.records(logger)]
+        self.assertTrue(any(VAL_WALL_KEY in r for r in recs))
+        print("\n[T-V1] level-1 rigid validation wall time %.1f s; frozen center rms %.3f (4 + 2) / %.3f (4)"
+              % (val[VAL_WALL_KEY], v["val_rigid_frozen/center_rms_mm"], v["val_rigid_frozen4/center_rms_mm"]),
+              file=sys.stderr)
+        # Deform: the eval-mode validation forward returns the six frozen fields, train mode none.
+        trd = self.make1(chain_config(task_ratio={"deform": 1.0}), chain=tr.cascade, val_sets={"deform": vs["deform"]})
+        ev = trd._val_deform_fn(2, False).get_concrete_function().structured_outputs
+        self.assertEqual(sorted(ev), sorted(("u", "u_inv", "v", "v_raw") + CHAIN_DEFORM_FROZEN_KEYS))
+        tm = trd._val_deform_fn(2, True).get_concrete_function().structured_outputs
+        self.assertEqual(sorted(tm), ["u", "u_inv", "v", "v_raw"])
+        lin = tr._val_fn("rigid", 2, False).get_concrete_function().structured_outputs
+        self.assertEqual(sorted(lin), ["A", "A_prev", "A_prev4"])
+        # Deform baselines from the chain's frozen fields (what _val_deform_errors collects).
+        dgrp = vs["deform"].groups[0]
+        ds = tr.cascade.deform_stages(tf.constant(dgrp["images"]))
+        fo = {k: ds[k].numpy() for k in CHAIN_DEFORM_FROZEN_KEYS}
+        del ds
+        base = trd._frozen_baseline_metrics("deform", vs["deform"], [dgrp], [fo])
+        for pre in ("val_deform_frozen", "val_deform_frozen4"):
+            for k in ("template_dice", "pair_dice", "neg_jac_pct", "inv_consistency_mm", "ncc_template", "ncc_pair"):
+                self.assertTrue(np.isfinite(base["%s/%s" % (pre, k)]), (pre, k))
+        self.assertEqual(sorted(k.replace("_frozen4/", "_frozen/") for k in base if "_frozen4/" in k),
+                         sorted(k for k in base if "_frozen/" in k))
+        self.assertNotEqual(base["val_deform_frozen/template_dice"], base["val_deform_frozen4/template_dice"])
+        self.assertEqual(trd._frozen_baseline_metrics("deform", vs["deform"], [dgrp], None), base)   # cached
+        print("\n[T-V1] level-1 deform frozen template Dice %.4f (4 + 2) / %.4f (4)"
+              % (base["val_deform_frozen/template_dice"], base["val_deform_frozen4/template_dice"]), file=sys.stderr)
+
+
+class TestLevel2Unchanged(CascadeTrainerCase):
+    """T-V1 level-2 part: a milestone-8 trainer keeps its validation keys (no _frozen4, no
+    val/wall_s) and its single-stage dispatch."""
+
+    def test_level2_keys(self):
+        from runtime.run import VAL_WALL_KEY
+        tr = self.make(val_sets=self.val_sets())
+        self.assertEqual(tr._n_stages, 1)
+        val = tr._validate_and_log(0)
+        self.assertFalse([k for k in val if "_frozen4" in k])
+        self.assertNotIn(VAL_WALL_KEY, val)
+        for name in ("rigid", "affine", "deform"):
+            self.assertTrue(any(k.startswith("val_%s_frozen/" % name) for k in val), name)
+
+
 if __name__ == "__main__":
     unittest.main()

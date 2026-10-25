@@ -7,6 +7,9 @@ Milestone 5 adds: the affine overfit (full affine ranges, < 1 mm eval mode), the
 rigid:affine overfit on two fixed groups (both < 1 mm; tests/gpu/check_mixed_run.py on its run
 dir), the resumed step's control values before the pipelines start, and --init-weights.
 
+Milestone 9 phase 2 adds the level 4 -> 2 -> 1 cascade chain with a level-1 resume and the
+in-process checker (TestLevel1CascadeMain, T-E1) and the level-1 --cascade-from errors.
+
 The overfit test (milestone 4 verification): one fixed synthetic group (smooth asymmetric
 phantom, per-image random rigid transforms up to +-45 deg / +-15 mm, N = 4, level 4), narrow
 model (default dense_norm 'layer'), Adam 3e-4 constant LR, no flips, no dropout. It must reach a
@@ -19,6 +22,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 import unittest
 
 from tests import tf_setup  # noqa: F401  (log level, TF32 off, GPU memory growth)
@@ -497,6 +501,150 @@ class TestCascadeMain(MainCase):
         with self.assertRaises(SystemExit) as cm:
             M.main(common + ["--level", "2", "--cascade-from", src, "--run-name", "bad2", "--dropout", "0.1"])
         self.assertIn("dropout", str(cm.exception.code))
+
+
+class TestLevel1CascadeMain(MainCase):
+    """Milestone 9 phase 2, T-E1 (design-m9-phase2 section 11): main.py level 4 -> level 2 ->
+    level 1 overfit chain (TINY widths, N 2, deform decoder built at every level so the three
+    ModelConfigs are dict-equal), a resume of the level-1 run and the in-process checker.
+    Local deviation from the design (GTX 1080, 6000 MB cap): the deform train step does not fit
+    at level 2 (fp32, default sampler: host-pinned int32 sampler indices OOM) nor at level 1 (even
+    with every memory knob, FEAT-002 probe), so all runs train rigid only, and level 1 uses AMP +
+    --split-group-conv (the float32 level-1 build pass with the deform decoder exceeds the cap).
+    The level-1 deform chain branches are covered by tests/test_cascade.py (T-C2 / T-C6 / T-V1)."""
+
+    def test_level1_chain_resume_and_checker(self):
+        import importlib.util
+        import tensorflow as tf
+        self.addCleanup(tf.keras.mixed_precision.set_global_policy, "float32")       # --amp true
+        res = os.path.join(self.tmp, "results")
+        common = ["--overfit-one-group", "--overfit-synthetic", "--task-ratio", "rigid:1", "--deform-decoder", "true",
+                  "--deform-residual-affine", "false", "--group-size", "2", "--log-every", "1", "--val-png", "false",
+                  "--results", res] + TINY_ARGS + COMMON
+        t0 = time.time()
+        self.assertIn(M.main(common + ["--level", "4", "--run-name", "r1", "--overfit-max-steps", "3"]), (0, 1))
+        free_memory()
+        self.assertIn(M.main(common + ["--level", "2", "--run-name", "r2", "--cascade-from",
+                                       os.path.join(self.run_dir("r1"), "ckpt", "last"),
+                                       "--overfit-max-steps", "3", "--bn-recal-batches", "4"]), (0, 1))
+        free_memory()
+        run3 = common + ["--level", "1", "--run-name", "r3", "--cascade-from",
+                         os.path.join(self.run_dir("r2"), "ckpt", "last"), "--deform-group-size", "2",
+                         "--min-pairs", "n", "--amp", "true", "--split-group-conv", "true",
+                         "--bn-recal-batches", "4", "--val-every", "3", "--val-png", "true"]
+        self.assertIn(M.main(run3 + ["--overfit-max-steps", "3"]), (0, 1))
+        free_memory()
+        self.assertIn(M.main(run3 + ["--overfit-max-steps", "5"]), (0, 1))            # resume
+        free_memory()
+        print("\n[T-E1] level 4 -> 2 -> 1 + resume: %.0f s" % (time.time() - t0), file=sys.stderr)
+        d = self.run_dir("r3")
+        with open(os.path.join(d, "config.json")) as f:
+            cfg = json.load(f)
+        cas, iw = cfg["cascade"], cfg["init_weights"]
+        self.assertEqual(cas["source_level"], 2)
+        self.assertEqual([s["level"] for s in cas["stages"]], [4, 2])
+        self.assertEqual([s["checkpoint_key"] for s in cas["stages"]], ["frozen_stage", "model"])
+        self.assertEqual([s["origin_step"] for s in cas["stages"]], [3, 3])
+        self.assertEqual((iw["via"], iw["cross_level"]), ("cascade", [2, 1]))
+        self.assertEqual(cfg["args"]["min_pairs"], "n")
+        keys = [k for k, _ in tf.train.list_variables(os.path.join(d, "ckpt", "last"))]
+        self.assertTrue(any(k.startswith("frozen_stage_4/") for k in keys))
+        self.assertTrue(any(k.startswith("frozen_stage_2/") for k in keys))
+        self.assertFalse(any(k.startswith("frozen_stage/") for k in keys))
+        with open(os.path.join(d, "logs", "metrics.jsonl")) as f:
+            recs = [json.loads(line) for line in f if line.strip()]
+        n_pairs = [r["data"]["train_rigid/n_pairs"] for r in recs if "train_rigid/n_pairs" in r["data"]]
+        self.assertTrue(n_pairs)
+        self.assertTrue(all(v == 2 for v in n_pairs), n_pairs)
+        final = [r["data"] for r in recs if r.get("step") == 5 and "val_rigid/center_rms_mm" in r["data"]]
+        self.assertTrue(final)
+        self.assertTrue(np.isfinite(final[-1]["val_rigid_frozen4/center_rms_mm"]))
+        self.assertTrue(np.isfinite(final[-1]["val/wall_s"]))
+        self.assertEqual(sum(1 for r in recs if r["data"].get("event") == "bn_recalibration"), 1)
+        self.assertTrue(os.listdir(os.path.join(d, "ckpt", "best")))
+        self.assertTrue(os.path.exists(os.path.join(d, "val_png", "rigid_step0000005.png")))
+        spec = importlib.util.spec_from_file_location(
+            "check_mixed_run", os.path.join(os.path.dirname(os.path.abspath(__file__)), "gpu", "check_mixed_run.py"))
+        cmr = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cmr)
+        ok, results = cmr.check(d, ["rigid"], 5, expect_best=True, expect_cascade=True, expect_cascade_stages=2,
+                                expect_min_pairs="n")
+        self.assertTrue(ok, [r for r in results if not r[1]])
+        self.assertTrue(all(p for _, p, _ in results))
+        self.assertIn("cascade_stages", [n for n, _, _ in results])
+
+
+class TestLevel1CascadeErrors(MainCase):
+    """Milestone 9 phase 2 (design 4.3, 10): main.py --level 1 --cascade-from failures exit with
+    'main.py: --cascade-from ...'; _check_cascade_fingerprints names the level."""
+
+    def fake_source(self, common):
+        """A level-2 'cascade run' whose checkpoint holds only a global step (no model /
+        frozen_stage objects) and whose config.json has a cascade record."""
+        import tensorflow as tf
+        from runtime import args as A
+        from runtime import checkpoint as C
+        from runtime.logging import make_run_dir
+        paths = make_run_dir(os.path.join(self.tmp, "results"), "m8")
+        st = tf.Variable(4, dtype=tf.int64)
+        tf.train.CheckpointManager(tf.train.Checkpoint(step=st), paths["ckpt_last"], 1,
+                                   checkpoint_name="last").save(checkpoint_number=4)
+        args = A.parse_args(common + ["--level", "2"])
+        rec = {"source_checkpoint": "/x/src4/ckpt/last/last-3", "source_level": 4, "source_step": 3,
+               "fingerprint": {"n_vars": 7, "abs_sum": 1.0, "sq_sum": 1.0}, "skip_prob": 0.0}
+        C.write_config(paths["config"], A.model_config_from_args(args), {"level": 2}, extra={"cascade": rec})
+        return paths["ckpt_last"]
+
+    def test_level1_cascade_from_errors(self):
+        import tensorflow as tf
+        self.addCleanup(tf.keras.mixed_precision.set_global_policy, "float32")       # main.py --amp true
+        res = os.path.join(self.tmp, "results")
+        common = ["--overfit-one-group", "--overfit-synthetic", "--group-size", "2", "--task-ratio", "rigid:1",
+                  "--deform-decoder", "true", "--log-every", "1", "--val-every", "0", "--val-png", "false",
+                  "--results", res] + TINY_ARGS + COMMON
+        with self.assertRaises(SystemExit) as cm:          # unresolvable prefix: before any model
+            M.main(common + ["--level", "1", "--cascade-from", os.path.join(self.tmp, "nope", "ckpt", "best"),
+                             "--run-name", "bad"])
+        msg = str(cm.exception.code)
+        self.assertTrue(msg.startswith("main.py: --cascade-from"), msg)
+        self.assertFalse(os.path.exists(self.run_dir("bad")))
+        # A level-2 cascade source whose checkpoint lacks the model objects: the FrozenChain restore
+        # (TF AssertionError, wrapped into ValueError) becomes the same SystemExit.
+        src = self.fake_source(common)
+        # Phase-2 memory knobs: the level-1 build pass (deform decoder) exceeds the 6000 MB cap in float32.
+        knobs = ["--amp", "true", "--gradient-checkpointing", "full", "--lean-sampler", "true",
+                 "--split-group-conv", "true", "--task-ratio", "rigid:1,deform:1", "--deform-residual-affine", "false"]
+        with self.assertRaises(SystemExit) as cm:
+            M.main(common + knobs + ["--level", "1", "--cascade-from", src, "--run-name", "bad2"])
+        msg = str(cm.exception.code)
+        print("\n[level-1 cascade-from] %s" % msg[:200], file=sys.stderr)
+        self.assertTrue(msg.startswith("main.py: --cascade-from"), msg)
+        self.assertIn("FrozenChain.from_checkpoint", msg)
+        self.assertIn("AssertionError", msg)
+
+    def test_check_cascade_fingerprints(self):
+        fp4 = {"n_vars": 5, "abs_sum": 2.0, "sq_sum": 1.5}
+        fp2 = {"n_vars": 6, "abs_sum": 3.0, "sq_sum": 2.5}
+
+        class FakeChain:
+            level = 2
+            fingerprints = {4: fp4, 2: fp2}
+            fingerprint = fp2
+
+        rec = {"fingerprint": dict(fp2), "stages": [{"level": 4, "fingerprint": dict(fp4)},
+                                                    {"level": 2, "fingerprint": dict(fp2)}]}
+        M._check_cascade_fingerprints(rec, FakeChain, "config.json")                 # no error
+        for lv in (4, 2):
+            bad = json.loads(json.dumps(rec))
+            st = [s for s in bad["stages"] if s["level"] == lv][0]
+            st["fingerprint"]["abs_sum"] *= 1.0 + 1e-9
+            with self.assertRaises(RuntimeError) as cm:
+                M._check_cascade_fingerprints(bad, FakeChain, "config.json")
+            self.assertIn("level-%d" % lv, str(cm.exception))
+        bad = dict(rec, fingerprint=dict(fp2, n_vars=99))
+        with self.assertRaises(RuntimeError) as cm:
+            M._check_cascade_fingerprints(bad, FakeChain, "config.json")
+        self.assertIn("cascade.fingerprint", str(cm.exception))
 
 
 class TestOverfit(MainCase):

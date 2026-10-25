@@ -139,6 +139,16 @@ baselines ``val_<set>_frozen/...`` (`_frozen_baseline_metrics`) and, for deform 
 ``val_<set>/composed_mean_disp_mm`` (RMS over voxels of |mean_i u_i| in mm).
 `recalibrate_bn` re-estimates the trainable stage's BN statistics (forward-only, exact average
 of per-batch statistics) and optionally freezes them (design section 7).
+
+3-level cascade (milestone 9 phase 2, `.agents/tasks/milestone-9-phase2/design-m9-phase2.md`
+sections 2-3): at level 1 ``cascade`` is a `models.cascade.FrozenChain` (frozen level 4 ->
+level 2). Dispatch is the Python int ``self._n_stages`` (0 none, 1 = `FrozenStage`, the code
+above verbatim, 2 = chain; ``getattr(cascade, 'n_stages', 1)``). The chain's ``linear`` /
+``deform`` give the composed level-2 estimate at level 1; everything after (pre-warp, compose,
+losses) is unchanged. Skip (p > 0) drops the LAST frozen stage: A_prev = A4, U = U4 via
+``linear_stages`` / ``deform_stages`` and `CS.skip_to`. Eval-mode validation adds the level-4
+alone baselines ``val_<set>_frozen4/...`` next to ``val_<set>_frozen/...`` (levels 4 + 2), and
+level-1 runs log the validation wall time ``val/wall_s``.
 """
 import collections
 import dataclasses
@@ -155,7 +165,7 @@ import tensorflow as tf
 
 from data_loading import dali_loader
 from data_loading import params as P
-from data_loading.postprocess import DeformPostprocess, LinearPostprocess
+from data_loading.postprocess import MIN_PAIRS, DeformPostprocess, LinearPostprocess
 from models import cascade as CS
 from models import diffeo
 from models import layers as L
@@ -209,11 +219,19 @@ DEFORM_DIAG_KEYS = ("diag_feat_spread", "diag_feat_rel_spread", "diag_dead_frac"
 # passed to apply_gradients (after normalisation and task weight, before the optimizer's clip).
 TASK_GRAD_NORM_EPS = 1e-12
 TASK_GRAD_NORM_KEYS = ("grad_norm_scale", "grad_norm_gated_frac", "grad_norm_normed")
+# Minimum pair count (milestone 9 phase 2, design-m9-phase2 section 5): number of sampled training
+# pairs of a step, in its results (and logged as train_<task>/n_pairs) only with min_pairs 'n'.
+PAIR_COUNT_KEY = "n_pairs"
 # Level cascade (milestone 8): extra deform-step diagnostics (max |u_res| of the level-2 residual,
 # cascade steps only), the per-step skip flag key and the BN recalibration gap metrics
 # (|eval - trainmode| per validation set, `Trainer.recalibrate_bn`).
 DEFORM_CASCADE_DIAG_KEYS = ("diag_u_res_max_vox",)
 CASCADE_SKIP_KEY = "train/cascade_skip_frac"
+# Frozen chain (milestone 9 phase 2, level 1): frozen fields of the eval-mode deform validation
+# forward (U, U_inv, V = levels 4 + 2 composed; U4, U4_inv, V4 = level 4 alone) and the
+# wall-time key of a whole validation pass (logged at level 1 only).
+CHAIN_DEFORM_FROZEN_KEYS = ("U", "U_inv", "V", "U4", "U4_inv", "V4")
+VAL_WALL_KEY = "val/wall_s"
 BN_GAP_METRICS = {"linear": ("center_rms_mm", "pair_rms_mm"), DEFORM: ("template_dice", "pair_dice")}
 
 
@@ -440,6 +458,9 @@ class TrainConfig:
     # it is passed to compose_cascade and deform_loss; lean_losses to deform_loss.
     lean_sampler: bool = False
     lean_losses: bool = False
+    # Minimum sampled training pairs per step for the pairwise losses (p_pair / p_pdice; design-m9-phase2
+    # section 5): '1' = today, 'n' = the group size (k == N: random N-cycle). Validation unaffected.
+    min_pairs: str = "1"
 
 
 def _peak_gpu_mb():
@@ -469,8 +490,9 @@ class Trainer:
         (curriculum / global transform). Each step first writes every task's control values of
         that step; batches then carry G_dali and control_version, which are logged and dropped
         before the step function. None (default): no control file is touched.
-      cascade: optional `models.cascade.FrozenStage` (milestone 8, level 2 only): the frozen
-        previous level (module docstring "Level cascade"). It is called outside the tape in eval
+      cascade: optional `models.cascade.FrozenStage` (milestone 8, level 2) or
+        `models.cascade.FrozenChain` (milestone 9, level 1): the frozen previous level(s)
+        (module docstring "Level cascade" / "3-level cascade"). It is called outside the tape in eval
         mode and its variables are never given to the optimizer (`O.build_optimizer` stays on
         ``model.trainable_variables``). None (default): no cascade code is traced.
 
@@ -495,6 +517,14 @@ class Trainer:
         model_lean = bool(getattr(model, "lean_sampler", False))
         if model_lean != bool(cfg.lean_sampler):
             raise ValueError("lean_sampler: model %s vs TrainConfig %s" % (model_lean, bool(cfg.lean_sampler)))
+        # Chain dispatch (milestone 9 phase 2, design 2.1): a Python int fixed at construction,
+        # 0 = no cascade, 1 = single frozen stage (milestone-8 code verbatim), 2 = frozen chain.
+        self._n_stages = 0 if cascade is None else int(getattr(cascade, "n_stages", 1))
+        if self._n_stages not in (0, 1, 2):
+            raise ValueError("cascade: n_stages must be 1 or 2, got %r" % self._n_stages)
+        if self._n_stages == 2 and self.level != 1:
+            raise ValueError("cascade: a frozen chain (n_stages 2) needs a level-1 trainer, got level %d"
+                             % self.level)
         if cascade is not None:
             if CS.PREV_LEVEL.get(self.level) != cascade.level:
                 raise ValueError("cascade: level %d has no frozen level-%d stage (PREV_LEVEL %s)"
@@ -533,6 +563,8 @@ class Trainer:
         # Deform + linear: 'best' keeps the linear rule, the deform best goes to an extra file.
         self.extra_best = ({DEFORM: DEFORM_BEST_METRIC}
                            if DEFORM in self.schedule.tasks and self.linear_tasks else {})
+        if cfg.min_pairs not in MIN_PAIRS:
+            raise ValueError("min_pairs must be one of %s, got %r" % (MIN_PAIRS, cfg.min_pairs))
         self.step = tf.Variable(0, dtype=tf.int64, trainable=False, name="global_step")
         self.postprocess = {}
         for t in self.sources:
@@ -540,12 +572,13 @@ class Trainer:
                 self.postprocess[t] = DeformPostprocess(
                     self.level, flip_prob=cfg.flip_prob, p_pdice=cfg.p_pdice,
                     seed=cfg.seed + POSTPROCESS_SEED_OFFSET[t], n_classes=cfg.n_classes,
-                    residual_affine=cfg.deform_residual_affine)
+                    residual_affine=cfg.deform_residual_affine, min_pairs=cfg.min_pairs)
             else:
                 self.postprocess[t] = LinearPostprocess(t, self.level, flip_prob=cfg.flip_prob,
                                                         p_pair=cfg.p_pair,
                                                         seed=cfg.seed + POSTPROCESS_SEED_OFFSET[t],
-                                                        target_iters=cfg.target_iters)
+                                                        target_iters=cfg.target_iters,
+                                                        min_pairs=cfg.min_pairs)
         self._identity_cache = {}
         self._frozen_cache = {}         # cascade: frozen-stage validation baselines
         self.trace_counts = {t: 0 for t in self.sources}
@@ -636,8 +669,10 @@ class Trainer:
         cascade_kw = {"lean": True} if lean else {}
         w = self._task_weight(task)
         norm_on = self.task_grad_norm > 0      # trace-time switch: off adds no op
+        pairs_on = cfg.min_pairs == "n"         # trace-time switch: '1' adds no op / result key
         cascade = self.cascade                 # trace-time switch (design section 5): None adds no op
         skip_on = cascade is not None and float(cfg.cascade_skip_prob) > 0
+        chain = self._n_stages == 2            # trace-time switch: frozen 4 -> 2 chain (level 1)
 
         def body(images, labels, t_dali=None, skip=None):
             self.trace_counts[task] += 1          # Python side effect: runs only while tracing
@@ -646,11 +681,20 @@ class Trainer:
             in_finite = tf.reduce_all(tf.math.is_finite(x))
             batch["images"] = tf.where(in_finite, x, tf.zeros_like(x))
             x_in = batch["images"]
-            if cascade is not None:               # frozen stage + pre-warp, outside the tape
+            if cascade is not None and not chain:  # frozen stage + pre-warp, outside the tape
                 prev = cascade.deform(batch["images"])
                 U, U_inv = prev["U"], prev["U_inv"]
                 if skip_on:
                     U, U_inv = CS.skip_fields(skip, [U, U_inv])
+            elif chain:                           # frozen 4 -> 2 chain; skip drops level 2
+                if skip_on:
+                    st = cascade.deform_stages(batch["images"])
+                    U = CS.skip_to(skip, st["U4"], st["U"])
+                    U_inv = CS.skip_to(skip, st["U4_inv"], st["U_inv"])
+                else:
+                    prev = cascade.deform(batch["images"])
+                    U, U_inv = prev["U"], prev["U_inv"]
+            if cascade is not None:
                 x_in = CS.prewarp_deform(batch["images"], U)
             stats = list(model.non_trainable_variables)
             backup = [tf.identity(v) for v in stats]
@@ -703,6 +747,8 @@ class Trainer:
             res.update(diag)
             res.update(enc_diag)
             res.update(norm_res)
+            if pairs_on:
+                res[PAIR_COUNT_KEY] = tf.size(batch["pair_i"])
             res.update(grad_norm=gnorm, finite=finite, n_vars_updated=tf.constant(len(pairs)))
             return res
 
@@ -726,9 +772,11 @@ class Trainer:
             raise ValueError("loss_scale_mm2 must be finite and > 0, got %r" % loss_scale)
         w = self._task_weight(task)
         norm_on = self.task_grad_norm > 0      # trace-time switch: off adds no op
+        pairs_on = cfg.min_pairs == "n"         # trace-time switch: '1' adds no op / result key
         S = self.S
         cascade = self.cascade                 # trace-time switch (design section 4): None adds no op
         skip_on = cascade is not None and float(cfg.cascade_skip_prob) > 0
+        chain = self._n_stages == 2            # trace-time switch: frozen 4 -> 2 chain (level 1)
         spacing = P.LEVEL_SPACING[self.level]
 
         def body(images, t_dali, rt_dali=None, skip=None):
@@ -740,10 +788,17 @@ class Trainer:
             in_finite = tf.reduce_all(tf.math.is_finite(x))
             batch["images"] = tf.where(in_finite, x, tf.zeros_like(x))
             x_in = batch["images"]
-            if cascade is not None:               # frozen stage + pre-warp, outside the tape
+            if cascade is not None and not chain:  # frozen stage + pre-warp, outside the tape
                 A_prev = cascade.linear(batch["images"], task)
                 if skip_on:
                     A_prev = CS.skip_linear(skip, A_prev)
+            elif chain:                           # frozen 4 -> 2 chain; skip drops level 2
+                if skip_on:
+                    st = cascade.linear_stages(batch["images"], task)
+                    A_prev = CS.skip_to(skip, st["A4"], st["A"])
+                else:
+                    A_prev = cascade.linear(batch["images"], task)
+            if cascade is not None:
                 x_in = CS.prewarp_linear(batch["images"], A_prev, spacing)
             stats = list(model.non_trainable_variables)
             backup = [tf.identity(v) for v in stats]
@@ -796,6 +851,8 @@ class Trainer:
             res.update(diag)
             res.update(enc_diag)
             res.update(norm_res)
+            if pairs_on:
+                res[PAIR_COUNT_KEY] = tf.size(batch["pair_i"])
             res.update(grad_norm=gnorm, finite=finite, n_vars_updated=tf.constant(len(pairs)))
             return res
 
@@ -918,23 +975,32 @@ class Trainer:
         """Cascade linear validation forward (design section 8), key (task, nv, train_mode), traced once:
         pool -> frozen (eval) -> pre-warp -> trainable (eval, or train-mode BN restored as
         `_val_fn`) -> compose. Returns {'A': composed, 'A_prev': frozen A4} in eval mode and
-        {'A': composed} in train mode. Never skips."""
+        {'A': composed} in train mode. Never skips. Frozen chain (level 1, eval mode): 'A_prev' =
+        the composed frozen 4 + 2 estimate and 'A_prev4' = the level-4 stage alone."""
         key = (task, int(nv), bool(train_mode))
         if key not in self._val_fns:
             shape = (int(nv),) + tuple(P.LEVEL_SHAPE[self.level]) + (1,)
             model, cascade = self.model, self.cascade
             spacing = P.LEVEL_SPACING[self.level]
+            chain = self._n_stages == 2
             self.val_trace_counts.setdefault(key, 0)
 
             def fwd(x):
                 self.val_trace_counts[key] += 1
-                A_prev = cascade.linear(x, task)
+                if chain and not train_mode:
+                    st = cascade.linear_stages(x, task)
+                    A_prev = st["A"]
+                else:
+                    A_prev = cascade.linear(x, task)
                 x_in = CS.prewarp_linear(x, A_prev, spacing)
                 if train_mode:
                     return self._train_mode_forward(
                         x_in, task, lambda out: {"A": CS.compose_linear(out["A_raw"], A_prev, model.centering)})
                 out = model(x_in, task=task, training=False)
-                return {"A": CS.compose_linear(out["A_raw"], A_prev, model.centering), "A_prev": A_prev}
+                res = {"A": CS.compose_linear(out["A_raw"], A_prev, model.centering), "A_prev": A_prev}
+                if chain:
+                    res["A_prev4"] = st["A4"]
+                return res
 
             self._val_fns[key] = tf.function(fwd, input_signature=[tf.TensorSpec(shape, tf.float32)])
         return self._val_fns[key]
@@ -942,13 +1008,17 @@ class Trainer:
     def _val_errors(self, task, vs, groups, train_mode, frozen_outs=None):
         """(pooled errors, [A per group] float64). With a cascade the validation function returns
         a dict (composed ``A``); ``frozen_outs`` (a list, eval-mode cascade passes only) receives
-        the frozen A4 [N, 4, 4] float64 of every group."""
+        the frozen A4 [N, 4, 4] float64 of every group (frozen chain: dict A = levels 4 + 2,
+        A4 = level 4 alone)."""
         fn = self._val_fn(task, vs.group_size, train_mode)
         errs, mats = [], []
         for g, grp in enumerate(groups):
             out = fn(tf.constant(grp["images"]))
             A = (out["A"] if self.cascade is not None else out).numpy().astype(np.float64)
-            if frozen_outs is not None:
+            if frozen_outs is not None and self._n_stages == 2:
+                frozen_outs.append({"A": out["A_prev"].numpy().astype(np.float64),
+                                    "A4": out["A_prev4"].numpy().astype(np.float64)})
+            elif frozen_outs is not None:
                 frozen_outs.append(out["A_prev"].numpy().astype(np.float64))
             mats.append(A)
             errs.append(M.group_errors(A, grp["A_star"], grp["T_target"], self.S_np, seed=g,
@@ -1000,11 +1070,14 @@ class Trainer:
         """Cascade deform validation forward (design section 8), key ('deform', nv, train_mode): pool ->
         frozen (eval) -> pre-warp warp(x, U) -> trainable residual -> compose_cascade. Returns the
         composed u, u_inv and the residual v, v_raw (float32); eval mode also U, U_inv, V (the
-        upsampled frozen fields, for the frozen baselines). Never skips."""
+        upsampled frozen fields, for the frozen baselines). Never skips. Frozen chain (level 1,
+        eval mode): U, U_inv, V = the frozen 4 + 2 chain, plus U4, U4_inv, V4 (level 4 alone)."""
         key = (DEFORM, int(nv), bool(train_mode))
         if key not in self._val_fns:
             shape = (int(nv),) + tuple(P.LEVEL_SHAPE[self.level]) + (1,)
             model, cascade = self.model, self.cascade
+            chain = self._n_stages == 2
+            frozen_keys = CHAIN_DEFORM_FROZEN_KEYS if chain else ("U", "U_inv", "V")
             self.val_trace_counts.setdefault(key, 0)
 
             def composed(prev, out):
@@ -1014,12 +1087,12 @@ class Trainer:
 
             def fwd(x):
                 self.val_trace_counts[key] += 1
-                prev = cascade.deform(x)
+                prev = cascade.deform_stages(x) if chain and not train_mode else cascade.deform(x)
                 x_in = CS.prewarp_deform(x, prev["U"])
                 if train_mode:
                     return self._train_mode_forward(x_in, DEFORM, lambda out: composed(prev, out))
                 res = composed(prev, model(x_in, task=DEFORM, training=False))
-                res.update({k: tf.cast(prev[k], tf.float32) for k in ("U", "U_inv", "V")})
+                res.update({k: tf.cast(prev[k], tf.float32) for k in frozen_keys})
                 return res
 
             self._val_fns[key] = tf.function(fwd, input_signature=[tf.TensorSpec(shape, tf.float32)])
@@ -1086,7 +1159,8 @@ class Trainer:
         """(pooled errors, [dict(u, seg_warped, seg_template, jac) per group]). With a cascade in
         eval mode the errors also hold composed_mean_disp_mm (one value per group: RMS over voxels
         of |mean_i u_i| in mm of the composed u) and ``frozen_outs`` (a list, when given) receives
-        the frozen dict(U, U_inv, V) (numpy float32) of every group."""
+        the frozen dict(U, U_inv, V) (numpy float32) of every group (frozen chain: also U4,
+        U4_inv, V4 = level 4 alone)."""
         fn = self._val_deform_fn(vs.group_size, train_mode)
         errs, extras = [], []
         for g, grp in enumerate(groups):
@@ -1098,7 +1172,8 @@ class Trainer:
                 e["composed_mean_disp_mm"] = np.asarray(
                     [float(tf.sqrt(tf.reduce_mean(tf.reduce_sum(tf.square(mean_u), axis=-1))))])
                 if frozen_outs is not None:
-                    frozen_outs.append({k: out[k].numpy() for k in ("U", "U_inv", "V")})
+                    keys = CHAIN_DEFORM_FROZEN_KEYS if self._n_stages == 2 else ("U", "U_inv", "V")
+                    frozen_outs.append({k: out[k].numpy() for k in keys})
             ex["u"] = out["u"].numpy()
             errs.append(e)
             extras.append(ex)
@@ -1128,21 +1203,33 @@ class Trainer:
         ``M.summarize(M.group_errors(A4, ...), 'val_<name>_frozen')`` (same groups, N, S and
         seeds as the composed metrics; affine sets incl. the affine factor errors). Deform sets:
         ``_deform_errors(labels, U, U_inv, V, V, ...)`` -> ``val_<name>_frozen/{template_dice,
-        pair_dice, neg_jac_pct, inv_consistency_mm, ..., ncc_template, ncc_pair}``."""
+        pair_dice, neg_jac_pct, inv_consistency_mm, ..., ncc_template, ncc_pair}``. Frozen chain
+        (level 1): ``val_<name>_frozen/...`` = levels 4 + 2 composed (A / U, U_inv, V; V = the
+        level-2 residual SVF, so its centrality keys describe that residual) and
+        ``val_<name>_frozen4/...`` = level 4 alone (A4 / U4, U4_inv, V4), same groups and seeds."""
         key = (name, len(groups))
         if key not in self._frozen_cache:
             if frozen_outs is None or len(frozen_outs) != len(groups):
                 raise ValueError("frozen baseline of %r needs the frozen outputs of all %d groups"
                                  % (name, len(groups)))
-            errs = []
-            for g, (grp, fo) in enumerate(zip(groups, frozen_outs)):
-                if vs.task == DEFORM:
-                    errs.append(self._deform_errors(grp["labels"], fo["U"], fo["U_inv"], fo["V"], fo["V"],
-                                                    seed=g, images=grp["images"])[0])
-                else:
-                    errs.append(M.group_errors(fo, grp["A_star"], grp["T_target"], self.S_np, seed=g,
-                                               affine=vs.task == "affine"))
-            self._frozen_cache[key] = M.summarize(M.concat_errors(errs), "val_%s_frozen" % name)
+            if self._n_stages == 2:
+                # Frozen chain: '_frozen' = levels 4 + 2 composed, '_frozen4' = level 4 alone.
+                variants = (("", ("U", "U_inv", "V"), "A"), ("4", ("U4", "U4_inv", "V4"), "A4"))
+            else:
+                variants = (("", ("U", "U_inv", "V"), None),)
+            res = {}
+            for suffix, (ku, kui, kv), ka in variants:
+                errs = []
+                for g, (grp, fo) in enumerate(zip(groups, frozen_outs)):
+                    if vs.task == DEFORM:
+                        errs.append(self._deform_errors(grp["labels"], fo[ku], fo[kui], fo[kv], fo[kv],
+                                                        seed=g, images=grp["images"])[0])
+                    else:
+                        errs.append(M.group_errors(fo if ka is None else fo[ka], grp["A_star"],
+                                                   grp["T_target"], self.S_np, seed=g,
+                                                   affine=vs.task == "affine"))
+                res.update(M.summarize(M.concat_errors(errs), "val_%s_frozen%s" % (name, suffix)))
+            self._frozen_cache[key] = res
         return dict(self._frozen_cache[key])
 
     def _frozen_outs_list(self, name, groups):
@@ -1431,7 +1518,10 @@ class Trainer:
             self.logger.log_metrics(step, metrics)
 
     def _validate_and_log(self, step):
+        t0 = time.perf_counter()
         val = self.validate()
+        if self.level == 1:                    # level-1 runs only (lower levels: keys unchanged)
+            val[VAL_WALL_KEY] = time.perf_counter() - t0
         self.val_history.append(dict(val, step=step))
         self._log(step, val)
         if self.checkpoint is not None and self.best_metric in val:
@@ -1578,6 +1668,8 @@ class Trainer:
                 acc.update({pre + k: res[k] for k in ENC_GRAD_KEYS})
                 acc.update({pre + "grad_norm": res["grad_norm"]})
                 acc.update({pre + k: res[k] for k in TASK_GRAD_NORM_KEYS if k in res})
+                if PAIR_COUNT_KEY in res:
+                    acc.update({pre + PAIR_COUNT_KEY: res[PAIR_COUNT_KEY]})
                 if task == DEFORM:
                     acc.update({pre + k: res[k] for k in DEFORM_LOSS_KEYS})
                     acc.update({pre + k: res[k] for k in DEFORM_NCC_KEYS if k in res})

@@ -254,8 +254,12 @@ class TestArgs(unittest.TestCase):
                    ["--cascade-skip-prob", "0"]):
             A.parse_args(["--data", "x"] + ok)                    # no cascade needed
         A.parse_args(casc + ["--norm", "instance"])                # norm only matters with recal
+        a1 = A.parse_args(["--data", "x", "--level", "1", "--cascade-from", "m8/ckpt/best"] + three
+                          + ["--bn-recal-batches", "4", "--cascade-skip-prob", "0.15"])   # milestone 9 phase 2
+        self.assertEqual((a1.level, a1.cascade_from, a1.cascade_skip_prob), (1, "m8/ckpt/best", 0.15))
         bad_cases = [
             (["--data", "x", "--cascade-from", "s"], "--level 2"),                       # level 4
+            (["--data", "x", "--cascade-from", "s"], "--level 1"),                       # phase 2 message
             (casc + ["--init-weights", "w"], "--init-weights"),
             (casc + ["--deform-residual-affine", "true"], "--deform-residual-affine"),    # T16
             (casc + ["--cascade-skip-prob", "1.0"], "[0, 1)"),
@@ -283,6 +287,25 @@ class TestArgs(unittest.TestCase):
             A.parse_args(["--data", "x", "--level", "2", "--bn-recal-batches", "4"])
         self.assertIn("--bn-recal-batches > 0 needs --cascade-from (BN recalibration is defined for the "
                       "level-transfer cascade only)", err.getvalue())
+
+    def test_min_pairs_flag(self):
+        # Milestone 9 phase 2 (design-m9-phase2 section 4.1): --min-pairs and the --p-pair range.
+        import contextlib
+        import io
+        a = A.parse_args(["--data", "x"])
+        self.assertEqual(a.min_pairs, "1")
+        self.assertEqual(A.args_to_dict(a)["min_pairs"], "1")
+        self.assertEqual(A.train_config_from_args(a).min_pairs, "1")
+        a = A.parse_args(["--data", "x", "--min-pairs", "n"])
+        self.assertEqual(A.train_config_from_args(a).min_pairs, "n")
+        self.assertEqual(A.args_to_dict(a)["min_pairs"], "n")
+        for bad, msg in ((["--min-pairs", "x"], "--min-pairs"), (["--p-pair", "0"], "--p-pair"),
+                         (["--p-pair", "1.5"], "--p-pair")):
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err), self.assertRaises(SystemExit, msg=str(bad)):
+                A.parse_args(["--data", "x"] + bad)
+            self.assertIn(msg, err.getvalue(), bad)
+        A.parse_args(["--data", "x", "--p-pair", "1.0"])
 
     def test_memory_knob_flags(self):
         # Milestone 9 (design 3.8): every knob off by default; invalid values are parser errors
@@ -377,6 +400,59 @@ class TestArgs(unittest.TestCase):
             for flag in ("--curriculum", "--global-transform"):
                 with self.assertRaises(SystemExit):
                     A.parse_args(["--data", "x", "--task-ratio", "deform:1", flag, "true"])
+
+
+class TestCascadeSourceLevel1(TempDirCase):
+    """Milestone 9 phase 2 (design 4.2): load_cascade_source(path, 1) and fingerprints_match."""
+
+    def fake_run(self, name, level, cascade=None, step=6):
+        """<tmp>/<name>: ckpt/last with only a global step + config.json (args.level, cascade)."""
+        paths = make_run_dir(self.tmp, name)
+        st = tf.Variable(int(step), dtype=tf.int64)
+        tf.train.CheckpointManager(tf.train.Checkpoint(step=st), paths["ckpt_last"], 1,
+                                   checkpoint_name="last").save(checkpoint_number=int(step))
+        C.write_config(paths["config"], tiny_config(), {"level": int(level)},
+                       extra=None if cascade is None else {"cascade": cascade})
+        return paths
+
+    def test_level1_source(self):
+        fp = {"n_vars": 12, "abs_sum": 3.5, "sq_sum": 1.25}
+        rec = {"source_checkpoint": "/x/m7/ckpt/best/best-11000", "source_level": 4, "source_step": 11000,
+               "fingerprint": fp, "skip_prob": 0.0}
+        cases = [("l4", 4, None, "is level 4; the cascade needs a level-2 source"),
+                 ("l2_plain", 2, None, "level-2 CASCADE run"),
+                 ("l2_bad_level", 2, dict(rec, source_level=2), "level-2 CASCADE run"),
+                 ("l2_no_fp", 2, dict(rec, fingerprint={"n_vars": 0}), "level-2 CASCADE run")]
+        for name, level, cas, msg in cases:
+            paths = self.fake_run(name, level, cas)
+            with self.assertRaises(ValueError, msg=name) as cm:
+                C.load_cascade_source(paths["ckpt_last"], 1)
+            self.assertIn(msg, str(cm.exception), name)
+            self.assertTrue(str(cm.exception).startswith("--cascade-from"), name)
+        paths = self.fake_run("m8", 2, rec)
+        prefix, src_cfg, info = C.load_cascade_source(paths["ckpt_last"], 1)
+        self.assertEqual(info["upstream_cascade"], rec)
+        self.assertEqual((info["source_level"], info["source_step"]), (2, 6))
+        self.assertEqual(src_cfg.to_dict(), tiny_config().to_dict())
+        self.assertTrue(prefix.endswith("last-6"))
+        # Level 2 (default): unchanged, a level-4 source and no upstream record.
+        p4 = self.fake_run("src4", 4)
+        _, _, info2 = C.load_cascade_source(p4["ckpt_last"])
+        self.assertEqual(sorted(info2), ["checkpoint", "source_config", "source_level", "source_step"])
+        self.assertEqual(info2["source_level"], 4)
+        with self.assertRaises(ValueError) as cm:
+            C.load_cascade_source(paths["ckpt_last"])
+        self.assertIn("needs a level-4 source", str(cm.exception))
+
+    def test_fingerprints_match(self):
+        fp = {"n_vars": 3, "abs_sum": 10.0, "sq_sum": 4.0}
+        self.assertTrue(C.fingerprints_match(fp, dict(fp)))
+        self.assertTrue(C.fingerprints_match(fp, dict(fp, abs_sum=10.0 * (1 + 1e-14))))
+        for bad in (dict(fp, abs_sum=10.0 * (1 + 1e-9)), dict(fp, n_vars=4), dict(fp, sq_sum=None),
+                    dict(fp, sq_sum="x"), {}, None):
+            self.assertFalse(C.fingerprints_match(bad, fp), bad)
+        self.assertFalse(C.fingerprints_match(fp, None))
+        self.assertTrue(C.fingerprints_match(fp, dict(fp, abs_sum=10.0 * (1 + 1e-9)), rtol=1e-6))
 
 
 class TestLogging(TempDirCase):

@@ -135,6 +135,29 @@ class TestMeasureLevelMemory(unittest.TestCase):
         self.assertEqual(sorted((r["task"], r["n"]) for r in res2), [("deform", 2), ("rigid", 2), ("rigid", 3)])
         print("[m9 tiny level 1] both invocations %.1f s" % (time.time() - t0))
 
+    def test_level1_chain_val_pass(self):
+        """T-C8 (milestone 9 phase 2): level-1 --cascade true --val-pass true runs the Trainer chain
+        branches with the stand-in (n_stages 2, incl. the _frozen4 validation fields): 'ok' or
+        'oom', never 'error'; cascade_kind unchanged."""
+        out = os.path.join(self.tmp, "memory_c8.json")
+        args = ["--level", "1", "--tasks", "deform", "--n", "2", "--widths", "tiny", "--cascade", "true",
+                "--gradient-checkpointing", "full", "--lean-sampler", "true", "--integration-steps", "3",
+                "--amp", "true", "--steps", "1", "--warmup-steps", "1", "--val-pass", "true",
+                "--val-pair-chunk", "4", "--gpu-memory-limit-mb", "6000", "--out", out]
+        t0 = time.time()
+        self.assertEqual(mlm.main(args), 0)
+        with open(out) as f:
+            res = json.load(f)["results"]
+        self.assertEqual(len(res), 1)
+        r = res[0]
+        print("[T-C8] level-1 chain: status %s peak_mb %s val %s/%s (%.1f s)" % (
+            r["status"], r.get("peak_mb"), r.get("val_status"), r.get("val_peak_mb"), time.time() - t0))
+        self.assertIn(r["status"], ("ok", "oom"), r.get("error"))
+        self.assertEqual(r["cascade_kind"], "standin_chain_4_2")
+        self.assertEqual(r["val_pair_chunk"], 4)
+        if r["status"] == "ok":
+            self.assertIn(r["val_status"], ("ok", "oom"), r.get("val_error"))
+
     def test_incremental_write(self):
         """Design 5.1 (v5): the output is merged and written atomically after every configuration."""
         out = os.path.join(self.tmp, "inc.json")
@@ -249,6 +272,10 @@ class TestIsolate(unittest.TestCase):
         i = argv.index("--widths")
         self.assertEqual(argv[i:i + 6], ["--widths", "custom", "--filters", "16,64,128,192,256,384",
                                          "--decoder-widths", "128,96,64,32,8"])
+        # --min-pairs (milestone 9 phase 2) is passed to the child ('1' for records without it)
+        self.assertEqual(argv[argv.index("--min-pairs") + 1], "1")
+        argv = mlm.child_argv(a, _m9_record(min_pairs="n"), False)
+        self.assertEqual(argv[argv.index("--min-pairs") + 1], "n")
 
 
 def _m9_record(**kw):
@@ -297,6 +324,10 @@ class TestMergeOldRecord(unittest.TestCase):
         # a different knob value is a different configuration
         self.assertNotEqual(mlm.config_key(new7), mlm.config_key(dict(new7, lean_sampler=True)))
         self.assertNotEqual(mlm.config_key(new7), mlm.config_key(dict(new7, cascade_kind="standin_chain_4_2")))
+        # --min-pairs (milestone 9 phase 2): old records key as '1'
+        self.assertIn("min_pairs", mlm.KEY_FIELDS)
+        self.assertEqual(mlm.config_key(new7), mlm.config_key(dict(new7, min_pairs="1")))
+        self.assertNotEqual(mlm.config_key(new7), mlm.config_key(dict(new7, min_pairs="n")))
 
     def test_custom_widths_and_classify(self):
         key = mlm.custom_key((16, 32, 128, 192, 256, 384), (128, 96, 64, 16, 8))

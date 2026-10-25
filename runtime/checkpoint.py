@@ -165,17 +165,42 @@ def _checkpoint_step(prefix):
         raise ValueError("checkpoint %s holds no global step (%s)" % (prefix, e))
 
 
-CASCADE_SOURCE_LEVEL = 4
+# Trainable cascade level -> level of the --cascade-from source run (equals
+# models.cascade.PREV_LEVEL; not imported here, a test asserts the equality).
+CASCADE_SOURCE_LEVEL = {2: 4, 1: 2}
 
 
-def load_cascade_source(path):
-    """--cascade-from: (prefix, src_cfg ModelConfig, info dict).
+def fingerprints_match(saved, current, rtol=1e-12):
+    """True iff the `weight_fingerprint` dicts agree: ``n_vars`` exact, ``abs_sum`` / ``sq_sum``
+    relative `rtol` (missing / non-numeric values never match)."""
+    def close(a, b):
+        try:
+            a, b = float(a), float(b)
+        except (TypeError, ValueError):
+            return False
+        return abs(a - b) <= rtol * max(abs(a), abs(b))
+
+    saved, current = saved or {}, current or {}
+    return (saved.get("n_vars") is not None and saved.get("n_vars") == current.get("n_vars")
+            and all(close(saved.get(k), current.get(k)) for k in ("abs_sum", "sq_sum")))
+
+
+def load_cascade_source(path, level=2):
+    """--cascade-from: (prefix, src_cfg ModelConfig, info dict) for a trainable stage at `level`.
 
     `path` is a checkpoint prefix or a checkpoint directory (`resolve_checkpoint`). Raises
     ValueError when the path does not resolve, the source run's config.json is missing
-    (`source_config_path`), or its ``args.level`` is not 4. info: ``checkpoint`` (absolute
-    prefix), ``source_config`` (absolute path), ``source_level`` 4, ``source_step`` (the global
-    step stored in the checkpoint)."""
+    (`source_config_path`), or its ``args.level`` is not ``CASCADE_SOURCE_LEVEL[level]`` (4 for
+    level 2, 2 for level 1). info: ``checkpoint`` (absolute prefix), ``source_config`` (absolute
+    path), ``source_level``, ``source_step`` (the global step stored in the checkpoint).
+
+    Level 1 (milestone 9 phase 2): the source must itself be a level-2 CASCADE run (config.json
+    ``cascade`` with ``source_level`` 4 and a fingerprint with n_vars > 0, else ValueError); info
+    adds ``upstream_cascade`` = that record verbatim."""
+    if level not in CASCADE_SOURCE_LEVEL:
+        raise ValueError("--cascade-from %s: no cascade source level for level %r (levels %s)"
+                         % (path, level, sorted(CASCADE_SOURCE_LEVEL)))
+    src_level = CASCADE_SOURCE_LEVEL[level]
     try:
         prefix = resolve_checkpoint(path)
     except ValueError as e:
@@ -187,13 +212,25 @@ def load_cascade_source(path):
                          "(expected <run>/config.json for <run>/ckpt/<kind>/<name>)" % path)
     with open(cfg_path) as f:
         saved = json.load(f)
-    level = (saved.get("args") or {}).get("level")
-    if level is None or int(level) != CASCADE_SOURCE_LEVEL:
+    saved_level = (saved.get("args") or {}).get("level")
+    if saved_level is None or int(saved_level) != src_level:
         raise ValueError("--cascade-from %s: the source run %s is level %s; the cascade needs a level-%d "
-                         "source" % (path, cfg_path, level, CASCADE_SOURCE_LEVEL))
+                         "source" % (path, cfg_path, saved_level, src_level))
+    upstream = None
+    if level == 1:
+        upstream = saved.get("cascade")
+        fp = (upstream or {}).get("fingerprint") if isinstance(upstream, dict) else None
+        n_vars = (fp or {}).get("n_vars") if isinstance(fp, dict) else None
+        if (not isinstance(upstream, dict) or upstream.get("source_level") != CASCADE_SOURCE_LEVEL[2]
+                or not isinstance(n_vars, int) or isinstance(n_vars, bool) or n_vars <= 0):
+            raise ValueError("--cascade-from %s: the level-1 cascade needs a level-2 CASCADE run (config.json "
+                             "cascade record with source_level %d); %s has none"
+                             % (path, CASCADE_SOURCE_LEVEL[2], cfg_path))
     src_cfg = ModelConfig.from_dict(saved["model_config"])
     info = {"checkpoint": prefix, "source_config": os.path.abspath(cfg_path),
-            "source_level": CASCADE_SOURCE_LEVEL, "source_step": _checkpoint_step(prefix)}
+            "source_level": src_level, "source_step": _checkpoint_step(prefix)}
+    if upstream is not None:
+        info["upstream_cascade"] = upstream
     return prefix, src_cfg, info
 
 

@@ -92,7 +92,7 @@ def _workload_from_args(a):
     return MM.Workload(a.level, a.task, a.n, mc, a.checkpointing, a.amp, a.integration_steps, lncc=a.lncc,
                        lean_sampler=a.lean_sampler, lean_losses=a.lean_losses, split_group_conv=a.split_group_conv,
                        cascade=a.cascade, val_pair_chunk=a.val_pair_chunk, build_n=a.build_n, tasks_run=tasks,
-                       gpu=a.gpu)
+                       gpu=a.gpu, min_pairs=a.min_pairs)
 
 
 def cmd_predict(a):
@@ -170,6 +170,8 @@ def build_parser():
     p.add_argument("--build-n", type=int, default=None)
     p.add_argument("--tasks-run", default=None, help="comma list (default: the task)")
     p.add_argument("--gpu", choices=MM.GPUS, default="rtx8000")
+    p.add_argument("--min-pairs", choices=MM.MIN_PAIRS, default="1",
+                   help="deform pair-count floor (main.py --min-pairs; default 1)")
     p.add_argument("--margin", type=float, default=0.0)
     p.add_argument("--skip-grad-bound", action="store_true")
     p.add_argument("--fwd-transient-bound", action="store_true",

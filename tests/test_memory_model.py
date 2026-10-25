@@ -191,6 +191,31 @@ class TestCalibrationAndFit(_Base):
         self.assertAlmostEqual(g["margin"], 0.25, places=6)
 
 
+class TestMinPairs(_Base):
+    """Milestone 9 phase 2 (design-m9-phase2 section 5): the --min-pairs mirror."""
+
+    def test_counts(self):
+        self.assertEqual([MM.num_pairs(n, 0.1, "n") for n in (2, 4, 8, 11, 12, 16)], [2, 4, 8, 11, 13, 24])
+        self.assertEqual([MM.num_pairs(n, 0.1) for n in (2, 4, 8, 11, 12, 16)], [1, 1, 6, 11, 13, 24])
+        with self.assertRaises(ValueError):
+            MM.num_pairs(4, 0.1, "x")
+
+    def test_level1_deform_n4(self):
+        w1 = MM.level1_workload("default", 4, 7, LS)
+        wn = w1.replace(min_pairs="n")
+        self.assertEqual((w1.min_pairs, wn.min_pairs), ("1", "n"))
+        p1, pn = MM.predict(w1, self.co), MM.predict(wn, self.co)
+        self.assertGreater(pn["phases"]["Fw"], p1["phases"]["Fw"])
+        self.assertEqual(wn.to_dict()["min_pairs"], "n")
+        self.assertEqual(MM.Workload.from_record(wn.to_dict()).min_pairs, "n")
+        old = w1.to_dict()
+        del old["min_pairs"]
+        self.assertEqual(MM.Workload.from_record(old).min_pairs, "1")
+        self.assertEqual(MM.predict(MM.Workload.from_record(old), self.co)["peak_gib"], p1["peak_gib"])
+        with self.assertRaises(ValueError):
+            w1.replace(min_pairs="x")
+
+
 class TestPresets(unittest.TestCase):
     def test_uniform_and_counts(self):
         for name, m in WP.UNIFORM_FACTORS.items():

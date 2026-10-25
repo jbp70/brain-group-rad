@@ -15,7 +15,8 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MEMORY = os.path.join(REPO, "slurm", "m8_memory.sh")
 TRAIN = os.path.join(REPO, "slurm", "m8_level2_cascade.sh")
 M9 = os.path.join(REPO, "slurm", "m9_memory.sh")
-SCRIPTS = (MEMORY, TRAIN, M9)
+M9L1 = os.path.join(REPO, "slurm", "m9_level1_cascade.sh")
+SCRIPTS = (MEMORY, TRAIN, M9, M9L1)
 M9_KNOBS = ["--lean-sampler", "true", "--lean-losses", "false", "--split-group-conv", "true"]
 LOGS = "/autofs/space/crater_001/users/jn85/BrainRegProjects/GroupwiseReg/logs"
 SIF = "/autofs/space/crater_001/users/jn85/Singularity_Files/tf10_nv.sif"
@@ -24,7 +25,7 @@ BASH = shutil.which("bash")
 RECIPE_ENV = ("GRAD_BALANCE", "BN_RECAL_BATCHES", "BN_RECAL_FREEZE", "SKIP_PROB", "GRAD_CKPT", "AMP",
               "EXTRA_ARGS", "RUN_NAME", "STEPS", "VAL_EVERY", "WARMUP", "SLURM_JOB_ID", "N", "DEFORM_N",
               "CASCADE_FROM", "PROJ", "REPO", "RESULTS", "DATA", "SIF", "SCRATCH_ROOT", "TMPDIR", "SLURM_CPUS_PER_TASK",
-              "WIDTHS", "KNOBS")
+              "WIDTHS", "KNOBS", "MIN_PAIRS", "LEAN_LOSSES", "PREFETCH", "CKPT_EVERY")
 
 
 def _read(path):
@@ -119,6 +120,32 @@ class TestStatic(unittest.TestCase):
                      "--expect-init-weights full --expect-enc-grad true --expect-cascade true "
                      "--grad-balance-rule true"):
             self.assertIn(flag, body, flag)
+
+    def test_m9_level1_script(self):
+        """Milestone 9 phase 2 (design section 8): header comments, recipe, both container calls."""
+        text = _read(M9L1)
+        header = text[:text.index("set -euo pipefail")]
+        self.assertIn("#SBATCH --mem=64G\n", text)
+        self.assertIn("#SBATCH --time=48:00:00\n", text)
+        self.assertNotRegex(text, r"(?m)^#SBATCH -A (?!qtim$)")
+        self.assertTrue(all(ord(c) < 128 for c in text))
+        for k in ("RUN_NAME=m9_l1_smoke STEPS=200 VAL_EVERY=100 WARMUP=50 sbatch --job-name=m9smoke "
+                  "--time=04:00:00 --mem=64G slurm/m9_level1_cascade.sh",
+                  "RUN_NAME=m9_level1_cascade sbatch --job-name=m9long --time=48:00:00 --mem=64G "
+                  "slurm/m9_level1_cascade.sh",
+                  "RUN_NAME=m9_level1_cascade sbatch -p dgx-a100 --job-name=m9long --time=36:00:00 --mem=64G "
+                  "slurm/m9_level1_cascade.sh",
+                  "grad_balance KEEP task-grad-norm", "FALLBACK", "UNDECIDED", "PREFETCH=2", "MaxRSS > 56 GB",
+                  "--mem=96G", "36 GiB", "31.0 GB, 15.6 s/step", "git pull", "Resume plan"):
+            self.assertIn(k, header, k)
+        body = text[re.search(r"(?m)^case ", text).start():]
+        for var in ("BN_RECAL_BATCHES", "SKIP_PROB", "MIN_PAIRS", "LEAN_LOSSES", "PREFETCH", "GRAD_BALANCE",
+                    "N", "DEFORM_N", "CASCADE_FROM"):
+            self.assertNotIn("${%s:-" % var, body, var)
+        for flag in ("--filters", "--decoder-widths", "--integration-steps", "--val-group-size"):
+            self.assertNotIn(flag, body, flag)
+        self.assertEqual(len(re.findall(r"</dev/null \|\| c?rc=\$\?", text)), 2)
+        self.assertIn('CASCADE_FROM="${CASCADE_FROM:-$RESULTS/m8_level2_gradnorm/ckpt/best}"', text)
 
     @unittest.skipIf(BASH is None, "bash not available")
     def test_bash_syntax(self):
@@ -224,6 +251,82 @@ class TestStubRuns(unittest.TestCase):
             self.assertIn("measure_level_memory.py --level 2", c)
         self.assertIn("--val-pass true", calls[1])
         self.assertTrue(os.path.isdir(os.path.join(self.tmp, "scratch", "manual")))
+
+    def l1_env(self, **kw):
+        d = dict(CASCADE_FROM=os.path.join(self.tmp, "ckpt"))
+        d.update(kw)
+        return d
+
+    def test_m9_level1_default_recipe(self):
+        """Design section 8: default argv of main.py and of the checker."""
+        self._m9_stub()
+        r, calls = self.run_script(M9L1, **self.l1_env())
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(len(calls), 2, calls)
+        self.assertTrue(calls[0].startswith("exec|--nv|-B|/scratch|-B|/autofs|-B|/cluster|-B|/space|-B|/vast|"))
+        main, chk = self._args(calls[0]), self._args(calls[1])
+        self.assertEqual(main[1], "main.py")
+        for seq in (["--level", "1"], ["--cascade-from", os.path.join(self.tmp, "ckpt")], ["--group-size", "16"],
+                    ["--deform-group-size", "4"], ["--min-pairs", "n"], ["--gradient-checkpointing", "full"],
+                    ["--val-pair-chunk", "4"], ["--task-grad-norm", "12"], ["--amp", "true"],
+                    ["--lean-sampler", "true"], ["--split-group-conv", "true"], ["--lean-losses", "false"],
+                    ["--prefetch", "1"], ["--ckpt-every", "250"], ["--bn-recal-batches", "64"],
+                    ["--cascade-skip-prob", "0"], ["--task-ratio", "rigid:1,affine:1,deform:2"],
+                    ["--p-pair", "0.1", "--p-pdice", "0.1"], ["--num-threads", "3"]):
+            self.assertTrue(self._has_seq(main, seq), seq)
+        for flag in ("--filters", "--decoder-widths", "--integration-steps", "--task-loss-weights",
+                     "--val-group-size"):
+            self.assertNotIn(flag, main)
+        self.assertEqual(chk[1], "tests/gpu/check_mixed_run.py")
+        for seq in (["--expect-cascade-stages", "2"], ["--expect-min-pairs", "n"], ["--expect-bn-recal", "true"],
+                    ["--memory-budget-mb", "36864"], ["--project-steps", "8000"],
+                    ["--project-val-every", "500"], ["--expect-cascade", "true"],
+                    ["--max-nonfinite-frac", "0.06"], ["--tasks", "rigid,affine,deform"]):
+            self.assertTrue(self._has_seq(chk, seq), seq)
+        # BN_RECAL_BATCHES 0 -> no --expect-bn-recal
+        r, calls = self.run_script(M9L1, **self.l1_env(BN_RECAL_BATCHES="0"))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("--expect-bn-recal", self._args(calls[1]))
+
+    def test_m9_level1_deform64_and_guards(self):
+        self._m9_stub()
+        r, calls = self.run_script(M9L1, **self.l1_env(GRAD_BALANCE="deform64", MIN_PAIRS="1"))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        main = self._args(calls[0])
+        self.assertTrue(self._has_seq(main, ["--task-loss-weights", "deform:64"]))
+        self.assertNotIn("--task-grad-norm", main)
+        self.assertTrue(self._has_seq(main, ["--min-pairs", "1"]))
+        self.assertTrue(self._has_seq(self._args(calls[1]), ["--expect-min-pairs", "1"]))
+        for env in (dict(MIN_PAIRS="x"), dict(DEFORM_N="abc"), dict(N="1.5"), dict(GRAD_BALANCE="other")):
+            r, calls = self.run_script(M9L1, **self.l1_env(**env))
+            self.assertEqual(r.returncode, 2, (env, r.stderr))
+            self.assertIsNone(calls)
+
+    def test_m9_level1_resume_skips_guard(self):
+        self._m9_stub()
+        env = self.l1_env(CASCADE_FROM=os.path.join(self.tmp, "missing"), RUN_NAME="r1")
+        r, calls = self.run_script(M9L1, **env)                  # fresh run, source missing
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIsNone(calls)
+        last = os.path.join(self.tmp, "results", "r1", "ckpt", "last")
+        os.makedirs(last)
+        with open(os.path.join(last, "checkpoint"), "w") as f:
+            f.write('model_checkpoint_path: "last-10"\n')
+        r, calls = self.run_script(M9L1, **env)                  # resume: guard skipped
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(len(calls), 2, calls)
+        self.assertTrue(self._has_seq(self._args(calls[0]), ["--cascade-from", os.path.join(self.tmp, "missing")]))
+
+    def test_m9_level1_exit_codes(self):
+        """main.py's exit code if non-zero (checker not run), else the checker's."""
+        self._m9_stub('*main.py*) exit 4;;')
+        r, calls = self.run_script(M9L1, **self.l1_env())
+        self.assertEqual(r.returncode, 4, r.stderr)
+        self.assertEqual(len(calls), 1, calls)
+        self._m9_stub('*check_mixed_run*) exit 1;;')
+        r, calls = self.run_script(M9L1, **self.l1_env())
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertEqual(len(calls), 2, calls)
 
     def _m9_stub(self, fail_cases=""):
         """singularity stub logging every argument separately ('|'-joined) so that word splitting

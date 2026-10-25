@@ -1,7 +1,9 @@
 """Unit tests of tests/gpu/check_mixed_run.py (stdlib only, no TF) on fabricated run directories:
 rigid+affine (milestone-5 behaviour unchanged), deform-only and rigid+affine+deform (milestone 6).
 """
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import shutil
@@ -390,6 +392,175 @@ class TestCascade(CheckMixedRunCase):
         verdict, ratios, _ = cmr.grad_balance(recs, ["rigid", "deform"])
         self.assertEqual((verdict, ratios), ("KEEP", {"rigid": 2.0}))
         self.assertEqual(cmr.grad_balance(recs, ["rigid", "deform"], from_step=51)[0], "UNDECIDED")
+
+    def test_grad_balance_deform64_label(self):
+        # Clip 12 + deform:64 run (config.json args.task_grad_norm 0): KEEP keeps the current balance.
+        cfg = dict(cascade_config(), args={"task_grad_norm": 0.0})
+        d = self.run_dir("d64", TASKS3, config=cfg, events=(BN_EVENT,), enc_grad=True,
+                         val_overrides=cascade_val(TASKS3), train_extra=TIMING)
+        ok, res = cmr.check(d, TASKS3, STEPS, grad_balance_rule=True, grad_balance_from_step=5)
+        self.assertTrue(ok, self.failed(res))
+        self.assertIn("grad_balance KEEP current balance (deform64)", self.details(res)["grad_balance"])
+        cfg["args"]["task_grad_norm"] = 12.0
+        d2 = self.run_dir("gn12", TASKS3, config=cfg, enc_grad=True, val_overrides=cascade_val(TASKS3))
+        x = self.details(cmr.check(d2, TASKS3, STEPS, grad_balance_rule=True, grad_balance_from_step=5)[1])
+        self.assertIn("grad_balance KEEP task-grad-norm", x["grad_balance"])
+
+
+# Milestone 9 phase 2 (design §9): level-1 3-stage cascade fixtures.
+TASKS_RD = ["rigid", "deform"]
+
+
+def chain_config(min_pairs="n", n=4, n_deform=2):
+    cfg = cascade_config()
+    cfg["init_weights"]["cross_level"] = [2, 1]
+    cfg["cascade"].update({"source_level": 2, "source_step": 6000, "S_rel_diff_vs_level2": 0.01,
+                           "skip_stage": 2, "stages": [
+                               {"level": 4, "checkpoint_key": "frozen_stage", "origin_step": 11000,
+                                "fingerprint": {"n_vars": 120, "abs_sum": 1.0, "sq_sum": 1.0}},
+                               {"level": 2, "checkpoint_key": "model", "origin_step": 6000,
+                                "fingerprint": {"n_vars": 120, "abs_sum": 2.0, "sq_sum": 2.0}}]})
+    cfg["args"] = {"min_pairs": min_pairs, "group_size": n, "deform_group_size": n_deform, "p_pair": 0.1,
+                   "p_pdice": 0.1, "task_ratio_parsed": {"rigid": 1, "deform": 1}, "val_every": 10,
+                   "task_grad_norm": 12.0}
+    return cfg
+
+
+def chain_val(tasks, drop=()):
+    d = cascade_val(tasks)
+    for t in tasks:
+        if t == "deform":
+            d.update({"val_deform_frozen4/template_dice": 0.7, "val_deform_frozen4/pair_dice": 0.6,
+                      "val_deform/ncc_template": 0.5, "val_deform/ncc_template_identity": 0.3})
+        else:
+            d.update({"val_%s_frozen4/center_rms_mm" % t: 3.0, "val_%s_frozen4/pair_rms_mm" % t: 4.0})
+    for k in [k for k in d if k.split("/")[0] in drop]:
+        del d[k]
+    d[cmr.VAL_WALL_KEY] = 30.0
+    return d
+
+
+class TestLevel1Chain(CheckMixedRunCase):
+    """Milestone 9 phase 2: --expect-cascade-stages 2, --expect-min-pairs, --memory-budget-mb,
+    --project-steps."""
+
+    def chain_run(self, name, cfg=None, drop=(), n_pairs=None, **kw):
+        extra = dict(TIMING)
+        extra.update({"train_rigid/n_pairs": 4.0 if n_pairs is None else n_pairs,      # N 4 -> 4
+
+                      "train_deform/n_pairs": 2.0, "gpu_peak_mb": 30000.0})
+        kw.setdefault("val_overrides", chain_val(TASKS_RD, drop))
+        return self.run_dir(name, TASKS_RD, config=cfg or chain_config(), events=(BN_EVENT,),
+                            train_extra=extra, **kw)
+
+    def details(self, res):
+        return dict((n, x) for n, _, x in res)
+
+    def test_chain_pass_and_info_lines(self):
+        d = self.chain_run("c")
+        ok, res = cmr.check(d, TASKS_RD, STEPS, expect_cascade=True, expect_cascade_stages=2,
+                            expect_min_pairs="n", memory_budget_mb=36864, project_steps=8000)
+        self.assertTrue(ok, self.failed(res))
+        x = self.details(res)
+        for n in ("cascade_stages", "val_rigid_frozen4", "val_deform_frozen4", "min_pairs_config",
+                  "n_pairs_rigid", "n_pairs_deform", "deform_extra", "gpu_peak", "step_time"):
+            self.assertIn(n, x)
+        self.assertIn("vs level 2 0.01", x["cascade_config"])
+        self.assertIn("center_rms_mm composed 1 vs frozen 2 (better) vs frozen4 3 (better)", x["cascade_gain_rigid"])
+        self.assertIn("pair_dice composed 0.7 vs frozen 0.72 (worse) vs frozen4 0.6 (better)", x["cascade_gain_deform"])
+        self.assertIn("ncc_template 0.5 / n/a / n/a / 0.3", x["deform_extra"])
+        self.assertIn("neg_jac_pct 0 / n/a / n/a / n/a", x["deform_extra"])
+        self.assertIn("29.30 GiB) vs A100 budget 36 GiB: fits", x["gpu_peak"])
+        # rigid / deform 0.1 s each (TIMING 10 + 90 ms), one val/wall_s of 30 s, val_every 10,
+        # recal 3 s: 1.3 x (8000 x 0.1 + 800 x 30 + 3) = 32243.9 s
+        self.assertIn("ratio-weighted mean step 0.1 s", x["step_time"])
+        self.assertIn("= 32244 s", x["step_time"])
+        self.assertEqual(cmr.main([d, "--tasks", "rigid,deform", "--expect-cascade", "true",
+                                   "--expect-cascade-stages", "2", "--expect-min-pairs", "n",
+                                   "--memory-budget-mb", "36864", "--project-steps", "8000"]), 0)
+        # gpu_peak over budget: still INFO (passes)
+        x = self.details(cmr.check(d, TASKS_RD, STEPS, memory_budget_mb=20000)[1])
+        self.assertIn("exceeds -> keep rtx8000 or --lean-losses true", x["gpu_peak"])
+        # defaults: no milestone-9 result names
+        names = [n for n, _, _ in cmr.check(d, TASKS_RD, STEPS, expect_cascade=True)[1]]
+        self.assertFalse([n for n in names if n in ("cascade_stages", "val_rigid_frozen4", "deform_extra",
+                                                    "min_pairs_config", "gpu_peak", "step_time")])
+
+    def test_missing_frozen4_fails(self):
+        d = self.chain_run("c", drop=("val_rigid_frozen4",))
+        ok, res = cmr.check(d, TASKS_RD, STEPS, expect_cascade_stages=2)
+        self.assertFalse(ok)
+        self.assertEqual(self.failed(res), ["val_rigid_frozen4"])
+
+    def test_wrong_stages_fails(self):
+        cfg = chain_config()
+        cfg["cascade"]["stages"] = cfg["cascade"]["stages"][::-1]
+        ok, res = cmr.check(self.chain_run("c", cfg=cfg), TASKS_RD, STEPS, expect_cascade_stages=2)
+        self.assertEqual(self.failed(res), ["cascade_stages"])
+        self.assertIn("stages levels [2, 4]", self.details(res)["cascade_stages"])
+        cfg = chain_config()
+        cfg["init_weights"]["cross_level"] = [4, 2]
+        cfg["cascade"]["stages"][0]["origin_step"] = None
+        ok, res = cmr.check(self.chain_run("c2", cfg=cfg), TASKS_RD, STEPS, expect_cascade_stages=2)
+        self.assertEqual(self.failed(res), ["cascade_stages"])
+        # a milestone-8 (level-2) record checked as a chain: source level 4 != 2, no stages
+        ok, res = cmr.check(self.chain_run("c3", cfg=dict(cascade_config(), args=chain_config()["args"])),
+                            TASKS_RD, STEPS, expect_cascade_stages=2)
+        self.assertEqual(self.failed(res), ["cascade_config", "cascade_stages"])
+
+    def test_min_pairs(self):
+        good = self.chain_run("c", n_pairs=4.0)              # expected_pairs(4, 4, 0.1) == 4
+        ok, res = cmr.check(good, TASKS_RD, STEPS, expect_min_pairs="n")
+        self.assertTrue(ok, self.failed(res))
+        wrong = self.chain_run("c2", n_pairs=3.0)
+        ok, res = cmr.check(wrong, TASKS_RD, STEPS, expect_min_pairs="n")
+        self.assertEqual(self.failed(res), ["n_pairs_rigid"])
+        self.assertIn("expected 4", self.details(res)["n_pairs_rigid"])
+        ok, res = cmr.check(self.chain_run("c3", n_pairs=4.0), TASKS_RD, STEPS, expect_min_pairs="1")
+        self.assertEqual(self.failed(res), ["min_pairs_config"])
+        # resolved deform_group_size missing (null): falls back to group_size 4 -> 4 != logged 2
+        cfg = chain_config()
+        cfg["args"]["deform_group_size"] = None
+        ok, res = cmr.check(self.chain_run("c4", cfg=cfg, n_pairs=4.0), TASKS_RD, STEPS, expect_min_pairs="n")
+        self.assertEqual(self.failed(res), ["n_pairs_deform"])
+
+    def test_project_val_every(self):
+        # smoke-like cadence: val_every 100 in config.json; one val/wall_s of 30 s, mean step 0.1 s,
+        # recal 3 s
+        cfg = chain_config()
+        cfg["args"]["val_every"] = 100
+        d = self.chain_run("c", cfg=cfg)
+        # default: the run's own cadence -> 8000 / 100 = 80 passes: 1.3 x (800 + 80 x 30 + 3) = 4163.9 s
+        x = self.details(cmr.check(d, TASKS_RD, STEPS, project_steps=8000)[1])
+        self.assertIn("80 val x median", x["step_time"])
+        self.assertIn("= 4164 s", x["step_time"])
+        # long-run cadence 500 -> 16 passes: 1.3 x (800 + 16 x 30 + 3) = 1667.9 s
+        x = self.details(cmr.check(d, TASKS_RD, STEPS, project_steps=8000, project_val_every=500)[1])
+        self.assertIn("16 val x median", x["step_time"])
+        self.assertIn("= 1668 s", x["step_time"])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = cmr.main([d, "--tasks", "rigid,deform", "--project-steps", "8000", "--project-val-every", "500"])
+        self.assertEqual(rc, 0)
+        self.assertIn("= 1668 s", out.getvalue())
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            cmr.main([d, "--tasks", "rigid,deform", "--project-steps", "8000", "--project-val-every", "-1"])
+
+    def test_info_lines_missing_keys(self):
+        d = self.run_dir("plain", TASKS_RD)                  # no config.json, no timing / peak / wall keys
+        ok, res = cmr.check(d, TASKS_RD, STEPS, memory_budget_mb=36864, project_steps=8000)
+        self.assertTrue(ok, self.failed(res))
+        x = self.details(res)
+        self.assertIn("INFO gpu_peak n/a", x["gpu_peak"])
+        self.assertIn("rigid n/a s", x["step_time"])
+        self.assertTrue(x["step_time"].endswith("= n/a"), x["step_time"])
+
+    def test_expected_pairs(self):
+        for (n, want) in ((2, 2), (3, 3), (4, 4), (8, 8), (11, 11), (12, 13), (16, 24), (32, 99)):
+            self.assertEqual(cmr.expected_pairs(n, n, 0.1), want, n)
+        self.assertEqual(cmr.expected_pairs(1, 4, 0.1), 1)
+        self.assertEqual(cmr.expected_pairs(1, 16, 0.1), 24)
+        self.assertEqual(cmr.expected_pairs(4, 4, 1.0), 12)
 
 
 if __name__ == "__main__":

@@ -44,7 +44,31 @@ Tasks: rigid, affine (linear) and deform. Passes (exit 0) when:
     records whose ``step`` field (the window end) is >= --grad-balance-from-step; prints
     ``grad_balance KEEP task-grad-norm`` when every ratio is in [0.1, 10], else
     ``grad_balance FALLBACK deform:64``, or ``grad_balance UNDECIDED (treat as FALLBACK and
-    inspect the run)`` when values are missing. Informational: never a failure.
+    inspect the run)`` when values are missing. Informational: never a failure. A run trained
+    with clip 12 + deform:64 (config.json ``args.task_grad_norm == 0``) is labelled
+    ``KEEP current balance (deform64)`` instead of ``KEEP task-grad-norm``.
+* milestone 9 phase 2 (`.agents/tasks/milestone-9-phase2/design-m9-phase2.md` §9), all optional
+  and off by default (milestone-8 directories check exactly as before):
+  - ``--expect-cascade-stages 2`` (implies --expect-cascade; default 1 = the milestone-8 checks):
+    the level-1 3-stage cascade. config.json ``cascade.source_level == 2``, ``cascade.stages``
+    with levels [4, 2], each with an integer ``fingerprint.n_vars > 0`` and an integer
+    ``origin_step``; ``init_weights.via == 'cascade'`` and ``cross_level == [2, 1]``; final-step
+    finite ``val_<task>_frozen4/{center,pair}_rms_mm`` per linear task and
+    ``val_deform_frozen4/{template_dice,pair_dice}`` (besides the ``_frozen`` keys = levels 4 + 2).
+    INFO lines: cascade_gain also against ``_frozen4``, g_gap also for ``_frozen4``,
+    ``deform_extra`` (composed / frozen / frozen4 / identity for neg_jac_pct, inv_consistency_mm,
+    ncc_template, ncc_pair; the frozen centrality keys are not compared: ``_frozen`` describes the
+    level-2 residual SVF only), and ``S_rel_diff_vs_level2`` in the cascade_config line.
+  - ``--expect-min-pairs none|1|n`` (default none): config.json ``args.min_pairs`` equals the
+    value; with n every logged ``train_deform/n_pairs`` equals expected_pairs(N_deform, N_deform,
+    p_pdice) and ``train_<lin>/n_pairs`` equals expected_pairs(N, N, p_pair) (the stdlib mirror
+    of ``data_loading.postprocess.num_pairs``).
+  - ``--memory-budget-mb M`` (INFO ``gpu_peak`` line: max logged ``gpu_peak_mb`` vs M) and
+    ``--project-steps S`` (INFO ``step_time`` line: per-task mean compute + data ms, the
+    ratio-weighted mean step, median / first ``val/wall_s`` and the projected wall time
+    1.3 x (S x mean step + (S / val_every) x median val/wall_s + recal elapsed_s); missing keys
+    print n/a; ``--project-val-every V`` > 0 uses V instead of the run's val_every, e.g. 500
+    for the long run when analysing a VAL_EVERY 100 smoke). Never failures.
 INFO lines carry passed=True and the detail prefix 'INFO', so they never change the PASS/FAIL
 tally; they are printed with the label INFO.
 Prints one line per criterion and writes nothing.
@@ -53,6 +77,7 @@ import argparse
 import json
 import math
 import os
+import struct
 import sys
 
 LINEAR_TASKS = ("rigid", "affine")
@@ -71,6 +96,30 @@ CASCADE_SOURCE_LEVEL = 4
 SKIP_KEY = "train/cascade_skip_frac"
 GRAD_BALANCE_RANGE = (0.1, 10.0)
 GRAD_BALANCE_FROM_STEP = 50
+# Milestone 9 phase 2 (design §9): 3-stage (level-1) cascade, minimum pair count, INFO budgets.
+CHAIN_SOURCE_LEVEL = 2
+CHAIN_STAGE_LEVELS = [4, 2]
+CHAIN_CROSS_LEVEL = [2, 1]
+MIN_PAIRS_CHOICES = ("none", "1", "n")
+PAIR_COUNT_KEY = "n_pairs"
+DEFORM_EXTRA_KEYS = ("neg_jac_pct", "inv_consistency_mm", "ncc_template", "ncc_pair")
+VAL_WALL_KEY = "val/wall_s"
+GPU_PEAK_KEY = "gpu_peak_mb"
+PROJECT_MARGIN = 1.3
+
+
+def _f32(x):
+    """Round a Python float to float32 (stdlib mirror of the TF float32 arithmetic)."""
+    return struct.unpack("f", struct.pack("f", float(x)))[0]
+
+
+def expected_pairs(m_floor, n, p):
+    """Sampled ordered pairs per training step: min(max(m_floor, round(p n (n - 1))), n (n - 1)),
+    with the product in float32 and round half-to-even (Python 3 round = tf.round), exactly as
+    ``data_loading.postprocess.num_pairs`` (m_floor 1 for --min-pairs 1, n for --min-pairs n)."""
+    total = n * (n - 1)
+    k = int(round(_f32(_f32(total) * _f32(p))))
+    return min(max(m_floor, k), total)
 
 
 def _finite(v):
@@ -171,50 +220,121 @@ def _frozen_sets(val):
     return sorted(names)
 
 
-def _check_cascade(run_dir, tasks, val, recs):
+def _frozen4_sets(val):
+    """Validation set names with level-4-alone baselines (val_<set>_frozen4/..., level-1 chain)."""
+    names = set()
+    for k in val:
+        head = k.split("/", 1)[0]
+        if head.startswith("val_") and head.endswith("_frozen4"):
+            names.add(head[len("val_"):-len("_frozen4")])
+    return sorted(names)
+
+
+def _is_int(v):
+    return isinstance(v, int) and not isinstance(v, bool)
+
+
+def _verdict(c, z, deform):
+    if not (_finite(c) and _finite(z)):
+        return "n/a"
+    better = float(c) > float(z) if deform else float(c) < float(z)
+    return "better" if better else "worse"
+
+
+def _check_stages(cas, iw):
+    """Milestone 9 phase 2 (--expect-cascade-stages 2): the cascade.stages provenance list and
+    the level-2 -> level-1 init_weights record."""
+    problems = []
+    stages = cas.get("stages")
+    if not isinstance(stages, list):
+        problems.append("no cascade.stages list")
+        stages = []
+    levels = [s.get("level") for s in stages if isinstance(s, dict)]
+    if levels != CHAIN_STAGE_LEVELS:
+        problems.append("stages levels %r (expected %r)" % (levels, CHAIN_STAGE_LEVELS))
+    for s in stages:
+        if not isinstance(s, dict):
+            continue
+        n_vars = (s.get("fingerprint") or {}).get("n_vars")
+        if not (_is_int(n_vars) and n_vars > 0):
+            problems.append("level %s fingerprint.n_vars %r (expected > 0)" % (s.get("level"), n_vars))
+        if not _is_int(s.get("origin_step")):
+            problems.append("level %s origin_step %r is not an integer" % (s.get("level"), s.get("origin_step")))
+    if iw.get("cross_level") != CHAIN_CROSS_LEVEL:
+        problems.append("init_weights.cross_level %r (expected %r)" % (iw.get("cross_level"), CHAIN_CROSS_LEVEL))
+    detail = "stages %s" % ", ".join("level %s key %s origin step %s" % (
+        s.get("level"), s.get("checkpoint_key"), s.get("origin_step")) for s in stages if isinstance(s, dict))
+    return [("cascade_stages", not problems, detail + ("" if not problems else "; " + "; ".join(problems)))]
+
+
+def _deform_extra(val):
+    """INFO deform_extra (level-1 chain): composed / frozen (4 + 2) / frozen4 / identity."""
+    parts = []
+    for k in DEFORM_EXTRA_KEYS:
+        parts.append("%s %s / %s / %s / %s" % (
+            k, _fmt(val.get("val_deform/" + k)), _fmt(val.get("val_deform_frozen/" + k)),
+            _fmt(val.get("val_deform_frozen4/" + k)), _fmt(val.get("val_deform/%s_identity" % k))))
+    return [("deform_extra", True, "INFO deform_extra (composed / frozen / frozen4 / identity): %s"
+             % ", ".join(parts))]
+
+
+def _check_cascade(run_dir, tasks, val, recs, stages=1):
     """Milestone 8 --expect-cascade: provenance, final-step frozen baselines (failures) and the
-    cascade_gain / data-wait / g_gap INFO lines (never failures)."""
+    cascade_gain / data-wait / g_gap INFO lines (never failures). ``stages`` 2 (milestone 9
+    phase 2): the level-1 3-stage cascade (source level 2, stages [4, 2], ``_frozen4`` keys)."""
     cfg = _load_config(run_dir)
     cas = cfg.get("cascade") or {}
     iw = cfg.get("init_weights") or {}
     fp = cas.get("fingerprint") or {}
     step, n_vars = cas.get("source_step"), fp.get("n_vars")
+    want_level = CHAIN_SOURCE_LEVEL if stages == 2 else CASCADE_SOURCE_LEVEL
     problems = []
     if not cas:
         problems.append("config.json has no cascade record")
     if not cas.get("source_checkpoint"):
         problems.append("no source_checkpoint")
-    if cas.get("source_level") != CASCADE_SOURCE_LEVEL:
-        problems.append("source_level %r (expected %d)" % (cas.get("source_level"), CASCADE_SOURCE_LEVEL))
+    if cas.get("source_level") != want_level:
+        problems.append("source_level %r (expected %d)" % (cas.get("source_level"), want_level))
     if not isinstance(step, int) or isinstance(step, bool):
         problems.append("source_step %r is not an integer" % (step,))
     if not (isinstance(n_vars, int) and not isinstance(n_vars, bool) and n_vars > 0):
         problems.append("fingerprint.n_vars %r (expected > 0)" % (n_vars,))
     if iw.get("via") != "cascade":
         problems.append("init_weights.via %r (expected 'cascade')" % (iw.get("via"),))
-    res = [("cascade_config", not problems, "source %s, level %s, step %s, fingerprint n_vars %s, S rel diff %s%s" % (
-        cas.get("source_checkpoint"), cas.get("source_level"), step, n_vars, cas.get("S_rel_diff_vs_level4"),
+    s_rel = "S rel diff %s" % (cas.get("S_rel_diff_vs_level4"),)
+    if "S_rel_diff_vs_level2" in cas:
+        s_rel = "S rel diff vs level 4 %s, vs level 2 %s" % (cas.get("S_rel_diff_vs_level4"),
+                                                           cas.get("S_rel_diff_vs_level2"))
+    res = [("cascade_config", not problems, "source %s, level %s, step %s, fingerprint n_vars %s, %s%s" % (
+        cas.get("source_checkpoint"), cas.get("source_level"), step, n_vars, s_rel,
         "" if not problems else "; " + "; ".join(problems)))]
-    for t in tasks:
-        if t == DEFORM_TASK:
-            keys = ["val_deform_frozen/" + k for k in DEFORM_FROZEN_KEYS]
-        else:
-            keys = ["val_%s_frozen/%s" % (t, k) for k in LINEAR_FROZEN_KEYS]
-        missing = [k for k in keys if not _finite(val.get(k))]
-        res.append(("val_%s_frozen" % t, not missing, "final-step frozen-stage baseline %s" % (
-            "complete" if not missing else "missing/non-finite: %s" % missing)))
-    for name in _frozen_sets(val):
+    if stages == 2:
+        res += _check_stages(cas, iw)
+    suffixes = ("_frozen", "_frozen4") if stages == 2 else ("_frozen",)
+    for suffix in suffixes:
+        for t in tasks:
+            if t == DEFORM_TASK:
+                keys = ["val_deform%s/%s" % (suffix, k) for k in DEFORM_FROZEN_KEYS]
+            else:
+                keys = ["val_%s%s/%s" % (t, suffix, k) for k in LINEAR_FROZEN_KEYS]
+            missing = [k for k in keys if not _finite(val.get(k))]
+            res.append(("val_%s%s" % (t, suffix), not missing, "final-step %s baseline %s" % (
+                "frozen-stage" if suffix == "_frozen" else "frozen level-4",
+                "complete" if not missing else "missing/non-finite: %s" % missing)))
+    with4 = set(_frozen4_sets(val))
+    for name in sorted(set(_frozen_sets(val)) | with4):
         deform = name.split("_", 1)[0] == DEFORM_TASK
         parts = []
         for k in (DEFORM_FROZEN_KEYS if deform else LINEAR_FROZEN_KEYS):
             c, z = val.get("val_%s/%s" % (name, k)), val.get("val_%s_frozen/%s" % (name, k))
-            if _finite(c) and _finite(z):
-                better = float(c) > float(z) if deform else float(c) < float(z)
-                verdict = "better" if better else "worse"
-            else:
-                verdict = "n/a"
-            parts.append("%s composed %s vs frozen %s (%s)" % (k, _fmt(c), _fmt(z), verdict))
+            part = "%s composed %s vs frozen %s (%s)" % (k, _fmt(c), _fmt(z), _verdict(c, z, deform))
+            if name in with4:
+                z4 = val.get("val_%s_frozen4/%s" % (name, k))
+                part += " vs frozen4 %s (%s)" % (_fmt(z4), _verdict(c, z4, deform))
+            parts.append(part)
         res.append(("cascade_gain_%s" % name, True, "INFO cascade_gain %s: %s" % (name, ", ".join(parts))))
+    if stages == 2 and DEFORM_TASK in tasks:
+        res += _deform_extra(val)
     for t in tasks:
         dk, ck = "train_%s/data_ms" % t, "train_%s/compute_ms" % t
         d = _mean(r["data"][dk] for r in recs if dk in r["data"])
@@ -234,7 +354,7 @@ def _g_gap(val, tasks):
         if t not in LINEAR_TASKS:
             continue
         keys = G_GAP_KEYS + (G_GAP_AFFINE_KEYS if t == "affine" else ())
-        for kind, suffix in (("composed", ""), ("frozen", "_frozen")):
+        for kind, suffix in (("composed", ""), ("frozen", "_frozen"), ("frozen4", "_frozen4")):
             base, g = "val_%s%s/" % (t, suffix), "val_%s_g%s/" % (t, suffix)
             if not any(k.startswith(base) for k in val):
                 continue
@@ -306,21 +426,108 @@ def grad_balance(recs, tasks, from_step=GRAD_BALANCE_FROM_STEP):
         from_step, ", ".join("%s %.3g" % (t, ratios[t]) for t in linear), lo, hi)
 
 
-def _check_grad_balance(recs, tasks, from_step):
+def _check_grad_balance(recs, tasks, from_step, args=None):
     verdict, _, why = grad_balance(recs, tasks, from_step)
-    label = {"KEEP": "KEEP task-grad-norm", "FALLBACK": "FALLBACK deform:64",
+    # A clip 12 + deform:64 run (task_grad_norm 0) keeps its current balance, not task-grad-norm.
+    keep = "KEEP current balance (deform64)" if (args or {}).get("task_grad_norm") == 0 else "KEEP task-grad-norm"
+    label = {"KEEP": keep, "FALLBACK": "FALLBACK deform:64",
              "UNDECIDED": "UNDECIDED (treat as FALLBACK and inspect the run)"}[verdict]
     return [("grad_balance", True, "INFO grad_balance %s: %s" % (label, why))]
 
 
+def _check_min_pairs(recs, tasks, args, expect):
+    """Milestone 9 phase 2 --expect-min-pairs: config.json args.min_pairs, and with 'n' every
+    logged train_<task>/n_pairs equals expected_pairs (deform: N_deform / p_pdice, linear: N / p_pair)."""
+    got = args.get("min_pairs")
+    res = [("min_pairs_config", got == expect, "config.json args.min_pairs %r (expected %r)" % (got, expect))]
+    if expect != "n":
+        return res
+    n = args.get("group_size")
+    # config.json stores the resolved value (= --group-size when unset); the or fallback is kept
+    # for robustness.
+    n_deform = args.get("deform_group_size") or n
+    for t in tasks:
+        if t == DEFORM_TASK:
+            size, p = n_deform, args.get("p_pdice")
+        else:
+            size, p = n, args.get("p_pair")
+        key = "train_%s/%s" % (t, PAIR_COUNT_KEY)
+        vals = [r["data"][key] for r in recs if key in r["data"]]
+        if not (_is_int(size) and _finite(p)):
+            res.append(("n_pairs_%s" % t, False, "config.json args lack the group size / pair probability "
+                        "(size %r, p %r)" % (size, p)))
+            continue
+        want = expected_pairs(size, size, p)
+        bad = [v for v in vals if not (_finite(v) and abs(float(v) - want) < 1e-6)]
+        res.append(("n_pairs_%s" % t, bool(vals) and not bad, "%d logged %s values, expected %d (N %d, p %g)%s" % (
+            len(vals), key, want, size, float(p), "" if not bad else "; mismatching %s" % bad[:5])))
+    return res
+
+
+def _gpu_peak(recs, budget_mb):
+    """INFO gpu_peak: max logged gpu_peak_mb (process-lifetime allocator peak) vs the budget."""
+    vals = [float(r["data"][GPU_PEAK_KEY]) for r in recs if _finite(r["data"].get(GPU_PEAK_KEY))]
+    if not vals:
+        return [("gpu_peak", True, "INFO gpu_peak n/a (no %s logged) vs A100 budget %.0f GiB"
+                 % (GPU_PEAK_KEY, budget_mb / 1024.0))]
+    peak = max(vals)
+    verdict = "fits" if peak <= budget_mb else "exceeds -> keep rtx8000 or --lean-losses true"
+    return [("gpu_peak", True, "INFO gpu_peak %.0f MiB (%.2f GiB) vs A100 budget %.0f GiB: %s"
+             % (peak, peak / 1024.0, budget_mb / 1024.0, verdict))]
+
+
+def _step_time(recs, tasks, args, project_steps, project_val_every=0):
+    """INFO step_time: per-task mean compute + data ms, the ratio-weighted mean step, val/wall_s
+    and the projected wall time 1.3 x (S x mean step + (S / val_every) x median val/wall_s +
+    recal elapsed_s); the recal event's elapsed_s already contains its pre / post validation
+    passes (design §8 accounting rule). ``project_val_every`` > 0 is the projected run's
+    validation cadence (a smoke run validates more often than the long run); 0 = the analysed
+    run's own ``val_every``. Missing values print n/a."""
+    per = {}
+    for t in tasks:
+        c = _mean(r["data"]["train_%s/compute_ms" % t] for r in recs if "train_%s/compute_ms" % t in r["data"])
+        d = _mean(r["data"]["train_%s/data_ms" % t] for r in recs if "train_%s/data_ms" % t in r["data"])
+        per[t] = (c + d) / 1000.0 if _finite(c) and _finite(d) else float("nan")
+    ratio = args.get("task_ratio_parsed") or {}
+    w = {t: float(ratio.get(t, 0.0)) for t in tasks}
+    if sum(w.values()) > 0 and all(_finite(per[t]) for t in tasks if w[t] > 0):
+        mean_step = sum(w[t] * per[t] for t in tasks if w[t] > 0) / sum(w.values())
+    else:
+        mean_step = float("nan")
+    walls = [float(r["data"][VAL_WALL_KEY]) for r in recs if _finite(r["data"].get(VAL_WALL_KEY))]
+    med_wall = _median(walls) if walls else float("nan")
+    first_wall = walls[0] if walls else float("nan")
+    events = [r["data"] for r in recs if r["data"].get("event") == "bn_recalibration"]
+    recal = float(events[-1].get("elapsed_s")) if events and _finite(events[-1].get("elapsed_s")) else 0.0
+    val_every = project_val_every if project_val_every > 0 else args.get("val_every")
+    n_val = project_steps / float(val_every) if _is_int(val_every) and val_every > 0 else 0.0
+    if _finite(mean_step) and (n_val == 0 or _finite(med_wall)):
+        total = PROJECT_MARGIN * (project_steps * mean_step + n_val * (med_wall if n_val else 0.0) + recal)
+        proj = "%.0f s (%.2f h)" % (total, total / 3600.0)
+    else:
+        proj = "n/a"
+    return [("step_time", True, "INFO step_time: per task %s; ratio-weighted mean step %s s; val/wall_s median %s "
+             "(first %s, %d passes); recal %.1f s; projected %d steps = %.1f x (S x step + %g val x median "
+             "val/wall_s + recal) = %s" % (
+                 ", ".join("%s %s s" % (t, _fmt(per[t])) for t in tasks), _fmt(mean_step), _fmt(med_wall),
+                 _fmt(first_wall), len(walls), recal, project_steps, PROJECT_MARGIN, n_val, proj))]
+
+
 def check(run_dir, tasks, steps, expect_best=True, expect_init_weights=None, expect_enc_grad=False,
           expect_cascade=False, expect_bn_recal=False, expect_skip=False, grad_balance_rule=False,
-          grad_balance_from_step=GRAD_BALANCE_FROM_STEP, max_nonfinite_frac=0.0):
+          grad_balance_from_step=GRAD_BALANCE_FROM_STEP, max_nonfinite_frac=0.0, expect_cascade_stages=1,
+          expect_min_pairs=None, memory_budget_mb=0, project_steps=0, project_val_every=0):
     """Returns (ok, [(name, passed, detail)]). ``expect_init_weights`` None (not checked) |
     'none' (not checked) | 'full' | 'partial'; ``expect_enc_grad``: check the milestone-7
     encoder grad-norm diagnostics. Milestone 8 (module docstring): ``expect_cascade``,
     ``expect_bn_recal``, ``expect_skip``, ``grad_balance_rule`` (implies ``expect_enc_grad``;
-    the verdict is INFO only) with ``grad_balance_from_step``."""
+    the verdict is INFO only) with ``grad_balance_from_step``. Milestone 9 phase 2:
+    ``expect_cascade_stages`` 1 | 2 (2 implies ``expect_cascade``), ``expect_min_pairs`` None /
+    'none' (not checked) | '1' | 'n', ``memory_budget_mb`` and ``project_steps`` (INFO only,
+    0 = off; ``project_val_every`` > 0 overrides the run's val_every in the projection). The
+    defaults reproduce the milestone-8 checks."""
+    if expect_cascade_stages not in (1, 2):
+        raise ValueError("expect_cascade_stages must be 1 or 2, got %r" % (expect_cascade_stages,))
     res = []
     with open(os.path.join(run_dir, "logs", "metrics.jsonl")) as f:
         recs = [json.loads(line) for line in f if line.strip()]
@@ -388,14 +595,21 @@ def check(run_dir, tasks, steps, expect_best=True, expect_init_weights=None, exp
         res += _check_init_weights(run_dir, tasks, expect_init_weights)
     if expect_enc_grad or grad_balance_rule:
         res += _check_enc_grad(recs, tasks)
-    if expect_cascade:
-        res += _check_cascade(run_dir, tasks, val, recs)
+    args = _load_config(run_dir).get("args") or {}
+    if expect_cascade or expect_cascade_stages == 2:
+        res += _check_cascade(run_dir, tasks, val, recs, stages=expect_cascade_stages)
     if expect_bn_recal:
         res += _check_bn_recal(recs)
     if expect_skip:
         res += _check_skip(recs)
     if grad_balance_rule:
-        res += _check_grad_balance(recs, tasks, grad_balance_from_step)
+        res += _check_grad_balance(recs, tasks, grad_balance_from_step, args)
+    if expect_min_pairs not in (None, "none"):
+        res += _check_min_pairs(recs, tasks, args, expect_min_pairs)
+    if memory_budget_mb > 0:
+        res += _gpu_peak(recs, memory_budget_mb)
+    if project_steps > 0:
+        res += _step_time(recs, tasks, args, project_steps, project_val_every)
     return all(p for _, p, _ in res), res
 
 
@@ -427,7 +641,24 @@ def main(argv=None):
     ap.add_argument("--max-nonfinite-frac", type=float, default=0.0,
                     help="allowed fraction of non-finite (skipped) steps; 0 = none allowed. Use e.g. "
                     "0.06 with AMP, where the dynamic loss scale overflows a few times early on")
+    ap.add_argument("--expect-cascade-stages", type=int, default=1, choices=[1, 2],
+                    help="milestone 9 phase 2: 2 = level-1 3-stage cascade (implies --expect-cascade; "
+                    "source level 2, cascade.stages [4, 2], val_<task>_frozen4 baselines); 1 = milestone 8")
+    ap.add_argument("--expect-min-pairs", default="none", choices=list(MIN_PAIRS_CHOICES),
+                    help="milestone 9 phase 2: config.json args.min_pairs equals this; with n every logged "
+                    "train_<task>/n_pairs equals the expected pair count; none = not checked")
+    ap.add_argument("--memory-budget-mb", type=float, default=0.0,
+                    help="INFO gpu_peak line: max logged gpu_peak_mb vs this budget (e.g. 36864 = A100 "
+                    "36 GiB); 0 = off, never a failure")
+    ap.add_argument("--project-steps", type=int, default=0,
+                    help="INFO step_time line: mean step times and the projected wall time of a run with "
+                    "this many steps; 0 = off, never a failure")
+    ap.add_argument("--project-val-every", type=int, default=0,
+                    help="validation cadence of the projected run in the step_time line (e.g. 500 for "
+                    "the long run when analysing a VAL_EVERY 100 smoke); 0 = the analysed run's val_every")
     a = ap.parse_args(argv)
+    if a.project_val_every < 0:
+        ap.error("--project-val-every must be >= 0, got %d" % a.project_val_every)
     tasks = [t for t in a.tasks.split(",") if t]
     unknown = [t for t in tasks if t not in LINEAR_TASKS + (DEFORM_TASK,)]
     if unknown:
@@ -437,7 +668,9 @@ def main(argv=None):
                     expect_cascade=a.expect_cascade == "true", expect_bn_recal=a.expect_bn_recal == "true",
                     expect_skip=a.expect_skip == "true", grad_balance_rule=a.grad_balance_rule == "true",
                     grad_balance_from_step=a.grad_balance_from_step,
-                    max_nonfinite_frac=a.max_nonfinite_frac)
+                    max_nonfinite_frac=a.max_nonfinite_frac, expect_cascade_stages=a.expect_cascade_stages,
+                    expect_min_pairs=a.expect_min_pairs, memory_budget_mb=a.memory_budget_mb,
+                    project_steps=a.project_steps, project_val_every=a.project_val_every)
     for name, passed, detail in res:
         label = "INFO" if passed and detail.startswith("INFO") else ("PASS" if passed else "FAIL")
         print("%s %-22s %s" % (label, name, detail))

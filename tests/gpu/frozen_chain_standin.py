@@ -1,10 +1,14 @@
 """Frozen-chain stand-in for level-1 memory measurements (milestone 9 phase 1, R4.2).
 
-Design: `.agents/tasks/milestone-9/design-m9-phase1.md` section 5.2. The 3-level cascade
-(level 4 -> level 2 -> level 1) is implemented after Phase 1 (design section 6.1, R5.1); until
-then `tests/gpu/measure_level_memory.py --level 1 --cascade true` measures the level-1 training
-step with this stand-in in place of the frozen chain. It lives in tests/gpu (not models/) and is
-imported only by the measurement tool, which calls `configure_tf_precision` first.
+Design: `.agents/tasks/milestone-9/design-m9-phase1.md` section 5.2. The real implementation is
+`models.cascade.FrozenChain` (milestone 9 phase 2, `.agents/tasks/milestone-9-phase2/
+design-m9-phase2.md` section 2); this stand-in is kept for
+`tests/gpu/measure_level_memory.py --level 1 --cascade true` (records schema-compatible with
+job 10516237; since phase 2 ``val_peak_mb`` includes the ``_frozen4`` fields U4 / U4_inv / V4,
+~+1 GB at level-1 N 4, so it is not like-for-like with that job) and for test T-C2, which asserts both give identical outputs. ``n_stages`` = 2, so the
+Trainer runs its chain branches with it (``linear_stages`` / ``deform_stages``: the same
+formulas as FrozenChain). It lives in tests/gpu (not models/) and is imported only by the
+measurement tool and tests, which call `configure_tf_precision` first.
 
 * `FrozenChainStandIn(stage4, model2)`: ``level`` = 2 (the trainable level-1 stage's previous
   level); ``stage4`` = a `models.cascade.FrozenStage` of a random level-4 model; ``model2`` = a
@@ -16,7 +20,8 @@ imported only by the measurement tool, which calls `configure_tf_precision` firs
   every model builds at min(N, --build-n)).
 * `patched_prev_level()`: context manager setting ``models.cascade.PREV_LEVEL = {2: 4, 1: 2}``
   (so `Trainer(cascade=standin)` accepts a level-1 model) and restoring the original dict in
-  ``finally``. ``FROZEN_LEVEL`` is bound at import, so `FrozenStage` is unaffected.
+  ``finally``. Since phase 2 the module constant is already that dict, so this is a no-op kept
+  for the measurement tool and old scripts. ``FROZEN_LEVEL`` is a literal 4, unaffected.
 """
 import contextlib
 
@@ -33,6 +38,7 @@ class FrozenChainStandIn(object):
     """Frozen level 4 -> level 2 chain in front of a trainable level-1 stage (random weights)."""
 
     level = 2
+    n_stages = 2                     # Trainer dispatch: the chain branches (phase 2, design 2.1)
 
     def __init__(self, stage4, model2):
         if stage4.level != CS.FROZEN_LEVEL:
@@ -67,6 +73,25 @@ class FrozenChainStandIn(object):
         A4 = self.stage4.linear(x2, task)
         out = self.model2(CS.prewarp_linear(x2, A4, P.LEVEL_SPACING[2]), task=task, training=False)
         return tf.stop_gradient(CS.compose_linear(out["A_raw"], A4, self.model2.centering))
+
+    def linear_stages(self, images_l1, task):
+        """{'A': `linear` result, 'A4': the level-4 stage alone} (same formulas as FrozenChain)."""
+        x2 = CS.pool_to_coarser(images_l1)
+        A4 = self.stage4.linear(x2, task)
+        out = self.model2(CS.prewarp_linear(x2, A4, P.LEVEL_SPACING[2]), task=task, training=False)
+        return {"A": tf.stop_gradient(CS.compose_linear(out["A_raw"], A4, self.model2.centering)),
+                "A4": tf.stop_gradient(A4)}
+
+    def deform_stages(self, images_l1):
+        """`deform` plus U4, U4_inv, V4 (the level-4 stage alone, upsampled to level 1)."""
+        x2 = CS.pool_to_coarser(images_l1)
+        p4 = self.stage4.deform(x2)
+        out = self.model2(CS.prewarp_deform(x2, p4["U"]), task=DEFORM_TASK, training=False)
+        u2, u2i = diffeo.compose_cascade(p4["U"], p4["U_inv"], out["u"], out["u_inv"])
+        up = diffeo.upsample_displacement
+        return {"U": tf.stop_gradient(up(u2)), "U_inv": tf.stop_gradient(up(u2i)),
+                "V": tf.stop_gradient(up(out["v"])), "U4": tf.stop_gradient(up(p4["U"])),
+                "U4_inv": tf.stop_gradient(up(p4["U_inv"])), "V4": tf.stop_gradient(up(p4["V"]))}
 
 
 def build_standin(model_config, build_n=2):

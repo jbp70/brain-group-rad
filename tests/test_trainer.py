@@ -32,7 +32,7 @@ from runtime import metrics as M
 from runtime import optimizers as O
 from runtime.logging import RunLogger, make_run_dir
 from runtime.run import (DEFORM_BEST_METRIC, DEFORM_DIAG_KEYS, DEFORM_LOSS_KEYS, DEFORM_NCC_KEYS, DIAG_KEYS,
-                         ENC_GRAD_KEYS, TASK_GRAD_NORM_EPS, TASK_GRAD_NORM_KEYS,
+                         ENC_GRAD_KEYS, PAIR_COUNT_KEY, TASK_GRAD_NORM_EPS, TASK_GRAD_NORM_KEYS,
                          TaskSchedule, Trainer, TrainConfig, collapse_diagnostics, scale_gradients,
                          task_grad_norm_scale)
 from runtime.schedulers import ScheduleConfig
@@ -844,6 +844,67 @@ class TestDeformStep(DeformCase):
         # A healthy (distinct) group has a clearly non-zero spread.
         tr2 = self.make_deform()
         self.assertGreater(tr2.train_step("deform", self.dgroup["batch"])["diag_feat_rel_spread"], 1e-3)
+
+
+class TestMinPairsTrainer(DeformCase):
+    """T-G1 (milestone 9 phase 2, design-m9-phase2 section 5): --min-pairs '1' builds no min_pairs
+    op and no n_pairs result key; 'n' adds both; validation pairs are unaffected."""
+
+    def _pp_ops(self, tr):
+        pp = tr.postprocess["deform"]
+        x = tf.TensorSpec((N,) + tuple(P.LEVEL_SHAPE[4]) + (1,), tf.float32)
+        y = tf.TensorSpec((N,) + tuple(P.LEVEL_SHAPE[4]) + (1,), tf.uint8)
+        fn = tf.function(lambda a, b: pp(a, b), input_signature=[x, y])
+        gd = fn.get_concrete_function().graph.as_graph_def()
+        # Outer nodes plus the nodes of the function library (tf.cond branch bodies).
+        return [n.name for n in gd.node] + [n.name for f in gd.library.function for n in f.node_def]
+
+    def test_graphs_and_results(self):
+        ratio = {"rigid": 1.0, "deform": 1.0}
+        tr1 = self.make_deform(config(task_ratio=ratio))
+        trn = self.make_deform(config(task_ratio=ratio, min_pairs="n"))
+        for tr, on in ((tr1, False), (trn, True)):
+            for task, batch in (("rigid", self.groups["rigid"]["batch"]), ("deform", self.dgroup["batch"])):
+                res = tr.train_step(task, batch)
+                self.assertTrue(res["finite"])
+                self.assertEqual(PAIR_COUNT_KEY in res, on, (task, on))
+                if on:
+                    self.assertEqual(res[PAIR_COUNT_KEY], float(N))      # N 4, p 0.1 -> k = N (cycle)
+                ops = [op.name for op in tr._steps[task].get_concrete_function().graph.get_operations()]
+                self.assertEqual(any("min_pairs/" in o for o in ops), on, (task, on))
+        ops1, opsn = self._pp_ops(tr1), self._pp_ops(trn)
+        self.assertFalse(any("min_pairs/" in o for o in ops1))
+        self.assertTrue(any("min_pairs/" in o for o in opsn))
+        self.assertGreater(len(opsn), len(ops1))
+        free_memory()
+
+    def test_logged_key(self):
+        paths = make_run_dir(self.tmp, "minpairs")
+        logger = RunLogger(paths, backend="jsonl", tensorboard=False, quiet=True)
+        tr = self.make_deform(config(task_ratio={"deform": 1.0}, min_pairs="n"), logger=logger)
+        tr.fit(2)
+        logger.close()
+        with open(logger.metrics_path) as f:
+            recs = [json.loads(line)["data"] for line in f]
+        self.assertEqual([r["train_deform/n_pairs"] for r in recs if "train_deform/n_pairs" in r][-1], float(N))
+        tr1 = self.make_deform(config(task_ratio={"deform": 1.0}))
+        tr1.fit(1)
+        self.assertNotIn(PAIR_COUNT_KEY, tr1.history[-1])
+
+    def test_validation_unaffected_and_invalid(self):
+        g = self.groups["rigid"]
+        val_sets = {"rigid": fd.ValidationSet.from_group(g["images"], g["T"], g["T_target"], "rigid", 4),
+                    "deform": fd.DeformValidationSet.from_group(self.dgroup["images"], self.dgroup["labels"], 4)}
+        ratio = {"rigid": 1.0, "deform": 1.0}
+        m1 = self.make_deform(config(task_ratio=ratio), val_sets=val_sets).validate(max_groups=1)
+        mn = self.make_deform(config(task_ratio=ratio, min_pairs="n"), val_sets=val_sets).validate(max_groups=1)
+        self.assertEqual(sorted(m1), sorted(mn))
+        for k in m1:
+            if "time" in k:
+                continue
+            self.assertEqual(m1[k], mn[k], k)
+        with self.assertRaises(ValueError):
+            self.make_deform(config(task_ratio=ratio, min_pairs="x"))
 
 
 class TestThreeTasks(DeformCase):

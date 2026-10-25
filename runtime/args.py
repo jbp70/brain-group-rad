@@ -35,12 +35,17 @@ Pattern from the rigid project's ``runtime/args.py`` (argparse + ``str2bool``). 
 * level cascade (milestone 8, `.agents/tasks/milestone-8/design.md` §10): --cascade-from None
   (off), --cascade-skip-prob 0, --bn-recal-batches 0 (off), --bn-recal-freeze true,
   --val-pair-chunk 16. With these defaults every run is unchanged (level-4 runs bit-identical).
+  --cascade-from is valid with --level 2 (level-4 source) or --level 1 (level-2 cascade source,
+  milestone 9 phase 2 design §4.1).
 * memory knobs (milestone 9, `.agents/tasks/milestone-9/design-m9-phase1.md` §3): --lean-sampler
   false, --lean-losses false, --split-group-conv false, --gradient-checkpointing none ('full'
   added). None is a ModelConfig field; with the defaults levels 4 and 2 are bit-identical.
   'full' and the two lean flags need 'deform' in --task-ratio. --filters (6 entries),
   --reductions and --dense (>= 1 entries) must be >= 1; `models.width_presets` has named width
   presets that expand to --filters / --decoder-widths.
+* minimum pair count (milestone 9 phase 2, `.agents/tasks/milestone-9-phase2/design-m9-phase2.md`
+  section 5): --min-pairs 1 (today: at least 1 sampled training pair per step); 'n' raises the
+  floor to the group size N. --p-pair and --p-pdice must be in (0, 1].
 """
 import argparse
 import collections
@@ -228,6 +233,12 @@ def build_parser():
                    help="raw global norm below which a step is left unscaled (scale 1); >= 0. "
                    "Default 1e-3 = the collapse detector's zero-gradient threshold")
     g.add_argument("--p-pair", type=float, default=0.1)
+    g.add_argument("--min-pairs", choices=["1", "n"], default="1",
+                   help="minimum sampled ordered pairs per training step for the pairwise losses "
+                   "(linear --p-pair and deform --p-pdice, incl. pair LNCC): 1 = today; n = the group "
+                   "size N (k = min(max(N, round(p N (N-1))), N (N-1)); k == N samples a random "
+                   "N-cycle so every image is once source and once target). Validation pairs are "
+                   "unaffected")
     g.add_argument("--flip-prob", type=float, default=0.5, help="per-axis group flip probability")
     g.add_argument("--target-iters", type=int, default=10)
     g = p.add_argument_group("deformable task (milestone 6; 'deform' in --task-ratio)")
@@ -339,13 +350,17 @@ def build_parser():
                    "residual composed with the frozen estimate. Needs --level 2, the identical "
                    "model flags of the source run and --deform-residual-affine false; excludes "
                    "--init-weights. On a resume the path is not read (the frozen weights come "
-                   "from the run's checkpoint)")
+                   "from the run's checkpoint). --level 1 (milestone 9): the path is a level-2 "
+                   "CASCADE run's checkpoint; its level-2 model and its stored frozen level-4 "
+                   "stage form a frozen 4 -> 2 chain in front of the trainable level-1 model "
+                   "(a verbatim copy of the level-2 weights)")
     g.add_argument("--cascade-skip-prob", type=float, default=0.0,
                    help="level skipping: probability per step (= per group) that the frozen stage "
-                   "is skipped (A_prev = I, U = 0) in training; in [0, 1), > 0 needs "
-                   "--cascade-from; 0 = off (default, no skip ops built). Validation never skips")
+                   "is skipped (A_prev = I, U = 0) in training; at level 1 the LAST frozen stage "
+                   "(level 2) is skipped (A_prev = A4, U = U4 of the level-4 stage); in [0, 1), > 0 "
+                   "needs --cascade-from; 0 = off (default, no skip ops built). Validation never skips")
     g.add_argument("--bn-recal-batches", type=int, default=0,
-                   help="BN recalibration of the trainable level-2 stage at the start of a fresh "
+                   help="BN recalibration of the trainable level-2 (or level-1) stage at the start of a fresh "
                    "cascade run: this many forward-only training batches (split over the tasks "
                    "by --task-ratio, >= one per task), exact average of the batch statistics; "
                    "0 = off (default). > 0 needs --cascade-from and --norm batch; never repeated "
@@ -454,9 +469,9 @@ def parse_args(argv=None):
     # level and the config equality are checked in main.py (fresh runs only).
     cascade = args.cascade_from is not None
     if cascade:
-        if args.level != 2:
-            parser.error("--cascade-from needs --level 2 (the cascade is level 4 -> level 2), got "
-                         "--level %d" % args.level)
+        if args.level not in (2, 1):
+            parser.error("--cascade-from needs --level 2 or --level 1 (the cascade is level 4 -> "
+                         "level 2, or level 4 -> 2 -> 1), got --level %d" % args.level)
         if args.init_weights is not None:
             parser.error("--cascade-from and --init-weights are mutually exclusive (the cascade "
                          "copies the source weights into the level-2 model itself)")
@@ -481,6 +496,8 @@ def parse_args(argv=None):
             parser.error("--bn-recal-batches > 0 needs --norm batch, got --norm %s" % args.norm)
         if args.dry_run:
             parser.error("--bn-recal-batches > 0 cannot be combined with --dry-run")
+    if not (0.0 < args.p_pair <= 1.0):
+        parser.error("--p-pair must be in (0, 1], got %r" % args.p_pair)
     if not (0.0 < args.p_pdice <= 1.0):
         parser.error("--p-pdice must be in (0, 1], got %r" % args.p_pdice)
     sim = ("lambda_dice_template", "lambda_pdice", "lambda_ncc_template", "lambda_ncc_pair")
@@ -646,7 +663,8 @@ def train_config_from_args(args):
                        overfit_fold_max=args.overfit_fold_max,
                        val_deform_max_pairs=args.val_deform_max_pairs,
                        cascade_skip_prob=args.cascade_skip_prob, val_pair_chunk=args.val_pair_chunk,
-                       lean_sampler=bool(args.lean_sampler), lean_losses=bool(args.lean_losses))
+                       lean_sampler=bool(args.lean_sampler), lean_losses=bool(args.lean_losses),
+                       min_pairs=args.min_pairs)
 
 
 def args_to_dict(args):

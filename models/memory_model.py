@@ -129,13 +129,19 @@ def lean_bwd_moment(c, images_grad):
     return 4.0 * c + lean_bwd_transient(c, images_grad)
 
 
-def num_pairs(n, p_pair=0.1):
-    """max(1, round(p n (n - 1))) like `data_loading.postprocess.num_pairs` (float32, half to even)."""
+MIN_PAIRS = ("1", "n")      # --min-pairs (mirrors `data_loading.postprocess.MIN_PAIRS`)
+
+
+def num_pairs(n, p_pair=0.1, min_pairs="1"):
+    """min(max(m, round(p n (n - 1))), n (n - 1)), m = 1 ('1') or n ('n'), like
+    `data_loading.postprocess.num_pairs` (float32 product, half to even)."""
+    if min_pairs not in MIN_PAIRS:
+        raise ValueError("min_pairs must be one of %s, got %r" % (MIN_PAIRS, min_pairs))
     total = int(n) * (int(n) - 1)
     if total < 1:
         return 0
     k = int(np.round(np.float32(total) * np.float32(p_pair)))
-    return int(min(max(k, 1), total))
+    return int(min(max(k, 1 if min_pairs == "1" else int(n)), total))
 
 
 # --------------------------------------------------------------------- workload
@@ -157,16 +163,18 @@ class Workload(object):
     """Inputs of one prediction (design 4.1). ``model_config``: ModelConfig, kwargs dict or preset
     name. ``integration_steps`` None = the config's T. ``build_n`` None = min(n, 2).
     ``tasks_run`` None = (task,) (single-task measurement record); a training workload passes
-    ('rigid', 'affine', 'deform'). ``cascade``: 'none' | 'frozen4' (level 2) | 'chain42' (level 1)."""
+    ('rigid', 'affine', 'deform'). ``cascade``: 'none' | 'frozen4' (level 2) | 'chain42' (level 1).
+    ``min_pairs``: '1' | 'n' (deform pair count, `num_pairs`; records without it read '1')."""
 
     FIELDS_ = ("level", "task", "n", "model_config", "checkpointing", "amp", "integration_steps",
                "lncc", "p_pdice", "n_classes", "lean_sampler", "lean_losses", "split_group_conv",
-               "cascade", "val_pair_chunk", "build_n", "tasks_run", "gpu")
+               "cascade", "val_pair_chunk", "build_n", "tasks_run", "gpu", "min_pairs")
 
     def __init__(self, level, task, n, model_config="default", checkpointing="none", amp=False,
                  integration_steps=None, lncc=True, p_pdice=0.1, n_classes=DP.N_TRAIN_LABELS,
                  lean_sampler=False, lean_losses=False, split_group_conv=False, cascade="none",
-                 val_pair_chunk=16, build_n=None, tasks_run=None, gpu="rtx8000"):
+                 val_pair_chunk=16, build_n=None, tasks_run=None, gpu="rtx8000",
+                 min_pairs="1"):
         self.level = int(level)
         if self.level not in DP.LEVEL_SHAPE:
             raise ValueError("level must be one of 4, 2, 1, got %r" % (level,))
@@ -205,6 +213,9 @@ class Workload(object):
         if gpu not in GPUS:
             raise ValueError("gpu must be one of %s, got %r" % (GPUS, gpu))
         self.gpu = gpu
+        if min_pairs not in MIN_PAIRS:
+            raise ValueError("min_pairs must be one of %s, got %r" % (MIN_PAIRS, min_pairs))
+        self.min_pairs = min_pairs
         if task == "deform" and not self.cfg.deform_decoder:
             raise ValueError("task 'deform' needs a model_config with deform_decoder=True")
 
@@ -327,7 +338,7 @@ class _Inventory(object):
                 self.sub.append((st["name"], st["c_in"] * 4.0 * _frac(st["h_in"]),
                                  st["skip_c"] * b * _frac(st["skip_h"])))
         self.skip_grads_all = sum(s[2] for s in self.sub)
-        self.n_pairs = num_pairs(w.n, w.p_pdice)
+        self.n_pairs = num_pairs(w.n, w.p_pdice, w.min_pairs)
         self.share = float(self.n_pairs) / n if w.n > 0 else 0.0
         self.fwd_sequenced = bool(fwd_sequenced)
         self.onehot_b = 2.0 if fp16_onehot else 4.0
@@ -1110,7 +1121,7 @@ class StepTimeModel(object):
         W = 0.0
         if deform:
             bwd = 4.0 if w.lean_sampler else 3.0
-            p = float(num_pairs(w.n, w.p_pdice))
+            p = float(num_pairs(w.n, w.p_pdice, w.min_pairs))
             rec = 1.0 if mode in ("integrator", "both", "full") else 0.0
             T = w.integration_steps
             W += 2 * T * n * vox * 3.0 * (1.0 + bwd + rec)

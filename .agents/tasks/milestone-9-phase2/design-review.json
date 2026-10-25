@@ -1,0 +1,9 @@
+{
+  "verdict": "APPROVED",
+  "findings": [
+    {"id": 1, "severity": "NIT", "where": "section 9 --expect-min-pairs", "problem": "claims config.json stores deform_group_size null when unset; parse_args resolves it to group_size before writing", "fix": "reword: stored resolved value; keep the 'or' fallback for robustness"},
+    {"id": 2, "severity": "NIT", "where": "section 2.2 FrozenChain construction", "problem": "_build_frozen_model hard-codes FROZEN_LEVEL 4; the level-2 frozen build is not tied to a helper", "fix": "_build_frozen_model(cfg, level=FROZEN_LEVEL); FrozenChain uses it for level 4 and level 2"},
+    {"id": 3, "severity": "NIT", "where": "section 4.3 step 1 vs section 12 main.py", "problem": "_load_cascade_source gains a level argument not listed in the file changes", "fix": "list _load_cascade_source(C, path, model_cfg, level=2) passing level to C.load_cascade_source"}
+  ],
+  "reviewDoc": "d:\\Research\\Brain_Registration_Projects\\brain-group-rad\\.agents\\tasks\\milestone-9-phase2/design-review.md"
+}

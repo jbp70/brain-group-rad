@@ -1,0 +1,12 @@
+{
+  "task_id": "task-m9-phase2",
+  "task_description": "Milestone 9 phase 2 (approved design .agents/tasks/milestone-9-phase2/design-m9-phase2.md v3): opt-in --min-pairs n for the pairwise losses (FEAT-001), a 3-level frozen cascade FrozenChain (levels 4 + 2 from the m8 level-2 checkpoint) with a trainable level-1 stage, frozen-chain baselines, provenance and resume (FEAT-002), and the level-1 checker extensions, slurm/m9_level1_cascade.sh, the local level 4 -> 2 -> 1 end-to-end test, design.md v3.15 and the report (FEAT-003). Everything new off by default; levels 4/2 and m8 runs bit-identical.",
+  "status": "completed",
+  "feature_order": [
+    "FEAT-001",
+    "FEAT-002",
+    "FEAT-003"
+  ],
+  "blocked_reason": null,
+  "findings": "Integration iteration 1: py_compile + ast (3,8) OK on all 20 changed .py (bgr_preproc38); bash -n OK on slurm/m9_level1_cascade.sh (ASCII, 0 CR) and tests/run_tests_wsl.sh; goldens '[golden] max |diff| 0' and '[golden deform] max |diff| 0' (148 s). Full suite tests/run_tests_wsl.sh: stage 1 OK (75 files py3.8, 8 scripts bash -n, 65 TF-free tests without TF); stage 2 'Ran 520 tests in 11843.660s, OK (skipped=4)', unittest exit code 0, wall 11906 s (baseline 477). No cross-FEAT failures, no code changes. REVIEW FIX (iteration 2): MEDIUM fixed: check_mixed_run.py --project-val-every V (default 0 = run's val_every; < 0 rejected) used by the step_time projection; slurm/m9_level1_cascade.sh passes --project-val-every 500 (header updated); new test TestLevel1Chain.test_project_val_every (fixture val_every 100: 80 passes = 4164 s vs 16 passes = 1668 s, CLI and -1 error); test_slurm_scripts asserts the flag. NIT fixed: frozen_chain_standin.py / measure_level_memory.py docstrings say schema-compatible with job 10516237, val_peak_mb includes the _frozen4 fields (~+1 GB at level-1 N 4). py38 checks OK on 5 changed .py, bash -n OK (ASCII, no CR); tests.test_check_mixed_run tests.test_slurm_scripts Ran 47, OK (bgr_preproc38). No shared module changed -> goldens and full suite not re-run (520 OK stands)."
+}
