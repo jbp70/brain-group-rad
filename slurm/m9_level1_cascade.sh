@@ -21,9 +21,9 @@
 # --integration-steps here: an explicit list would not be dict-equal to m8's stored config) and
 # learns the residual. BN statistics of the trainable stage are recalibrated on level-1 data at
 # step 0 of a fresh run (BN_RECAL_BATCHES, default 64; frozen afterwards with BN_RECAL_FREEZE=true;
-# never repeated on resume). Recipe (design D5): linear N 16, deform N 4, AMP,
+# never repeated on resume). Recipe (design D5): linear N 8, deform N 4, AMP,
 # --gradient-checkpointing full, --lean-sampler true, --split-group-conv true, T 7, --min-pairs n
-# (deform N 4 -> 4 pairs as a random 4-cycle; linear N 16 -> 24 pairs, unchanged), p 0.1 / 0.1,
+# (deform N 4 -> 4 pairs as a random 4-cycle; linear N 8 -> 8 pairs, an 8-cycle), p 0.1 / 0.1,
 # Dice + LNCC 1/1, smoothness 0.5, --task-grad-norm 12, G 45 deg / 10 mm from step 0, curriculum
 # off, skip 0 (SKIP_PROB; design D6, to be confirmed with Jay), --val-pair-chunk 4.
 # Validation group sizes follow N / DEFORM_N (the validation group-size flag is deliberately not
@@ -101,7 +101,11 @@ STEPS="${STEPS:-8000}"
 VAL_EVERY="${VAL_EVERY:-500}"
 CKPT_EVERY="${CKPT_EVERY:-250}"
 WARMUP="${WARMUP:-500}"
-N="${N:-16}"
+# Linear N 8, not 16: at default widths the full-resolution stem output is N x 160 x 224 x 192 x 32
+# elements, above the int32 index limit (2^31 - 1) for N >= 10. The first smoke (job 10517266, N 16)
+# aborted at startup with "work_element_count > 0 (0 vs. -771751936)" (3,523,215,360 elements).
+# The phase-1 memory job measured linear level 1 only with f0d1 (stem 16), so it did not catch this.
+N="${N:-8}"
 DEFORM_N="${DEFORM_N:-4}"
 CASCADE_FROM="${CASCADE_FROM:-$RESULTS/m8_level2_gradnorm/ckpt/best}"
 GRAD_BALANCE="${GRAD_BALANCE:-gradnorm}"

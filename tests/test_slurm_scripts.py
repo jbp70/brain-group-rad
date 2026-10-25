@@ -266,7 +266,7 @@ class TestStubRuns(unittest.TestCase):
         self.assertTrue(calls[0].startswith("exec|--nv|-B|/scratch|-B|/autofs|-B|/cluster|-B|/space|-B|/vast|"))
         main, chk = self._args(calls[0]), self._args(calls[1])
         self.assertEqual(main[1], "main.py")
-        for seq in (["--level", "1"], ["--cascade-from", os.path.join(self.tmp, "ckpt")], ["--group-size", "16"],
+        for seq in (["--level", "1"], ["--cascade-from", os.path.join(self.tmp, "ckpt")], ["--group-size", "8"],
                     ["--deform-group-size", "4"], ["--min-pairs", "n"], ["--gradient-checkpointing", "full"],
                     ["--val-pair-chunk", "4"], ["--task-grad-norm", "12"], ["--amp", "true"],
                     ["--lean-sampler", "true"], ["--split-group-conv", "true"], ["--lean-losses", "false"],
