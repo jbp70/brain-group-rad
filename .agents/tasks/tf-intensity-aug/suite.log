@@ -1,0 +1,2032 @@
+=== [1/2] py3.8 syntax check + numpy references (bgr_preproc38) ===
+Python 3.8.20
+numpy 1.21.1 | scipy 1.4.1
+py_compile OK
+ast feature_version=(3, 8) OK (81 files)
+np_reference self-check OK
+data_loading imports without TF/DALI; DALI_AVAILABLE = False
+runtime.args / runtime.schedulers import without TF
+main.py --help OK (no TF)
+bash -n tests/gpu/run_verify_glacier.sh OK
+bash -n tests/gpu/run_overfit_glacier.sh OK
+bash -n slurm/train_debug.sh OK
+bash -n slurm/m7_three_task.sh OK
+bash -n slurm/m8_memory.sh OK
+bash -n slurm/m8_level2_cascade.sh OK
+bash -n slurm/m9_memory.sh OK
+bash -n slurm/m9_level1_cascade.sh OK
+
+Fitted coefficients (initial -> fitted, bounds):
+  c_net        1.000 ->  0.9990  [0.6, 2]  expected 1.03  taped decoder and head tensors
+  c_enc32      1.000 ->  1.0642  [0.6, 1.6]  expected 1.10  encoder tensors, fp32 compute
+  c_enc16      1.000 ->  0.7488  [0.6, 1.6]  expected 0.89  encoder tensors, fp16 compute (AMP)
+  c_loss       1.000 ->  0.5306  [0, 1]  expected 0.50  share of the non-largest loss terms alive at F
+  c_rec        1.000 ->  0.9124  [0.5, 2]  expected 1.00  recomputed decoder block in its backward phase
+  c_warp       1.000 ->  1.1971  [0.6, 2]  expected 1.02  default-sampler tensors (absorbs U4)
+  c_bwd        2.000 ->  2.6942  [0, 4]  expected 2.00  backward transient, x C_in x 4 B of the largest block
+  c0_cluster   0.300 ->  0.1032  [0, 2]  expected 0.30  allocator / context constant (GiB), RTX 8000 / A6000 / A100
+  c0_gtx1080   0.100 ->  0.0904  [0, 1]  expected 0.08  allocator / context constant (GiB), GTX 1080 at 6000 MB
+Accuracy (fitted):
+  point                                        status        meas GiB  pred GiB    err %  phase check
+  l2_deform_fp32_none_n2                       ok               19.00     18.95     -0.3  F     ok
+  l2_deform_fp32_none_n3                       ok               27.50     27.73     +0.8  F     ok
+  l2_deform_fp32_none_n4                       ok               36.40     36.52     +0.3  F     ok
+  l2_deform_fp32_none_n6                       oom                  -     55.62        -  F     ok (infeasible)
+  l2_deform_fp32_integrator_n2                 ok               15.60     15.77     +1.1  I     ok
+  l2_deform_fp32_integrator_n4                 ok               30.70     30.94     +0.8  I     ok
+  l2_deform_fp32_integrator_n6                 ok               45.30     46.11     +1.8  I     ok
+  l2_deform_fp32_both_n2                       ok               12.20     12.29     +0.8  D     ok
+  l2_deform_fp32_both_n3                       ok               17.90     18.13     +1.3  D     ok
+  l2_deform_fp32_both_n4                       ok               23.90     23.98     +0.3  D     ok
+  l2_deform_fp32_both_n6                       ok               35.20     35.66     +1.3  D     ok
+  l2_deform_amp_none_n2                        ok               13.90     13.88     -0.1  F     ok
+  l2_deform_amp_none_n4                        ok               27.00     26.35     -2.4  F     ok
+  l2_deform_amp_none_n6                        ok               39.90     40.36     +1.2  F     ok
+  l2_deform_amp_integrator_n2                  ok               10.90     10.71     -1.8  I     ok
+  l2_deform_amp_integrator_n4                  ok               20.80     20.77     -0.1  I     ok
+  l2_deform_amp_integrator_n6                  ok               30.80     30.84     +0.1  I     ok
+  l2_deform_amp_integrator_n8                  ok               40.90     40.91     +0.0  I     ok
+  l2_deform_amp_both_n2                        ok                7.60      7.45     -2.0  D     ok
+  l2_deform_amp_both_n4                        ok               14.40     14.26     -1.0  D     ok
+  l2_deform_amp_both_n6                        ok               21.20     21.07     -0.6  D     ok
+  l2_deform_amp_both_n8                        ok               27.80     27.88     +0.3  D     ok
+  l2_linear_fp32_n4                            ok                5.90      5.85     -0.8  E     ok
+  l2_linear_fp32_n8                            ok               11.00     11.07     +0.7  E     ok
+  l2_linear_fp32_n12                           failed_d2            -     16.30        -  E     ok (limit flag: build/d2 group concat 12x80x112x96x256 fp32 2642411520 elements > 2147483647 (fwd))
+  l2_linear_amp_n4                             ok                3.20      3.24     +1.4  E     ok
+  l2_linear_amp_n8                             ok                5.80      5.82     +0.3  E     ok
+  l2_linear_amp_n12                            ok                8.50      8.39     -1.3  E     ok
+  l2_linear_amp_n16                            ok               10.90     10.97     +0.6  E     ok
+  l4_a6000_default_none_n8                     ok               16.60     16.39     -1.3  F     ok
+  l4_a6000_default_none_n12                    ok               24.80     24.72     -0.3  F     ok
+  l4_a6000_default_none_n16                    ok               33.80     33.65     -0.5  F     ok
+  l4_gtx_m6_default_both_n2                    ok                3.82      3.90     +2.0  D     ok
+  l4_gtx_m6_default_both_n4                    oom                  -      7.31        -  D     ok (infeasible)
+  l4_gtx_m6_default_none_n2                    ok                4.33      4.42     +1.9  F     ok
+  l4_gtx_m6_default_none_n3                    oom                  -      6.34        -  F     ok (infeasible)
+  l4_gtx_m6_default_none_n4                    oom                  -      8.27        -  F     ok (infeasible)
+  l4_gtx_m6_narrow_both_n4                     ok                2.45      2.39     -2.7  D     ok
+  l4_gtx_m6_narrow_both_n8                     ok                4.67      4.63     -0.8  D     ok
+  l4_gtx_m6_narrow_both_n16                    oom                  -      9.12        -  D     ok (infeasible)
+  l4_gtx_m6_narrow_none_n2                     ok                2.04      2.07     +1.6  F     ok
+  l4_gtx_m6_narrow_none_n3                     ok                2.94      3.00     +2.1  F     ok
+  l4_gtx_m6_narrow_none_n4                     ok                3.92      3.93     +0.3  F     ok
+  l4_gtx_m6_narrow_none_n6                     oom                  -      5.94        -  F     ok (infeasible)
+  l4_gtx_m6_narrow_none_n8                     oom                  -      8.03        -  F     ok (infeasible)
+  l4_gtx_lncc_off_default_none_n2              ok                4.56      4.42     -3.1  F     ok
+  l4_gtx_lncc_on_default_none_n2               ok                4.51      4.47     -1.0  F     ok
+  l4_gtx_lncc_off_narrow_none_n2               ok                2.05      2.07     +1.3  F     ok
+  l4_gtx_lncc_off_narrow_none_n3               ok                3.11      3.00     -3.7  F     ok
+  l4_gtx_lncc_off_narrow_none_n4               ok                3.99      3.93     -1.6  F     ok
+  l4_gtx_lncc_on_narrow_none_n2                ok                2.11      2.12     +0.6  F     ok
+  l4_gtx_lncc_on_narrow_none_n3                ok                3.10      3.06     -1.0  F     ok
+  l4_gtx_lncc_on_narrow_none_n4                ok                3.95      4.01     +1.4  F     ok
+  l4_linear_range_n32                          range                -     22.10        -  E     ok (range 26.0-34.0, upper containment ok)
+ok points: 45, fitted error range -3.7 ... +2.1 % (pre-fit -9.5 ... +13.7 %)
+Leave-one-mode-out (refit without the group, its errors):
+  fp32_none        l2_deform_fp32_none_n2 -0.2 %, l2_deform_fp32_none_n3 +0.9 %, l2_deform_fp32_none_n4 +0.4 %
+  fp32_integrator  l2_deform_fp32_integrator_n2 +1.9 %, l2_deform_fp32_integrator_n4 +1.6 %, l2_deform_fp32_integrator_n6 +2.6 %
+  fp32_both        l2_deform_fp32_both_n2 +2.0 %, l2_deform_fp32_both_n3 +2.5 %, l2_deform_fp32_both_n4 +1.5 %, l2_deform_fp32_both_n6 +2.5 %
+  amp_none         l2_deform_amp_none_n2 -0.7 %, l2_deform_amp_none_n4 -2.8 %, l2_deform_amp_none_n6 +0.6 %
+  amp_integrator   l2_deform_amp_integrator_n2 -2.8 %, l2_deform_amp_integrator_n4 -1.1 %, l2_deform_amp_integrator_n6 -0.8 %, l2_deform_amp_integrator_n8 -0.9 %
+  amp_both         l2_deform_amp_both_n2 -6.5 %, l2_deform_amp_both_n4 -5.7 %, l2_deform_amp_both_n6 -5.4 %, l2_deform_amp_both_n8 -4.6 %
+Hold-out (never fitted; one-sided gate err >= -20 %, OOM infeasible):
+  point                                        status        meas GiB  pred GiB    err %  phase check
+  hold_l2_tiny_full_amp_ls0_ll0_sp0_t7_n2      holdout_ok        5.16      6.03    +17.0  I     ok
+  hold_l2_tiny_full_amp_ls1_ll0_sp0_t7_n2      holdout_ok        2.36      2.05    -13.0  I     ok
+  hold_l2_tiny_full_amp_ls1_ll1_sp0_t7_n2      holdout_ok        2.33      2.05    -12.0  I     ok
+  hold_l2_tiny_full_amp_ls1_ll1_sp1_t7_n2      holdout_ok        2.32      2.05    -11.7  I     ok
+  hold_l2_tiny_full_fp32_ls0_ll0_sp0_t7_n2     holdout_ok        5.24      6.15    +17.5  I     ok
+  hold_l2_tiny_full_fp32_ls1_ll0_sp0_t7_n2     holdout_ok        2.52      2.44     -3.1  D     ok
+  hold_l2_tiny_full_fp32_ls1_ll1_sp0_t7_n2     holdout_ok        2.50      2.44     -2.5  D     ok
+  hold_l2_tiny_full_fp32_ls1_ll1_sp1_t7_n2     holdout_ok        2.47      2.31     -6.3  D     ok
+  hold_l4_default_full_amp_ls0_ll0_sp0_t7_n2   holdout_ok        1.64      2.02    +23.1  D     ok (over-prediction > +20 % (conservative, not gated))
+  hold_l4_default_full_amp_ls1_ll0_sp0_t7_n2   holdout_ok        1.71      2.02    +18.2  D     ok
+  hold_l4_default_full_amp_ls1_ll1_sp0_t7_n2   holdout_ok        1.62      2.02    +24.6  D     ok (over-prediction > +20 % (conservative, not gated))
+  hold_l4_default_full_amp_ls1_ll1_sp1_t7_n2   holdout_ok        1.42      1.93    +36.2  D     ok (over-prediction > +20 % (conservative, not gated))
+  hold_l4_default_full_fp32_ls0_ll0_sp0_t7_n2  holdout_ok        2.69      3.04    +12.8  D     ok
+  hold_l4_default_full_fp32_ls1_ll0_sp0_t7_n2  holdout_ok        2.68      3.04    +13.2  D     ok
+  hold_l4_default_full_fp32_ls1_ll1_sp0_t7_n2  holdout_ok        2.69      3.04    +13.0  D     ok
+  hold_l4_default_full_fp32_ls1_ll1_sp1_t7_n2  holdout_ok        2.39      2.87    +20.1  D     ok (over-prediction > +20 % (conservative, not gated))
+  hold_l4_narrow_full_amp_ls0_ll0_sp0_t7_n2    holdout_ok        0.72      0.90    +24.6  I     ok (over-prediction > +20 % (conservative, not gated))
+  hold_l4_narrow_full_amp_ls0_ll0_sp0_t7_n3    holdout_ok        1.03      1.28    +23.5  I     ok (over-prediction > +20 % (conservative, not gated))
+  hold_l4_narrow_full_amp_ls0_ll0_sp0_t7_n4    holdout_ok        1.38      1.65    +19.7  I     ok
+  hold_l4_narrow_full_amp_ls1_ll0_sp0_t7_n2    holdout_ok        0.49      0.62    +26.0  D     ok (over-prediction > +20 % (conservative, not gated))
+  hold_l4_narrow_full_amp_ls1_ll0_sp0_t7_n3    holdout_ok        0.68      0.86    +26.6  D     ok (over-prediction > +20 % (conservative, not gated))
+  hold_l4_narrow_full_amp_ls1_ll0_sp0_t7_n4    holdout_ok        0.86      1.10    +27.9  D     ok (over-prediction > +20 % (conservative, not gated))
+  hold_l4_narrow_full_amp_ls1_ll1_sp0_t7_n2    holdout_ok        0.48      0.62    +28.3  D     ok (over-prediction > +20 % (conservative, not gated))
+  hold_l4_narrow_full_amp_ls1_ll1_sp0_t7_n3    holdout_ok        0.69      0.86    +24.1  D     ok (over-prediction > +20 % (conservative, not gated))
+  hold_l4_narrow_full_amp_ls1_ll1_sp0_t7_n4    holdout_ok        0.91      1.10    +21.1  D     ok (over-prediction > +20 % (conservative, not gated))
+  hold_l4_narrow_full_amp_ls1_ll1_sp1_t7_n2    holdout_ok        0.39      0.59    +52.0  D     ok (over-prediction > +20 % (conservative, not gated))
+  hold_l4_narrow_full_amp_ls1_ll1_sp1_t7_n3    holdout_ok        0.56      0.80    +42.8  D     ok (over-prediction > +20 % (conservative, not gated))
+  hold_l4_narrow_full_amp_ls1_ll1_sp1_t7_n4    holdout_ok        0.71      1.02    +43.0  D     ok (over-prediction > +20 % (conservative, not gated))
+  hold_l4_narrow_full_fp32_ls0_ll0_sp0_t7_n2   holdout_ok        0.87      0.97    +10.5  D     ok
+  hold_l4_narrow_full_fp32_ls0_ll0_sp0_t7_n3   holdout_ok        1.30      1.38     +6.3  D     ok
+  hold_l4_narrow_full_fp32_ls0_ll0_sp0_t7_n4   holdout_ok        1.64      1.79     +9.5  D     ok
+  hold_l4_narrow_full_fp32_ls1_ll0_sp0_t7_n2   holdout_ok        0.84      0.97    +15.0  D     ok
+  hold_l4_narrow_full_fp32_ls1_ll0_sp0_t7_n3   holdout_ok        1.24      1.38    +11.4  D     ok
+  hold_l4_narrow_full_fp32_ls1_ll0_sp0_t7_n4   holdout_ok        1.58      1.79    +13.5  D     ok
+  hold_l4_narrow_full_fp32_ls1_ll1_sp0_t7_n2   holdout_ok        0.85      0.97    +13.6  D     ok
+  hold_l4_narrow_full_fp32_ls1_ll1_sp0_t7_n3   holdout_ok        1.23      1.38    +12.2  D     ok
+  hold_l4_narrow_full_fp32_ls1_ll1_sp0_t7_n4   holdout_ok        1.64      1.79     +9.4  D     ok
+  hold_l4_narrow_full_fp32_ls1_ll1_sp1_t7_n2   holdout_ok        0.70      0.91    +30.1  D     ok (over-prediction > +20 % (conservative, not gated))
+  hold_l4_narrow_full_fp32_ls1_ll1_sp1_t7_n3   holdout_ok        1.00      1.27    +27.3  D     ok (over-prediction > +20 % (conservative, not gated))
+  hold_l4_narrow_full_fp32_ls1_ll1_sp1_t7_n4   holdout_ok        1.27      1.63    +28.0  D     ok (over-prediction > +20 % (conservative, not gated))
+hold-out gate (one-sided) PASSED, worst under-prediction 13.0 %, margin m = 0.150; symmetric +-20 % FAILED (max |err| 52.0 %, 18 points over-predicted by > 20 %)
+warmup_excess_gib = 0.207 (accepted, not budgeted; design 4.1, U12)
+.............................
+coefficients at a bound: none
+Fitted coefficients (initial -> fitted, bounds):
+  c_net        1.000 ->  2.0000  [0.6, 2]  expected 1.03  taped decoder and head tensors
+  c_enc32      1.000 ->  1.6000  [0.6, 1.6]  expected 1.10  encoder tensors, fp32 compute
+  c_enc16      1.000 ->  0.6000  [0.6, 1.6]  expected 0.89  encoder tensors, fp16 compute (AMP)
+  c_loss       1.000 ->  1.0000  [0, 1]  expected 0.50  share of the non-largest loss terms alive at F
+  c_rec        1.000 ->  1.1103  [0.5, 2]  expected 1.00  recomputed decoder block in its backward phase
+  c_warp       1.000 ->  1.3957  [0.6, 2]  expected 1.02  default-sampler tensors (absorbs U4)
+  c_bwd        2.000 ->  1.9598  [0, 4]  expected 2.00  backward transient, x C_in x 4 B of the largest block
+  c0_cluster   0.300 ->  0.1803  [0, 2]  expected 0.30  allocator / context constant (GiB), RTX 8000 / A6000 / A100
+  c0_gtx1080   0.100 ->  1.0000  [0, 1]  expected 0.08  allocator / context constant (GiB), GTX 1080 at 6000 MB
+  NOTE: c_net at upper bound 2 (model-form check: a coefficient at a bound is reported, design 4.3)
+  NOTE: c_enc32 at upper bound 1.6 (model-form check: a coefficient at a bound is reported, design 4.3)
+  NOTE: c_enc16 at lower bound 0.6 (model-form check: a coefficient at a bound is reported, design 4.3)
+  NOTE: c_loss at upper bound 1 (model-form check: a coefficient at a bound is reported, design 4.3)
+  NOTE: c0_gtx1080 at upper bound 1 (model-form check: a coefficient at a bound is reported, design 4.3)
+Accuracy (fitted):
+  point                                        status        meas GiB  pred GiB    err %  phase check
+  l2_deform_amp_both_n2                        ok                7.60      7.57     -0.5  I     ok
+  l2_deform_amp_both_n4                        ok               14.40     14.41     +0.1  I     ok
+  l2_deform_amp_both_n6                        ok               21.20     21.26     +0.3  I     ok
+  l2_deform_amp_both_n8                        ok               27.80     28.11     +1.1  I     ok
+  fake_oom_feasible                            oom                  -      3.99        -  F     FAIL (OOM predicted feasible (3.99 <= cap 5.86))
+ok points: 4, fitted error range -0.5 ... +1.1 % (pre-fit +0.5 ... +1.2 %)
+Hold-out: no hold-out records yet (FEAT-004 adds them); margin m = 0.15
+warmup_excess_gib = n/a (accepted, not budgeted; design 4.1, U12)
+FIT FAILURE: fake_oom_feasible oom: OOM predicted feasible (3.99 <= cap 5.86)
+wrote /tmp/bgr_mm_a643qkd8/co.json
+fit: 1 check(s) failed (tolerance not loosened; design 4.3)
+
+Hold-out:
+  point                                        status        meas GiB  pred GiB    err %  phase check
+  hold_l2_tiny_full_amp_ls0_ll0_sp0_t7_n2      holdout_ok        5.16      6.03    +17.0  I     ok
+  hold_l2_tiny_full_amp_ls1_ll0_sp0_t7_n2      holdout_ok        2.36      2.05    -13.0  I     ok
+  hold_l2_tiny_full_amp_ls1_ll1_sp0_t7_n2      holdout_ok        2.33      2.05    -12.0  I     ok
+  hold_l2_tiny_full_amp_ls1_ll1_sp1_t7_n2      holdout_ok        2.32      2.05    -11.7  I     ok
+  hold_l2_tiny_full_fp32_ls0_ll0_sp0_t7_n2     holdout_ok        5.24      6.15    +17.5  I     ok
+  hold_l2_tiny_full_fp32_ls1_ll0_sp0_t7_n2     holdout_ok        2.52      2.44     -3.1  D     ok
+  hold_l2_tiny_full_fp32_ls1_ll1_sp0_t7_n2     holdout_ok        2.50      2.44     -2.5  D     ok
+  hold_l2_tiny_full_fp32_ls1_ll1_sp1_t7_n2     holdout_ok        2.47      2.31     -6.3  D     ok
+  hold_l4_default_full_amp_ls0_ll0_sp0_t7_n2   holdout_ok        1.64      2.02    +23.1  D     ok (over-prediction > +20 % (conservative, not gated))
+  hold_l4_default_full_amp_ls1_ll0_sp0_t7_n2   holdout_ok        1.71      2.02    +18.2  D     ok
+  hold_l4_default_full_amp_ls1_ll1_sp0_t7_n2   holdout_ok        1.62      2.02    +24.6  D     ok (over-prediction > +20 % (conservative, not gated))
+  hold_l4_default_full_amp_ls1_ll1_sp1_t7_n2   holdout_ok        1.42      1.93    +36.2  D     ok (over-prediction > +20 % (conservative, not gated))
+  hold_l4_default_full_fp32_ls0_ll0_sp0_t7_n2  holdout_ok        2.69      3.04    +12.8  D     ok
+  hold_l4_default_full_fp32_ls1_ll0_sp0_t7_n2  holdout_ok        2.68      3.04    +13.2  D     ok
+  hold_l4_default_full_fp32_ls1_ll1_sp0_t7_n2  holdout_ok        2.69      3.04    +13.0  D     ok
+  hold_l4_default_full_fp32_ls1_ll1_sp1_t7_n2  holdout_ok        2.39      2.87    +20.1  D     ok (over-prediction > +20 % (conservative, not gated))
+  hold_l4_narrow_full_amp_ls0_ll0_sp0_t7_n2    holdout_ok        0.72      0.90    +24.6  I     ok (over-prediction > +20 % (conservative, not gated))
+  hold_l4_narrow_full_amp_ls0_ll0_sp0_t7_n3    holdout_ok        1.03      1.28    +23.5  I     ok (over-prediction > +20 % (conservative, not gated))
+  hold_l4_narrow_full_amp_ls0_ll0_sp0_t7_n4    holdout_ok        1.38      1.65    +19.7  I     ok
+  hold_l4_narrow_full_amp_ls1_ll0_sp0_t7_n2    holdout_ok        0.49      0.62    +26.0  D     ok (over-prediction > +20 % (conservative, not gated))
+  hold_l4_narrow_full_amp_ls1_ll0_sp0_t7_n3    holdout_ok        0.68      0.86    +26.6  D     ok (over-prediction > +20 % (conservative, not gated))
+  hold_l4_narrow_full_amp_ls1_ll0_sp0_t7_n4    holdout_ok        0.86      1.10    +27.9  D     ok (over-prediction > +20 % (conservative, not gated))
+  hold_l4_narrow_full_amp_ls1_ll1_sp0_t7_n2    holdout_ok        0.48      0.62    +28.3  D     ok (over-prediction > +20 % (conservative, not gated))
+  hold_l4_narrow_full_amp_ls1_ll1_sp0_t7_n3    holdout_ok        0.69      0.86    +24.1  D     ok (over-prediction > +20 % (conservative, not gated))
+  hold_l4_narrow_full_amp_ls1_ll1_sp0_t7_n4    holdout_ok        0.91      1.10    +21.1  D     ok (over-prediction > +20 % (conservative, not gated))
+  hold_l4_narrow_full_amp_ls1_ll1_sp1_t7_n2    holdout_ok        0.39      0.59    +52.0  D     ok (over-prediction > +20 % (conservative, not gated))
+  hold_l4_narrow_full_amp_ls1_ll1_sp1_t7_n3    holdout_ok        0.56      0.80    +42.8  D     ok (over-prediction > +20 % (conservative, not gated))
+  hold_l4_narrow_full_amp_ls1_ll1_sp1_t7_n4    holdout_ok        0.71      1.02    +43.0  D     ok (over-prediction > +20 % (conservative, not gated))
+  hold_l4_narrow_full_fp32_ls0_ll0_sp0_t7_n2   holdout_ok        0.87      0.97    +10.5  D     ok
+  hold_l4_narrow_full_fp32_ls0_ll0_sp0_t7_n3   holdout_ok        1.30      1.38     +6.3  D     ok
+  hold_l4_narrow_full_fp32_ls0_ll0_sp0_t7_n4   holdout_ok        1.64      1.79     +9.5  D     ok
+  hold_l4_narrow_full_fp32_ls1_ll0_sp0_t7_n2   holdout_ok        0.84      0.97    +15.0  D     ok
+  hold_l4_narrow_full_fp32_ls1_ll0_sp0_t7_n3   holdout_ok        1.24      1.38    +11.4  D     ok
+  hold_l4_narrow_full_fp32_ls1_ll0_sp0_t7_n4   holdout_ok        1.58      1.79    +13.5  D     ok
+  hold_l4_narrow_full_fp32_ls1_ll1_sp0_t7_n2   holdout_ok        0.85      0.97    +13.6  D     ok
+  hold_l4_narrow_full_fp32_ls1_ll1_sp0_t7_n3   holdout_ok        1.23      1.38    +12.2  D     ok
+  hold_l4_narrow_full_fp32_ls1_ll1_sp0_t7_n4   holdout_ok        1.64      1.79     +9.4  D     ok
+  hold_l4_narrow_full_fp32_ls1_ll1_sp1_t7_n2   holdout_ok        0.70      0.91    +30.1  D     ok (over-prediction > +20 % (conservative, not gated))
+  hold_l4_narrow_full_fp32_ls1_ll1_sp1_t7_n3   holdout_ok        1.00      1.27    +27.3  D     ok (over-prediction > +20 % (conservative, not gated))
+  hold_l4_narrow_full_fp32_ls1_ll1_sp1_t7_n4   holdout_ok        1.27      1.63    +28.0  D     ok (over-prediction > +20 % (conservative, not gated))
+
+one-sided gate passed True, worst under-prediction 13.0 %, symmetric passed False (max |err| 52.0 %, 18 over +20 %)
+
+pre-fit per-N table (timed rule)
+  N   widths   knobs  T       peak  w/ margin phase   params A100 (margin / none)
+  2   default  L      7      23.75      27.31 D       29.63M yes / yes
+  3   default  LS     7      32.96      37.90 D       29.63M no / yes
+  4   f0d1     LS     7      33.60      38.65 D       29.54M no / yes
+  5   none feasible
+  6   none feasible
+  7   none feasible
+  8   none feasible
+
+..........
+[presets] trainable parameters (M, deform decoder on):
+  default total 29.63  encoder 9.85  linear 12.64  deform 7.14
+  u075   total 22.17  encoder 5.54  linear 12.61  deform 4.03
+  u050   total 16.82  encoder 2.46  linear 12.57  deform 1.79
+  u0375  total 15.00  encoder 1.39  linear 12.55  deform 1.05
+  f0d1   total 29.54  encoder 9.79  linear 12.64  deform 7.10
+  fr50   total 29.14  encoder 9.54  linear 12.64  deform 6.96
+  fr25   total 28.96  encoder 9.41  linear 12.64  deform 6.90
+..............................
+----------------------------------------------------------------------
+Ran 69 tests in 19.134s
+
+OK
+
+WARNING: no --t6-verdict: T = 6 excluded (fail-safe, design 4.4 step 1)
+Level-1 grid summary (AMP, full, chain42, LNCC 1/1, margin 0.15; timed rule):
+  default   29.63M  largest N 3 (LS, T 7, 34.26 GiB, D)
+  u075      22.17M  largest N 4 (LS, T 7, 35.88 GiB, D)
+  u050      16.82M  largest N 4 (L, T 7, 32.23 GiB, I)
+  u0375     15.00M  largest N 4 (L, T 7, 32.13 GiB, I)
+  f0d1      29.54M  largest N 4 (LS, T 7, 34.99 GiB, D)
+  fr50      29.14M  largest N 4 (L, T 7, 32.57 GiB, I)
+  fr25      28.96M  largest N 4 (L, T 7, 32.18 GiB, I)
+Per-N table (timed rule; selection):
+  N   widths   knobs  T       peak  w/ margin phase   params A100 (margin / none)
+  2   default  L      7      24.43      28.09 D       29.63M yes / yes
+  3   default  LS     7      34.26      39.40 D       29.63M no / yes
+  4   f0d1     LS     7      34.99      40.24 D       29.54M no / yes
+  5   none feasible
+  6   none feasible
+  7   none feasible
+  8   none feasible
+Per-N table (skip-gradient bound):
+  N   widths   knobs  T       peak  w/ margin phase   params A100 (margin / none)
+  2   default  L      7      25.52      29.34 D       29.63M yes / yes
+  3   default  LS     7      35.89      41.27 D       29.63M no / yes
+  4   f0d1     LS     7      36.34      41.80 D       29.54M no / no
+  5   none feasible
+  6   none feasible
+  7   none feasible
+  8   none feasible
+Per-N table (order-independent estimate, one overlapping sampler forward):
+  N   widths   knobs  T       peak  w/ margin phase   params A100 (margin / none)
+  2   default  L      7      24.43      28.09 D       29.63M yes / yes
+  3   default  LS     7      34.26      39.40 D       29.63M no / yes
+  4   f0d1     LLS    7      34.99      40.24 D       29.54M no / yes
+  5   none feasible
+  6   none feasible
+  7   none feasible
+  8   none feasible
+Recommendation: widths f0d1 (filters [16, 64, 128, 192, 256, 384], decoder [128, 96, 64, 32, 8]), AMP, full, lean sampler True, lean losses False, split True, T 7
+  level 1: deform N* = 4 (n_target 4; 5 without the margin), peak 34.99 GiB (40.24 with margin 0.15), phase D; linear N 16 at 13.51 GiB; val_pair_chunk 16
+  order-independent estimate (one overlapping sampler forward): 38.60 GiB (44.39 with margin); bound alternative {'lean_losses': True}
+  A100 (<= 36 GiB): deform N 3 with margin, 4 without (3 under the bound), linear N 16
+  level 2 (m8 recipe): deform N8 25.57 GiB, linear N16 7.26 GiB, largest deform N on A100 {'both': 9, 'full': 13}
+  level 4 (m7 recipe): deform N16 33.08 GiB, linear N32 21.12 GiB, largest deform N on A100 {'none': 17}
+  step times rtx8000 (s, estimate x0.5..x1.5, model (pre-measurement)): l4_deform 1.79-5.36, l4_linear 0.84-2.51, l2_deform 3.39-10.17, l2_linear 0.46-1.37, l1_deform 11.42-34.25, l1_linear 0.54-1.63
+  step times a100 (s, estimate x0.5..x1.5, model (pre-measurement)): l4_deform 1.25-3.75, l4_linear 0.53-1.58, l2_deform 2.37-7.12, l2_linear 0.29-0.87, l1_deform 7.99-23.98, l1_linear 0.34-1.03
+  m7 consistency (A100 level 4): predicted / measured 1.12 -> r_task
+  level-1 long run rtx8000: 13.8-41.3 h
+  level-1 long run a100: 9.7-29.2 h
+PROVISIONAL until slurm/m9_memory.sh measures it (N 4 with margin 0.15, 5 without)
+
+/tmp/bgr_step_times_8xvh81cz/cascade: ok (metrics ok, config ok, 41 windows >= step 1000, 2 unparsable, per_task True)
+  time/compute_ms              median   2059.0 ms  IQR   2049.0-  2069.0  (41 windows)
+  train_deform/compute_ms      median   5018.0 ms  IQR   4998.0-  5038.0  (41 windows)
+  train_rigid/compute_ms       median    759.0 ms  IQR    749.0-   769.0  (41 windows)
+  diag_u_res_max_vox           median 1.59 max 1.79 (41 windows)
+  args: {"group_size": 16, "global_start_step": 2000, "lr": null}
+/tmp/bgr_step_times_8xvh81cz/plain: ok (metrics ok, config missing, 41 windows >= step 1000, 0 unparsable, per_task False)
+  time/compute_ms              median   1650.0 ms  IQR   1650.0-  1650.0  (41 windows)
+  diag_u_res_max_vox           null
+  args: {"group_size": null, "global_start_step": null, "lr": null}
+/tmp/bgr_step_times_8xvh81cz/does_not_exist: missing (metrics missing, config missing, 0 windows >= step 1000, 0 unparsable, per_task False)
+  diag_u_res_max_vox           null
+  args: {"group_size": null, "global_start_step": null, "lr": null}
+wrote /tmp/bgr_step_times_8xvh81cz/out/step_times.json
+TF-free tests OK without TF (69 tests)
+=== [2/2] unittest suite (tf_gpu) ===
+python 3.9.13 | tf 2.10.0 | numpy 1.24.3 | scipy 1.13.0
+test_exact_average_and_nonfinite_slots (tests.test_cascade.TestBNRecal)
+MANDATORY: Keras 2.10 re-reads ``momentum`` per eager call, so K batches give the exact ... 
+[T7] exact average: max rel. error 1.76e-07
+WARNING bn recalibration: non-finite input images in rigid batch 1 (slot skipped)
+WARNING bn recalibration: non-finite input images in rigid batch 0 (slot skipped)
+WARNING bn recalibration: non-finite input images in rigid batch 1 (slot skipped)
+ok
+test_forward_only_and_momentum_restore (tests.test_cascade.TestBNRecal) ... ok
+test_freeze_retraces (tests.test_cascade.TestBNRecal) ... ok
+test_gap_shrinks_with_mismatched_intensity (tests.test_cascade.TestBNRecal)
+Statistics recalibrated on the level-2 inputs x 1, then validation and recalibration ... 
+[T7] eval/trainmode gap pre -> post (stats of x 1 inputs, data x 3): center_rms_mm 0.3543 -> 0.0004699; pair_rms_mm 0.4937 -> 0.00073
+ok
+test_gradient_checkpointing_both (tests.test_cascade.TestBNRecal)
+No double updates with a recompute_grad decoder: one BN update per layer and batch. ... ok
+test_plan (tests.test_cascade.TestBNRecal) ... ok
+test_validation_records (tests.test_cascade.TestBNRecal)
+val=True: bnrecal_pre/post records at step 0 (PNGs off), the gap table of every set and ... WARNING:tensorflow:5 out of the last 7 calls to <function Trainer._cascade_val_fn.<locals>.fwd at 0x7f84b0ef3670> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:6 out of the last 8 calls to <function Trainer._cascade_val_fn.<locals>.fwd at 0x7f84bd034af0> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+
+[T7] three-task eval/trainmode gap pre -> post: rigid/center_rms_mm 0.1316 -> 0.1964; rigid/pair_rms_mm 0.1956 -> 0.3277; affine/center_rms_mm 0.05593 -> 0.06857; affine/pair_rms_mm 0.07626 -> 0.1062; deform/template_dice 0.0003337 -> 6.447e-05; deform/pair_dice 6.172e-05 -> 0.000305
+ok
+test_mixed_precision_steps (tests.test_cascade.TestCascadeAMP) ... WARNING:tensorflow:Mixed precision compatibility check (mixed_float16): WARNING
+Your GPUs may run slowly with dtype policy mixed_float16 because they do not have compute capability of at least 7.0. Your GPUs:
+  NVIDIA GeForce GTX 1080, compute capability 6.1 (x2)
+See https://developer.nvidia.com/cuda-gpus for a list of GPUs and their compute capabilities.
+If you will use compatible GPU(s) not attached to this host, e.g. by running a multi-worker model, you can ignore this warning. This message will only be logged once
+ok
+test_composed_beats_frozen (tests.test_cascade.TestCascadeBeatsFrozen) ... 
+[T16b] rigid center RMS composed (trainmode) 7.136 mm vs frozen 12.811 mm (margin 5.675; step 0 composed 13.833); deform template Dice composed 0.9724 vs frozen 0.9386 (margin 0.0338; identity 0.9297, step 0 composed 0.9564)
+ok
+test_checkpoint_roundtrip (tests.test_cascade.TestCascadeResume) ... ok
+test_main_fresh_and_resume (tests.test_cascade.TestCascadeResume) ... /mnt/d/Research/Brain_Registration_Projects/brain-group-rad/tests/runtime_helpers.py:43: ResourceWarning: unclosed file <_io.TextIOWrapper name='/tmp/bgr_m8_1murrmkm/results/c/logs/metrics.jsonl' mode='a' encoding='UTF-8'>
+  gc.collect()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+ok
+test_baselines_and_cache (tests.test_cascade.TestCascadeValidation) ... WARNING:tensorflow:5 out of the last 9 calls to <function Trainer._cascade_val_deform_fn.<locals>.fwd at 0x7f84f837d430> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:6 out of the last 10 calls to <function Trainer._cascade_val_deform_fn.<locals>.fwd at 0x7f84f836c3a0> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:5 out of the last 105 calls to <function Trainer._make_train_step.<locals>.<lambda> at 0x7f85007b8af0> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+ok
+test_val_pair_chunk (tests.test_cascade.TestCascadeValidation) ... ok
+test_dispatch (tests.test_cascade.TestChainTrainer)
+T-C9: _n_stages from getattr(cascade, 'n_stages', 1); a chain needs a level-1 trainer. ... ok
+test_residual_centering (tests.test_cascade.TestChainTrainer)
+T-C4 (centering): the trainable level-1 residual SVF has group mean ~0 and the composed ... 
+[T-C4] level-1 residual: max |mean_i v_i| 5.96e-08 (raw 1.25e+00, max |v| 0.247); re-centering the composed A changes it by 1.40e-08
+ok
+test_skip_and_frozen_unchanged (tests.test_cascade.TestChainTrainer)
+T-C6 (p 0: no skip ops; forced skip = the level-4 stage alone) and T-C7 (the frozen chain ... WARNING:tensorflow:6 out of the last 106 calls to <function Trainer._make_train_step.<locals>.<lambda> at 0x7f84ec1fef70> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+
+[T-C6] rigid forced skip loss 2098.3481 vs level-4-only chain 2098.3481
+ok
+test_validation (tests.test_cascade.TestChainTrainer)
+T-V1: level-1 chain validation has the _frozen (4 + 2) and _frozen4 baselines and logs ... 
+[T-V1] level-1 rigid validation wall time 1.8 s; frozen center rms 21.401 (4 + 2) / 21.174 (4)
+
+[T-V1] level-1 deform frozen template Dice 0.9614 (4 + 2) / 0.9614 (4)
+ok
+test_residual_centered_and_loss_on_composed_field (tests.test_cascade.TestDeformCascade) ... 
+[T4] residual group mean max |mean_i v_i| 1.19e-07 (raw 2.35e+00)
+ok
+test_two_level_round_trip (tests.test_cascade.TestDeformCascade) ... 
+[T4] round trip (level-2 voxels, 3-voxel margin): u o u_inv max 0.0763 mean 0.01095; u_inv o u max 0.2059 mean 0.01519; U o U_inv max 0.0656 mean 0.00738; U_inv o U max 0.0705 mean 0.00739; u2 o u2_inv max 0.0305 mean 0.00694; u2_inv o u2 max 0.0358 mean 0.00694
+
+[T4] round trip (level-2 voxels, 8-voxel margin): u o u_inv max 0.0604 mean 0.01083; u_inv o u max 0.0677 mean 0.01502; U o U_inv max 0.0376 mean 0.00719; U_inv o U max 0.0416 mean 0.00707; u2 o u2_inv max 0.0305 mean 0.00694; u2_inv o u2 max 0.0358 mean 0.00694
+ok
+test_zero_residual_and_frozen_fields (tests.test_cascade.TestDeformCascade) ... ok
+test_constants (tests.test_cascade.TestFrozenChain) ... ok
+test_from_checkpoint (tests.test_cascade.TestFrozenChain)
+T-C5: an m8-style checkpoint (model = level 2, frozen_stage = level 4) restores both; ... 
+[T-C5] missing prefix -> FrozenChain.from_checkpoint(/tmp/bgr_m8_kocqdw0a/missing/ck-1): NotFoundError: Error when restoring from checkpoint or SavedModel at /tmp/bgr_m8_kocqdw0a/missin
+ok
+test_matches_standin (tests.test_cascade.TestFrozenChain)
+T-C2: FrozenChain and the phase-1 stand-in with the same weights -> max |diff| 0. ... 
+[T-C2] FrozenChain vs stand-in max |diff|: deform/U 0, deform/U_inv 0, deform/V 0, deform_stages/U 0, deform_stages/U4 0, deform_stages/U4_inv 0, deform_stages/U_inv 0, deform_stages/V 0, deform_stages/V4 0, linear/A 0, linear_stages/A 0, linear_stages/A4 0
+ok
+test_three_level_linear_composition (tests.test_cascade.TestFrozenChain)
+T-C3: A4 = FrozenStage.linear(pool(x)); A2 = Center2(R2_raw A4); A1 = Center1(R1_raw A2). ... 
+[T-C3] linear chain vs numpy float64: A2 max |diff| 9.50e-08, A1 (float32) 9.52e-08
+ok
+test_float32_under_mixed_policy (tests.test_cascade.TestFrozenStageFactories) ... ok
+test_three_task_steps (tests.test_cascade.TestFrozenStageTraining) ... ok
+test_level2_keys (tests.test_cascade.TestLevel2Unchanged) ... ok
+test_compose_matches_numpy_reference (tests.test_cascade.TestLinearCascade) ... 
+[T3] barycenter of the composed group: rotation 1.21e-06 deg, translation 3.15e-09 mm, scale 1.09e-10
+ok
+test_prewarp_consistency (tests.test_cascade.TestLinearCascade) ... 
+[T3] pre-warp NCC (two warps vs one): 0.99997, 0.99997
+ok
+test_pooled_render_matches_level4_render (tests.test_cascade.TestRenderConsistency) ... 
+[T2] interior NCC pooled level-2 render vs level-4 render: 0.99982, 0.99979, 0.99982
+ok
+test_draw_reproducible (tests.test_cascade.TestSkip) ... ok
+test_graph_and_forced_skip (tests.test_cascade.TestSkip) ... ok
+test_logging_and_validation (tests.test_cascade.TestSkip) ... WARNING:tensorflow:5 out of the last 110 calls to <function Trainer._make_deform_step.<locals>.<lambda> at 0x7f844ad9c790> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+ok
+test_off_path_is_identity (tests.test_cascade.TestSkip)
+p = 0 vs p = 0.5 fed skip=False: bitwise equal losses and variables over 3 three-task ... WARNING:tensorflow:5 out of the last 16 calls to <function Trainer._make_train_step.<locals>.<lambda> at 0x7f844943d8b0> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:5 out of the last 13 calls to <function Trainer._make_deform_step.<locals>.<lambda> at 0x7f844943d280> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+
+[T6] skip off-path identity: max |diff| 0 over 9 losses and 94 variable sums
+ok
+test_three_level_round_trip (tests.test_cascade.TestThreeLevelRoundTrip) ... 
+[T-C4] three-level round trip (level-1 voxels, 13-voxel margin): u o u_inv max 0.1029 mean 0.02096; u_inv o u max 0.0997 mean 0.02515; U4 o U4_inv max 0.0724 mean 0.01267; U4_inv o U4 max 0.0519 mean 0.01239; U2 o U2_inv max 0.0309 mean 0.00542; U2_inv o U2 max 0.0346 mean 0.00545; u1 o u1_inv max 0.0311 mean 0.00636; u1_inv o u1 max 0.0302 mean 0.00636
+ok
+test_a_checkpoint_to_frozen_and_level2 (tests.test_cascade.TestWeightTransfer) ... ok
+test_b_source_checks (tests.test_cascade.TestWeightTransfer) ... ok
+test_c_units (tests.test_cascade.TestWeightTransfer) ... ok
+test_d_second_moment (tests.test_cascade.TestWeightTransfer) ... 
+[T1d] S rel. Frobenius diff level 2 vs mode-pooled level 4: 0.00682
+ok
+test_bn_recal_empty_gap_passes (tests.test_check_mixed_run.TestCascade) ... ok
+test_bn_recal_event_missing_fails (tests.test_check_mixed_run.TestCascade) ... ok
+test_cascade_pass (tests.test_check_mixed_run.TestCascade) ... ok
+test_cascade_wrong_provenance_fails (tests.test_check_mixed_run.TestCascade) ... ok
+test_g_gap_lines (tests.test_check_mixed_run.TestCascade) ... ok
+test_grad_balance_deform64_label (tests.test_check_mixed_run.TestCascade) ... ok
+test_grad_balance_function (tests.test_check_mixed_run.TestCascade) ... ok
+test_grad_balance_keep_fallback_undecided (tests.test_check_mixed_run.TestCascade) ... ok
+test_grad_balance_step_cut (tests.test_check_mixed_run.TestCascade) ... ok
+test_missing_val_rigid_frozen_fails (tests.test_check_mixed_run.TestCascade) ... ok
+test_skip (tests.test_check_mixed_run.TestCascade) ... ok
+test_deform_nonfinite_val_and_missing_png_fail (tests.test_check_mixed_run.TestDeform) ... ok
+test_deform_only_pass (tests.test_check_mixed_run.TestDeform) ... ok
+test_init_weights_and_enc_grad (tests.test_check_mixed_run.TestDeform) ... ok
+test_mixed3_missing_best_deform_fails (tests.test_check_mixed_run.TestDeform) ... ok
+test_mixed3_pass (tests.test_check_mixed_run.TestDeform) ... ok
+test_retrace_fails (tests.test_check_mixed_run.TestDeform) ... ok
+test_rigid_deform_skips_mean (tests.test_check_mixed_run.TestDeform) ... ok
+test_chain_pass_and_info_lines (tests.test_check_mixed_run.TestLevel1Chain) ... overfit: reached=False best 10-step mean center RMS (worst task) nan mm after 3 steps; final val center RMS: rigid eval 22.1458 mm, train mode 21.9143 mm
+overfit: reached=False best 10-step mean center RMS (worst task) nan mm after 2 steps; final val center RMS: rigid eval 21.8048 mm, train mode 21.8048 mm
+overfit: reached=False best 10-step mean center RMS (worst task) nan mm after 1 steps; final val center RMS: rigid eval 21.6105 mm, train mode 21.6105 mm
+overfit: reached=False best 10-step mean center RMS (worst task) nan mm after 1 steps; final val center RMS: rigid eval 21.5412 mm, train mode 21.5412 mm
+PASS final_step             last logged step 20 (expected >= 20)
+PASS train_rigid            4 logged train_rigid/loss values, all finite
+PASS train_affine           4 logged train_affine/loss values, all finite
+PASS train_deform           4 logged train_deform/loss values, all finite
+PASS val_rigid              final-step validation complete
+PASS val_affine             final-step validation complete
+PASS val_deform             final-step validation complete
+PASS val_mean_pair_rms_mm   val/mean_pair_rms_mm = 6.5, linear task pair RMS [6.0, 7.0]
+PASS trace_once             trace counts {'rigid': 1, 'affine': 1, 'deform': 1} (1 per task)
+PASS finite_steps           non-finite steps: 0
+PASS val_png                PNGs ['rigid_step0000020.png', 'affine_step0000020.png', 'deform_step0000020.png'] present: [True, True, True]
+PASS best_checkpoint        ckpt/best has a checkpoint: True
+PASS best_deform_checkpoint ckpt/best_deform has a checkpoint: True
+PASS init_weights           mode full (expected full)
+PASS enc_grad_rigid         4/4 logged values, median raw 10, eff 1, task grad_norm 5
+PASS enc_grad_affine        4/4 logged values, median raw 10, eff 1, task grad_norm 5
+PASS enc_grad_deform        4/4 logged values, median raw 10, eff 2, task grad_norm 5
+INFO enc_grad_ratio         INFO median eff ratio linear/deform rigid 0.5, affine 0.5 (target [0.1, 10])
+PASS cascade_config         source /x/ckpt/best/best-11000, level 4, step 11000, fingerprint n_vars 120, S rel diff None
+PASS val_rigid_frozen       final-step frozen-stage baseline complete
+PASS val_affine_frozen      final-step frozen-stage baseline complete
+PASS val_deform_frozen      final-step frozen-stage baseline complete
+INFO cascade_gain_affine    INFO cascade_gain affine: center_rms_mm composed 1 vs frozen 2 (better), pair_rms_mm composed 7 vs frozen 5 (worse)
+INFO cascade_gain_deform    INFO cascade_gain deform: template_dice composed 0.8 vs frozen 0.75 (better), pair_dice composed 0.7 vs frozen 0.72 (worse)
+INFO cascade_gain_rigid     INFO cascade_gain rigid: center_rms_mm composed 1 vs frozen 2 (better), pair_rms_mm composed 6 vs frozen 5 (worse)
+INFO data_wait_rigid        INFO data wait rigid: mean data 10.0 ms, compute 90.0 ms, fraction 0.100
+INFO data_wait_affine       INFO data wait affine: mean data 10.0 ms, compute 90.0 ms, fraction 0.100
+INFO data_wait_deform       INFO data wait deform: mean data 10.0 ms, compute 90.0 ms, fraction 0.100
+INFO g_gap_rigid            INFO g_gap rigid composed: no rigid_g validation set
+INFO g_gap_rigid_frozen     INFO g_gap rigid frozen: no rigid_g validation set
+INFO g_gap_affine           INFO g_gap affine composed: no affine_g validation set
+INFO g_gap_affine_frozen    INFO g_gap affine frozen: no affine_g validation set
+PASS bn_recalibration       1 event(s); batches {'rigid': 2, 'affine': 2, 'deform': 4}, skipped non-finite {'rigid': 0, 'affine': 0, 'deform': 0}, n_layers_updated 20, layers_without_updates [], freeze True, 3.0 s
+INFO bn_gap_deform          INFO bn_gap deform (|eval - trainmode|): template_dice pre 0.01 post 0.002
+INFO bn_gap_rigid           INFO bn_gap rigid (|eval - trainmode|): center_rms_mm pre 0.35 post 0.001
+INFO grad_balance           INFO grad_balance KEEP task-grad-norm: median eff ratio linear/deform over records with step >= 5: rigid 0.5, affine 0.5 (target [0.1, 10])
+check_mixed_run: PASS
+PASS final_step             last logged step 20 (expected >= 20)
+PASS train_rigid            4 logged train_rigid/loss values, all finite
+PASS train_affine           4 logged train_affine/loss values, all finite
+PASS train_deform           4 logged train_deform/loss values, all finite
+PASS val_rigid              final-step validation complete
+PASS val_affine             final-step validation complete
+PASS val_deform             final-step validation complete
+PASS val_mean_pair_rms_mm   val/mean_pair_rms_mm = 6.5, linear task pair RMS [6.0, 7.0]
+PASS trace_once             trace counts {'rigid': 1, 'affine': 1, 'deform': 1} (1 per task)
+PASS finite_steps           non-finite steps: 0
+PASS val_png                PNGs ['rigid_step0000020.png', 'affine_step0000020.png', 'deform_step0000020.png'] present: [True, True, True]
+PASS best_checkpoint        ckpt/best has a checkpoint: True
+PASS best_deform_checkpoint ckpt/best_deform has a checkpoint: True
+PASS init_weights           mode partial (expected partial), restored ['centering', 'encoder', 'linear_decoder'], fresh ['deform_decoder'] (expected ['deform_decoder']), config diff {'deform_decoder': [False, True]}
+PASS enc_grad_rigid         4/4 logged values, median raw 10, eff 1, task grad_norm 5
+PASS enc_grad_affine        4/4 logged values, median raw 10, eff 1, task grad_norm 5
+PASS enc_grad_deform        4/4 logged values, median raw 10, eff 2, task grad_norm 5
+INFO enc_grad_ratio         INFO median eff ratio linear/deform rigid 0.5, affine 0.5 (target [0.1, 10])
+check_mixed_run: PASS
+PASS final_step             last logged step 20 (expected >= 20)
+PASS train_rigid            4 logged train_rigid/loss values, all finite
+PASS train_affine           4 logged train_affine/loss values, all finite
+PASS train_deform           4 logged train_deform/loss values, all finite
+PASS val_rigid              final-step validation complete
+PASS val_affine             final-step validation complete
+PASS val_deform             final-step validation complete
+PASS val_mean_pair_rms_mm   val/mean_pair_rms_mm = 6.5, linear task pair RMS [6.0, 7.0]
+PASS trace_once             trace counts {'rigid': 1, 'affine': 1, 'deform': 1} (1 per task)
+PASS finite_steps           non-finite steps: 0
+PASS val_png                PNGs ['rigid_step0000020.png', 'affine_step0000020.png', 'deform_step0000020.png'] present: [True, True, True]
+PASS best_checkpoint        ckpt/best has a checkpoint: True
+PASS best_deform_checkpoint ckpt/best_deform has a checkpoint: True
+FAIL init_weights           mode partial (expected full)
+check_mixed_run: FAIL
+PASS final_step             last logged step 20 (expected >= 20)
+PASS train_rigid            4 logged train_rigid/loss values, all finite
+PASS train_affine           4 logged train_affine/loss values, all finite
+PASS train_deform           4 logged train_deform/loss values, all finite
+PASS val_rigid              final-step validation complete
+PASS val_affine             final-step validation complete
+PASS val_deform             final-step validation complete
+PASS val_mean_pair_rms_mm   val/mean_pair_rms_mm = 6.5, linear task pair RMS [6.0, 7.0]
+PASS trace_once             trace counts {'rigid': 1, 'affine': 1, 'deform': 1} (1 per task)
+PASS finite_steps           non-finite steps: 0
+PASS val_png                PNGs ['rigid_step0000020.png', 'affine_step0000020.png', 'deform_step0000020.png'] present: [True, True, True]
+PASS best_checkpoint        ckpt/best has a checkpoint: True
+PASS best_deform_checkpoint ckpt/best_deform has a checkpoint: True
+check_mixed_run: PASS
+PASS final_step             last logged step 20 (expected >= 20)
+PASS train_rigid            4 logged train_rigid/loss values, all finite
+PASS train_deform           4 logged train_deform/loss values, all finite
+PASS val_rigid              final-step validation complete
+PASS val_deform             final-step validation complete
+PASS val_mean_pair_rms_mm   skipped (1 linear task(s))
+PASS trace_once             trace counts {'rigid': 1, 'deform': 1} (1 per task)
+PASS finite_steps           non-finite steps: 0
+ok
+test_expected_pairs (tests.test_check_mixed_run.TestLevel1Chain) ... ok
+test_info_lines_missing_keys (tests.test_check_mixed_run.TestLevel1Chain) ... ok
+test_min_pairs (tests.test_check_mixed_run.TestLevel1Chain) ... ok
+test_missing_frozen4_fails (tests.test_check_mixed_run.TestLevel1Chain) ... ok
+test_project_val_every (tests.test_check_mixed_run.TestLevel1Chain) ... ok
+test_wrong_stages_fails (tests.test_check_mixed_run.TestLevel1Chain) ... ok
+test_main_exit_code (tests.test_check_mixed_run.TestLinear) ... ok
+test_missing_affine_metric_fails (tests.test_check_mixed_run.TestLinear) ... ok
+test_rigid_affine_pass (tests.test_check_mixed_run.TestLinear) ... ok
+test_rigid_affine_wrong_mean_fails (tests.test_check_mixed_run.TestLinear) ... ok
+test_frozen_stats (tests.test_checkpointing.TestFullBNOnce) ... ok
+test_one_trace_per_task (tests.test_checkpointing.TestFullBNOnce) ... WARNING:tensorflow:5 out of the last 105 calls to <function Trainer._make_deform_step.<locals>.<lambda> at 0x7f8411947670> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:5 out of the last 108 calls to <function Trainer._make_train_step.<locals>.<lambda> at 0x7f84431b6790> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+ok
+test_one_update_per_step (tests.test_checkpointing.TestFullBNOnce) ... WARNING:tensorflow:6 out of the last 107 calls to <function Trainer._make_deform_step.<locals>.<lambda> at 0x7f841506b4c0> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+
+[ckpt full] BN statistics after one step vs none: full 0.00e+00; both: encoder 0.00e+00, decoder 7.84e-03
+ok
+test_persistent_tape_two_gradients (tests.test_checkpointing.TestFullBNOnce) ... 
+[ckpt full] persistent tape, 2 gradient calls: BN stats vs one forward 0.00e+00
+ok
+test_same_variables (tests.test_checkpointing.TestFullBuild) ... ok
+test_amp (tests.test_checkpointing.TestFullGradients) ... 
+[ckpt full] AMP gradients vs none: rel 0.00e+00 (worst variable 0.00e+00)
+ok
+test_fp32 (tests.test_checkpointing.TestFullGradients) ... 
+[ckpt full] fp32 gradients vs none: rel 0.00e+00 (worst variable 0.00e+00)
+ok
+test_recalibrate_one_update (tests.test_checkpointing.TestFullRecal) ... ok
+test_layout_round_trip (tests.test_curriculum.TestControlFile) ... ok
+test_task_control (tests.test_curriculum.TestControlFile) ... ok
+test_writer_atomic_version_and_noop (tests.test_curriculum.TestControlFile) ... ok
+test_defaults_off (tests.test_curriculum.TestCurriculumArgs) ... ok
+test_task_controls (tests.test_curriculum.TestCurriculumArgs) ... ok
+test_validation (tests.test_curriculum.TestCurriculumArgs) ... ok
+test_initial_files (tests.test_curriculum.TestDataModuleControl) ... ok
+test_off_by_default (tests.test_curriculum.TestDataModuleControl) ... ok
+test_pipeline_with_control_file (tests.test_curriculum.TestDataModuleControl) ... skipped 'needs nvidia.dali and a GPU'
+test_signature_and_reader_kwargs (tests.test_curriculum.TestDataModuleControl) ... ok
+test_axis_and_ranges (tests.test_curriculum.TestGlobalTransformSampler) ... ok
+test_determinism_and_resample_interval (tests.test_curriculum.TestGlobalTransformSampler) ... ok
+test_global_matrix (tests.test_curriculum.TestGlobalTransformSampler) ... ok
+test_warmup_start_and_ramp (tests.test_curriculum.TestGlobalTransformSampler) ... ok
+test_endpoints_and_midpoint (tests.test_curriculum.TestLinearCurriculum) ... ok
+test_validation (tests.test_curriculum.TestLinearCurriculum) ... ok
+test_composition_and_conversion (tests.test_curriculum.TestNumpyMirrorWithG) ... ok
+test_g_angle_sign (tests.test_curriculum.TestNumpyMirrorWithG) ... ok
+test_targets_from_g_rt_and_flips (tests.test_curriculum.TestPostprocessWithG) ... ok
+test_deterministic_same_groups_and_shifted_barycenter (tests.test_curriculum.TestValidationWithG) ... ok
+test_deform_pipeline_aligned_on_synthetic_files (tests.test_data_loading.TestDaliGuard) ... skipped 'needs nvidia.dali and a GPU'
+test_pipeline_needs_dali (tests.test_data_loading.TestDaliGuard) ... ok
+test_pipeline_runs_on_synthetic_files (tests.test_data_loading.TestDaliGuard) ... skipped 'needs nvidia.dali and a GPU'
+test_dali_center (tests.test_data_loading.TestDaliMatrixFormulas) ... ok
+test_mirror_composition_and_conversion (tests.test_data_loading.TestDaliMatrixFormulas) ... ok
+test_rotation_about_center_has_no_mm_translation (tests.test_data_loading.TestDaliMatrixFormulas) ... ok
+test_scale_shear_rows (tests.test_data_loading.TestDaliMatrixFormulas) ... ok
+test_constants (tests.test_data_loading.TestDeformData) ... ok
+test_deform_residual_ranges (tests.test_data_loading.TestDeformData) ... ok
+test_paired_permutation_keeps_pairs (tests.test_data_loading.TestDeformData) ... ok
+test_paired_reader_kwargs (tests.test_data_loading.TestDeformData) ... ok
+test_pipeline_input_validation_without_dali (tests.test_data_loading.TestDeformData) ... ok
+test_signature_and_output_count (tests.test_data_loading.TestDeformData) ... ok
+test_auto_initial_fill (tests.test_data_loading.TestLevelsAndRanges) ... ok
+test_default_ranges (tests.test_data_loading.TestLevelsAndRanges) ... ok
+test_intensity_config (tests.test_data_loading.TestLevelsAndRanges) ... ok
+test_level_constants (tests.test_data_loading.TestLevelsAndRanges) ... ok
+test_translation_mm_to_voxels_per_level (tests.test_data_loading.TestLevelsAndRanges) ... ok
+test_data_module_without_building_pipelines (tests.test_data_loading.TestManifest) ... ok
+test_file_lists_per_split_and_level (tests.test_data_loading.TestManifest) ... ok
+test_label_files_aligned_and_deform_batch_size (tests.test_data_loading.TestManifest) ... ok
+test_memory_growth_helper (tests.test_data_loading.TestManifest) ... ok
+test_missing_label_and_column (tests.test_data_loading.TestManifest) ... ok
+test_missing_labels_raise_only_for_deform (tests.test_data_loading.TestManifest) ... ok
+test_output_signature (tests.test_data_loading.TestManifest) ... ok
+test_reader_kwargs_shuffle_modes (tests.test_data_loading.TestManifest) ... ok
+test_build_deterministic_and_seeded (tests.test_deform_data.TestDeformValidationSet) ... ok
+test_from_group (tests.test_deform_data.TestDeformValidationSet) ... ok
+test_labels_present_and_inside_ellipsoid (tests.test_deform_data.TestLabelPhantom) ... ok
+test_random_svf (tests.test_deform_data.TestLabelPhantom) ... ok
+test_aligned_images_and_labels (tests.test_deform_data.TestLoaderWithLabels) ... ok
+test_without_labels_column (tests.test_deform_data.TestLoaderWithLabels) ... ok
+test_deterministic_and_residual_batch (tests.test_deform_data.TestSyntheticDeformGroup) ... ok
+test_images_and_labels_aligned (tests.test_deform_data.TestSyntheticDeformGroup) ... ok
+test_initial_pairwise_dice_non_trivial (tests.test_deform_data.TestSyntheticDeformGroup) ... ok
+test_shapes_and_batch_format (tests.test_deform_data.TestSyntheticDeformGroup) ... ok
+test_synthetic_deform_overfit (tests.test_deform_overfit.TestDeformOverfit) ... 
+[deform overfit] steps 318, reached True, window {'soft_dice_tmpl': 0.9100540339946747, 'fold_frac': 0.0}, median step 1184 ms, gpu peak 5364.436767578125 MB
+  identity (initial val): template Dice 0.8635, pair Dice 0.7742
+  step    1  loss 0.3946  soft tmpl Dice 0.8307  soft pair Dice 0.7747  fold 0.00000
+  step   50  loss 0.2533  soft tmpl Dice 0.8694  soft pair Dice 0.8799  fold 0.00000
+  step  100  loss 0.2176  soft tmpl Dice 0.8849  soft pair Dice 0.9003  fold 0.00000
+  step  150  loss 0.2001  soft tmpl Dice 0.8948  soft pair Dice 0.9084  fold 0.00000
+  step  200  loss 0.1924  soft tmpl Dice 0.9016  soft pair Dice 0.9096  fold 0.00000
+  step  250  loss 0.1838  soft tmpl Dice 0.9042  soft pair Dice 0.9159  fold 0.00000
+  step  300  loss 0.1771  soft tmpl Dice 0.9095  soft pair Dice 0.9175  fold 0.00000
+  step  318  loss 0.1730  soft tmpl Dice 0.9106  soft pair Dice 0.9206  fold 0.00000
+[deform overfit val] step, template Dice, pair Dice, neg J %:
+   250  0.9680  0.9440  0.0000
+   318  0.9711  0.9495  0.0000
+ok
+test_dtypes (tests.test_diffeo.TestDtypes) ... ok
+test_centering_mean_zero (tests.test_diffeo.TestIntegration) ... ok
+test_constant_velocity_is_translation (tests.test_diffeo.TestIntegration) ... ok
+test_exp_inverse_round_trip (tests.test_diffeo.TestIntegration) ... ok
+test_gradients_finite (tests.test_diffeo.TestIntegration) ... ok
+test_folding_fraction (tests.test_diffeo.TestJacobian) ... ok
+test_jacobian_affine_field (tests.test_diffeo.TestJacobian) ... ok
+test_jacobian_vs_np_gradient (tests.test_diffeo.TestJacobian) ... ok
+test_cascade_inverse (tests.test_diffeo.TestUpsampleAndCascade) ... ok
+test_upsample_displacement_consistency (tests.test_diffeo.TestUpsampleAndCascade) ... ok
+test_border_keeps_constant_field (tests.test_diffeo.TestWarpCompose) ... ok
+test_compose_matches_scipy (tests.test_diffeo.TestWarpCompose) ... ok
+test_nearest_labels_keep_dtype (tests.test_diffeo.TestWarpCompose) ... ok
+test_pairwise_displacement (tests.test_diffeo.TestWarpCompose) ... ok
+test_to_mm (tests.test_diffeo.TestWarpCompose) ... ok
+test_warp_matches_scipy (tests.test_diffeo.TestWarpCompose) ... ok
+test_group_block_matches_manual (tests.test_group_layers.TestGroupConvBlock) ... ok
+test_kaiming_init_variance (tests.test_group_layers.TestGroupConvBlock) ... ok
+test_plain_block_and_stem (tests.test_group_layers.TestGroupConvBlock) ... ok
+test_strided (tests.test_group_layers.TestGroupConvBlock) ... ok
+test_layer_norm_mixed_precision (tests.test_group_layers.TestGroupDenseBlock) ... ok
+test_layer_norm_per_sample (tests.test_group_layers.TestGroupDenseBlock) ... ok
+test_matches_numpy (tests.test_group_layers.TestGroupDenseBlock) ... ok
+test_no_group (tests.test_group_layers.TestGroupDenseBlock) ... ok
+test_dynamic_n_keeps_static_channels (tests.test_group_layers.TestGroupMeanConcat) ... ok
+test_matches_numpy (tests.test_group_layers.TestGroupMeanConcat) ... ok
+test_projection_and_identity_skip (tests.test_group_layers.TestGroupResBlock) ... ok
+test_bad_norm (tests.test_group_layers.TestNorms) ... ok
+test_bn_stats_freeze (tests.test_group_layers.TestNorms) ... ok
+test_bn_uses_group_statistics (tests.test_group_layers.TestNorms) ... ok
+test_instance_norm (tests.test_group_layers.TestNorms) ... ok
+test_bn_freeze (tests.test_group_net.TestBNFreezeAndDropout) ... ok
+test_dropout_training_only (tests.test_group_net.TestBNFreezeAndDropout) ... ok
+test_same_level_exact (tests.test_group_net.TestCopyRoundTrip) ... ok
+test_mean_zero (tests.test_group_net.TestDeformCentering) ... ok
+test_copy_4_to_2 (tests.test_group_net.TestDeformCopyWeights) ... ok
+test_gradient_routing (tests.test_group_net.TestDeformGradients) ... ok
+test_mixed_float16 (tests.test_group_net.TestDeformMixedPrecision) ... ok
+test_permutation_equivariance (tests.test_group_net.TestDeformPermutation) ... ok
+test_off_by_default (tests.test_group_net.TestDeformShapes) ... ok
+test_shapes_and_identity_at_init (tests.test_group_net.TestDeformShapes) ... ok
+test_no_retrace (tests.test_group_net.TestDynamicN) ... ok
+test_recompute_matches (tests.test_group_net.TestGradientCheckpointing) ... ok
+test_every_variable_gets_gradient (tests.test_group_net.TestGradients) ... ok
+test_group_information_flow (tests.test_group_net.TestGroupBehaviour) ... ok
+test_permutation_equivariance (tests.test_group_net.TestGroupBehaviour) ... ok
+test_mixed_float16 (tests.test_group_net.TestMixedPrecision) ... ok
+test_defaults_and_round_trip (tests.test_group_net.TestModelConfig) ... ok
+test_deform_fields (tests.test_group_net.TestModelConfig) ... ok
+test_translation_scale (tests.test_group_net.TestModelConfig) ... ok
+test_counts (tests.test_group_net.TestParameterCounts) ... ok
+test_copy_rejects_mismatch (tests.test_group_net.TestShapesAndLevels) ... ok
+test_copy_rejects_shape_neutral_config_difference (tests.test_group_net.TestShapesAndLevels) ... ok
+test_copy_weights_4_to_2 (tests.test_group_net.TestShapesAndLevels) ... ok
+test_identical_parameters_across_levels (tests.test_group_net.TestShapesAndLevels) ... ok
+test_identity_at_init_all_levels (tests.test_group_net.TestShapesAndLevels) ... ok
+test_shapes (tests.test_group_net.TestShapesAndLevels) ... ok
+test_overfit_one_group (tests.test_group_net.TestSmokeTraining) ... ok
+test_cases_and_verdict (tests.test_integration_steps.TestIntegrationSteps) ... 
+[integration steps] interior inverse error (voxels) and folding fraction
+  grid    max_v  T  max|u|     fi max    fi mean     if max    if mean   folding
+  level4    2.0  6   1.796    0.01189   0.002089    0.01275   0.002091  0.00e+00
+  level4    2.0  7   1.796    0.01192   0.002082    0.01256   0.002081  0.00e+00
+  level4    4.0  6   3.547    0.02726   0.006625    0.03307   0.006680  0.00e+00
+  level4    4.0  7   3.547    0.02659   0.006582    0.03218   0.006611  0.00e+00
+  level4    8.0  6   7.047    0.08772   0.017213    0.08122   0.017441  0.00e+00
+  level4    8.0  7   7.043    0.08439   0.016833    0.07655   0.017002  0.00e+00
+  level1    2.0  6   1.936    0.00190   0.000199    0.00181   0.000198  0.00e+00
+  level1    2.0  7   1.936    0.00185   0.000197    0.00175   0.000197  0.00e+00
+  level1    4.0  6   3.871    0.00462   0.000686    0.00414   0.000686  0.00e+00
+  level1    4.0  7   3.871    0.00445   0.000679    0.00404   0.000679  0.00e+00
+  level1    8.0  6   7.743    0.01042   0.002062    0.00972   0.002067  0.00e+00
+  level1    8.0  7   7.743    0.01013   0.002020    0.00944   0.002024  0.00e+00
+[integration steps] t6_accuracy_ok (level 1, max|v| 8): True {"e6": 0.00206663366407156, "e7": 0.002024047775194049, "fold6": 0.0, "fold7": 0.0, "max_v": 8.0} (38 s)
+ok
+test_against_default (tests.test_lean_losses.TestLeanLosses) ... 
+[lean losses] worst rel. error: terms 0.00e+00, gradient 2.67e-07
+ok
+test_dice_only (tests.test_lean_losses.TestLeanLosses) ... ok
+test_soft_dice_lean (tests.test_lean_losses.TestLeanLosses) ... ok
+test_graph_mode_memory (tests.test_lean_sampler.TestGraphModeMemory) ... 
+[graph-mode memory] level-2 field 80x112x96, N 2 (1 B/voxel/image = 0.001602 GiB); peak minus inputs, GiB
+  A  one-hot warp C19: lean 0.466 (model 936 B = 1.500, bound 2.249), default 0.613
+  B  integrator T7:   lean 0.528 (model 516 B = 0.827, bound 1.240), default 2.487 (model 1546 B = 2.477), saving 1.959 (predicted 1.650, floor 0.85); lean without dy dep 1.161
+  C1 backward C19 zero, no images grad: 0.378 (model 240 B = 0.385, bound 0.58)
+  C2 backward C3 border, images grad:   0.225 (model 172 B = 0.276, bound 0.41)
+ok
+test_eager_bit_identical (tests.test_lean_sampler.TestLeanForward) ... ok
+test_float16_volume (tests.test_lean_sampler.TestLeanForward) ... ok
+test_graph_bit_identical (tests.test_lean_sampler.TestLeanForward) ... WARNING:tensorflow:5 out of the last 5 calls to <function TestLeanForward.test_graph_bit_identical.<locals>.<lambda> at 0x7f841cd148b0> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:5 out of the last 5 calls to <function TestLeanForward.test_graph_bit_identical.<locals>.<lambda> at 0x7f852c1b6040> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:6 out of the last 6 calls to <function TestLeanForward.test_graph_bit_identical.<locals>.<lambda> at 0x7f84164bac10> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:6 out of the last 6 calls to <function TestLeanForward.test_graph_bit_identical.<locals>.<lambda> at 0x7f841d0afb80> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+ok
+test_nearest_ignores_lean (tests.test_lean_sampler.TestLeanForward) ... ok
+test_exp_and_inverse (tests.test_lean_sampler.TestLeanGradients) ... 
+[lean exp_and_inverse] grad rel. error 2.44e-07
+ok
+test_gradients_match (tests.test_lean_sampler.TestLeanGradients) ... 
+[lean grads] worst rel. error: float32/coords 8.55e-08, float32/images 7.27e-08, float64/coords 1.63e-16, float64/images 1.32e-16
+ok
+test_images_grad_false (tests.test_lean_sampler.TestLeanGradients) ... ok
+test_cascade_overfit_smoke_and_level_error (tests.test_main.TestCascadeMain) ... WARNING:tensorflow:6 out of the last 109 calls to <function Trainer._make_train_step.<locals>.<lambda> at 0x7f8508197430> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+ok
+test_build_n (tests.test_main.TestDeformMain) ... ok
+test_dali_data_wiring_with_deform (tests.test_main.TestDeformMain) ... ok
+test_deform_real_data_overfit_path (tests.test_main.TestDeformMain) ... ok
+test_memory_knobs_dry_run (tests.test_main.TestDeformMain) ... ok
+test_mixed_three_task_dry_run (tests.test_main.TestDeformMain) ... WARNING:tensorflow:5 out of the last 5 calls to <function Trainer._val_fn.<locals>.fwd at 0x7f841d2e34c0> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:5 out of the last 5 calls to <function Trainer._val_fn.<locals>.fwd_train_mode at 0x7f841e566430> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+PASS val_png                PNGs ['rigid_step0000020.png', 'deform_step0000020.png'] present: [True, True]
+PASS best_checkpoint        ckpt/best has a checkpoint: True
+PASS best_deform_checkpoint ckpt/best_deform has a checkpoint: True
+PASS cascade_config         source /x/ckpt/best/best-11000, level 2, step 6000, fingerprint n_vars 120, S rel diff vs level 4 None, vs level 2 0.01
+PASS cascade_stages         stages level 4 key frozen_stage origin step 11000, level 2 key model origin step 6000
+PASS val_rigid_frozen       final-step frozen-stage baseline complete
+PASS val_deform_frozen      final-step frozen-stage baseline complete
+PASS val_rigid_frozen4      final-step frozen level-4 baseline complete
+PASS val_deform_frozen4     final-step frozen level-4 baseline complete
+INFO cascade_gain_deform    INFO cascade_gain deform: template_dice composed 0.8 vs frozen 0.75 (better) vs frozen4 0.7 (better), pair_dice composed 0.7 vs frozen 0.72 (worse) vs frozen4 0.6 (better)
+INFO cascade_gain_rigid     INFO cascade_gain rigid: center_rms_mm composed 1 vs frozen 2 (better) vs frozen4 3 (better), pair_rms_mm composed 6 vs frozen 5 (worse) vs frozen4 4 (worse)
+INFO deform_extra           INFO deform_extra (composed / frozen / frozen4 / identity): neg_jac_pct 0 / n/a / n/a / n/a, inv_consistency_mm 0.05 / n/a / n/a / n/a, ncc_template 0.5 / n/a / n/a / 0.3, ncc_pair n/a / n/a / n/a / n/a
+INFO data_wait_rigid        INFO data wait rigid: mean data 10.0 ms, compute 90.0 ms, fraction 0.100
+INFO data_wait_deform       INFO data wait deform: mean data 10.0 ms, compute 90.0 ms, fraction 0.100
+INFO g_gap_rigid            INFO g_gap rigid composed: no rigid_g validation set
+INFO g_gap_rigid_frozen     INFO g_gap rigid frozen: no rigid_g validation set
+INFO g_gap_rigid_frozen4    INFO g_gap rigid frozen4: no rigid_g validation set
+PASS min_pairs_config       config.json args.min_pairs 'n' (expected 'n')
+PASS n_pairs_rigid          4 logged train_rigid/n_pairs values, expected 4 (N 4, p 0.1)
+PASS n_pairs_deform         4 logged train_deform/n_pairs values, expected 2 (N 2, p 0.1)
+INFO gpu_peak               INFO gpu_peak 30000 MiB (29.30 GiB) vs A100 budget 36 GiB: fits
+INFO step_time              INFO step_time: per task rigid 0.1 s, deform 0.1 s; ratio-weighted mean step 0.1 s; val/wall_s median 30 (first 30, 1 passes); recal 3.0 s; projected 8000 steps = 1.3 x (S x step + 800 val x median val/wall_s + recal) = 32244 s (8.96 h)
+check_mixed_run: PASS
+PASS final_step             last logged step 20 (expected >= 20)
+PASS train_rigid            4 logged train_rigid/loss values, all finite
+PASS train_affine           4 logged train_affine/loss values, all finite
+PASS val_rigid              final-step validation complete
+PASS val_affine             final-step validation complete
+PASS val_mean_pair_rms_mm   val/mean_pair_rms_mm = 6.5, linear task pair RMS [6.0, 7.0]
+PASS trace_once             trace counts {'rigid': 1, 'affine': 1} (1 per task)
+PASS finite_steps           non-finite steps: 0
+PASS val_png                PNGs ['rigid_step0000020.png', 'affine_step0000020.png'] present: [True, True]
+PASS best_checkpoint        ckpt/best has a checkpoint: True
+check_mixed_run: PASS
+FAIL final_step             last logged step 20 (expected >= 30)
+PASS train_rigid            4 logged train_rigid/loss values, all finite
+PASS train_affine           4 logged train_affine/loss values, all finite
+PASS val_rigid              final-step validation complete
+PASS val_affine             final-step validation complete
+PASS val_mean_pair_rms_mm   val/mean_pair_rms_mm = 6.5, linear task pair RMS [6.0, 7.0]
+PASS trace_once             trace counts {'rigid': 1, 'affine': 1} (1 per task)
+PASS finite_steps           non-finite steps: 0
+PASS val_png                PNGs ['rigid_step0000020.png', 'affine_step0000020.png'] present: [True, True]
+PASS best_checkpoint        ckpt/best has a checkpoint: True
+check_mixed_run: FAIL
+
+[m6] synthetic deform group (level 4, n 4, seed 0): identity pairwise hard Dice mean 0.7742 min 0.7527 max 0.7939, max|u| 3.844 vox
+overfit deform: reached=True after 318 steps; 10-step window soft template Dice 0.9101 (threshold 0.91), fold 0.00000 (max 0.001); final val template Dice 0.9711, pair Dice 0.9495 (identity 0.8635 / 0.7742), neg J 0.0000 %
+
+exp(v) o exp(-v) round trip (40x56x48, sigma 3, max|v| 2 vox, T=7, 3-voxel margin): u o u_inv max 0.01031 mean 0.001863 vox; u_inv o u max 0.01081 mean 0.001861 vox; max|u| 1.639
+
+cascade round trip (20x28x24 -> 40x56x48, 4-voxel margin): u o u_inv max 0.00462 mean 0.000963; u_inv o u max 0.01046 mean 0.002290 vox
+
+upsampled-field warp vs upsampled coarse warp: max 0.0327 mean 0.01003 (range 3)
+
+Parameter counts (trainable; level-independent):
+part                                                  A              B        A+first        B+first
+encoder/stem                                      1,760            896          1,760            896
+encoder/l2                                      110,720         55,424        110,720         55,424
+encoder/l3                                      442,624        221,440        442,624        221,440
+encoder/l4                                    1,327,552        664,000      1,327,552        664,000
+encoder/l5                                    2,654,848      1,327,744      2,654,848      1,327,744
+encoder/l6                                    5,309,312      2,655,104      5,309,312      2,655,104
+encoder                                       9,846,816      4,924,608      9,846,816      4,924,608
+linear_decoder/reduction_0                      148,416        148,416        148,416        148,416
+linear_decoder/reduction_1                       37,344         37,344         37,344         37,344
+linear_decoder/reduction_2                        9,456          9,456          9,456          9,456
+linear_decoder/reduction_3                        2,424          2,424          2,424          2,424
+linear_decoder/dense_0                       10,334,048     10,334,048     20,655,968     20,655,968
+linear_decoder/dense_0/dense                 10,323,968     10,323,968     20,645,888     20,645,888
+linear_decoder/dense_1                        2,101,760      2,101,760      2,101,760      2,101,760
+linear_decoder/dense_1/dense                  2,097,664      2,097,664      2,097,664      2,097,664
+linear_decoder/head_norm_act                      1,024          1,024          1,024          1,024
+linear_decoder/rigid_head                         6,669          6,669          6,669          6,669
+linear_decoder/scale_shear_head                   3,078          3,078          3,078          3,078
+linear_decoder                               12,644,219     12,644,219     22,966,139     22,966,139
+group_overhead/encoder                        4,922,208              0      4,922,208              0
+group_overhead/linear_decoder                 1,146,496      1,146,496     11,468,416     11,468,416
+trainable                                    22,491,035     17,568,827     32,812,955     27,890,747
+non_trainable                                     2,784          2,784          2,784          2,784
+
+smoke training (level 4, N=4, rigid) RMS mm per step: 7.85 7.88 7.82 7.81 7.83 7.71 7.79 8.01 7.76 7.73 7.41 8.23 7.76 7.80 7.43 8.07 8.03 8.37 8.07 7.66 7.78 7.96 7.93 7.76 7.87 8.52 7.51 7.87 7.99 8.38 8.04 7.97 7.43 7.88 7.37 8.09 7.45 7.88 6.63 7.76 7.39 6.85 6.40 6.08 5.78 5.91 5.77 5.77 5.82 5.56 5.24 5.32 5.83 5.43 5.16 5.30 5.90 5.30 5.35 5.14
+overfit: reached=False best 10-step mean center RMS (worst task) nan mm after 2 steps; final val center RMS: rigid eval 22.1609 mm, train mode 22.1608 mm
+overfit: reached=False best 10-step mean center RMS (worst task) nan mm after 2 steps; final val center RMS: rigid eval 22.1664 mm, train mode 22.1663 mm
+overfit deform: reached=False after 3 steps; 10-step window soft template Dice nan (threshold 0.9), fold nan (max 0.001); final val template Dice 0.3991, pair Dice 0.1164 (identity 0.4001 / 0.1164), neg J 0.0000 %
+dry run: steps 0 -> 2, trace counts {'rigid': 1, 'deform': 1}, finite True
+WARNING:tensorflow:6 out of the last 6 calls to <function Trainer._val_fn.<locals>.fwd at 0x7f841638caf0> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:6 out of the last 6 calls to <function Trainer._val_fn.<locals>.fwd_train_mode at 0x7f84154cd4c0> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:5 out of the last 8 calls to <function Trainer._val_deform_fn.<locals>.fwd at 0x7f8414897430> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:5 out of the last 8 calls to <function Trainer._val_deform_fn.<locals>.fwd_train_mode at 0x7f841310e550> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+ok
+test_synthetic_deform_dry_run (tests.test_main.TestDeformMain) ... WARNING:tensorflow:6 out of the last 11 calls to <function Trainer._val_deform_fn.<locals>.fwd at 0x7f84163f4c10> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:6 out of the last 11 calls to <function Trainer._val_deform_fn.<locals>.fwd_train_mode at 0x7f84123b5040> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+ok
+test_synthetic_deform_ncc_dry_run (tests.test_main.TestDeformMain) ... ok
+test_three_task_validation_group_sizes (tests.test_main.TestDeformMain) ... ok
+test_trainer_lean_mismatch (tests.test_main.TestDeformMain) ... ok
+test_device_routing (tests.test_main.TestIntensityAugDevice) ... ok
+test_overfit_parse_error (tests.test_main.TestIntensityAugDevice) ... usage: python -m unittest [-h] [--data DATA] [--results RESULTS]
+                          [--run-name RUN_NAME] [--resume RESUME]
+                          [--level {4,2,1}] [--group-size GROUP_SIZE]
+                          [--steps STEPS] [--val-every VAL_EVERY]
+                          [--val-groups VAL_GROUPS]
+                          [--val-group-size VAL_GROUP_SIZE]
+                          [--val-seed VAL_SEED] [--log-every LOG_EVERY]
+                          [--ckpt-every CKPT_EVERY] [--val-png VAL_PNG]
+                          [--val-png-k VAL_PNG_K]
+                          [--val-png-group VAL_PNG_GROUP]
+                          [--val-png-gt-row VAL_PNG_GT_ROW]
+                          [--val-png-mean-col VAL_PNG_MEAN_COL]
+                          [--best-metric BEST_METRIC]
+                          [--optimizer {sgdw,sgd,adam,adamw}] [--lr LR]
+                          [--momentum MOMENTUM] [--dampening DAMPENING]
+                          [--nesterov NESTEROV] [--decoupled DECOUPLED]
+                          [--weight-decay WEIGHT_DECAY]
+                          [--exclude-from-weight-decay EXCLUDE_FROM_WEIGHT_DECAY]
+                          [--clipnorm CLIPNORM]
+                          [--schedule {cosine,poly,cycle,constant}]
+                          [--warmup-steps WARMUP_STEPS]
+                          [--min-lr-factor MIN_LR_FACTOR] [--power POWER]
+                          [--cycle-steps CYCLE_STEPS] [--amp AMP] [--xla XLA]
+                          [--gpu-memory-limit-mb GPU_MEMORY_LIMIT_MB]
+                          [--task-ratio TASK_RATIO]
+                          [--lambda-pair LAMBDA_PAIR]
+                          [--loss-scale-mm2 LOSS_SCALE_MM2]
+                          [--task-loss-weights TASK_LOSS_WEIGHTS]
+                          [--task-grad-norm TASK_GRAD_NORM]
+                          [--task-grad-norm-min TASK_GRAD_NORM_MIN]
+                          [--p-pair P_PAIR] [--min-pairs {1,n}]
+                          [--flip-prob FLIP_PROB]
+                          [--target-iters TARGET_ITERS]
+                          [--lambda-pdice LAMBDA_PDICE] [--p-pdice P_PDICE]
+                          [--lambda-dice-template LAMBDA_DICE_TEMPLATE]
+                          [--lambda-ncc-template LAMBDA_NCC_TEMPLATE]
+                          [--lambda-ncc-pair LAMBDA_NCC_PAIR]
+                          [--ncc-window NCC_WINDOW]
+                          [--lambda-smooth LAMBDA_SMOOTH]
+                          [--smooth-order {1,2}]
+                          [--integration-steps INTEGRATION_STEPS]
+                          [--decoder-widths DECODER_WIDTHS]
+                          [--deform-decoder {auto,true,false}]
+                          [--deform-residual-affine DEFORM_RESIDUAL_AFFINE]
+                          [--deform-group-size DEFORM_GROUP_SIZE]
+                          [--gradient-checkpointing {none,integrator,decoder,both,full}]
+                          [--lean-sampler LEAN_SAMPLER]
+                          [--lean-losses LEAN_LOSSES]
+                          [--pair-recompute PAIR_RECOMPUTE]
+                          [--split-group-conv SPLIT_GROUP_CONV]
+                          [--overfit-dice-threshold OVERFIT_DICE_THRESHOLD]
+                          [--overfit-fold-max OVERFIT_FOLD_MAX]
+                          [--val-deform-max-pairs VAL_DEFORM_MAX_PAIRS]
+                          [--val-pair-chunk VAL_PAIR_CHUNK]
+                          [--val-image-chunk VAL_IMAGE_CHUNK]
+                          [--rigid-rotation-deg RIGID_ROTATION_DEG]
+                          [--rigid-translation-mm RIGID_TRANSLATION_MM]
+                          [--rigid-log-scale RIGID_LOG_SCALE]
+                          [--rigid-shear RIGID_SHEAR]
+                          [--affine-rotation-deg AFFINE_ROTATION_DEG]
+                          [--affine-translation-mm AFFINE_TRANSLATION_MM]
+                          [--affine-log-scale AFFINE_LOG_SCALE]
+                          [--affine-shear AFFINE_SHEAR]
+                          [--intensity-aug INTENSITY_AUG]
+                          [--intensity-aug-device {dali,tf}]
+                          [--curriculum CURRICULUM]
+                          [--curriculum-ramp-steps CURRICULUM_RAMP_STEPS]
+                          [--rigid-rotation-deg-start RIGID_ROTATION_DEG_START]
+                          [--rigid-translation-mm-start RIGID_TRANSLATION_MM_START]
+                          [--rigid-log-scale-start RIGID_LOG_SCALE_START]
+                          [--rigid-shear-start RIGID_SHEAR_START]
+                          [--affine-rotation-deg-start AFFINE_ROTATION_DEG_START]
+                          [--affine-translation-mm-start AFFINE_TRANSLATION_MM_START]
+                          [--affine-log-scale-start AFFINE_LOG_SCALE_START]
+                          [--affine-shear-start AFFINE_SHEAR_START]
+                          [--global-transform GLOBAL_TRANSFORM]
+                          [--global-rot-max-deg GLOBAL_ROT_MAX_DEG]
+                          [--global-trans-max-mm GLOBAL_TRANS_MAX_MM]
+                          [--global-resample-every GLOBAL_RESAMPLE_EVERY]
+                          [--global-start-step GLOBAL_START_STEP]
+                          [--global-ramp-steps GLOBAL_RAMP_STEPS]
+                          [--init-weights INIT_WEIGHTS]
+                          [--cascade-from CASCADE_FROM]
+                          [--cascade-skip-prob CASCADE_SKIP_PROB]
+                          [--bn-recal-batches BN_RECAL_BATCHES]
+                          [--bn-recal-freeze BN_RECAL_FREEZE]
+                          [--bn-recal-validate BN_RECAL_VALIDATE]
+                          [--num-threads NUM_THREADS] [--prefetch PREFETCH]
+                          [--shuffle-mode {epoch,buffer}]
+                          [--group-config {A,B}] [--block {single,residual}]
+                          [--norm {batch,instance,none}]
+                          [--dense-norm {layer,batch,none}]
+                          [--head-activation {relu,none}] [--filters FILTERS]
+                          [--reductions REDUCTIONS] [--dense DENSE]
+                          [--dropout DROPOUT]
+                          [--dense-group-concat-first DENSE_GROUP_CONCAT_FIRST]
+                          [--negative-slope NEGATIVE_SLOPE]
+                          [--translation-scale TRANSLATION_SCALE]
+                          [--centering-iters CENTERING_ITERS]
+                          [--bn-momentum BN_MOMENTUM] [--seed SEED]
+                          [--nonfinite-patience NONFINITE_PATIENCE]
+                          [--quiet QUIET]
+                          [--log-backend {auto,dllogger,jsonl}] [--dry-run]
+                          [--overfit-one-group] [--overfit-synthetic]
+                          [--overfit-threshold-mm OVERFIT_THRESHOLD_MM]
+                          [--overfit-max-steps OVERFIT_MAX_STEPS]
+python -m unittest: error: --intensity-aug-device tf needs the DALI training path (--overfit-one-group has no intensity augmentation)
+usage: python -m unittest [-h] [--data DATA] [--results RESULTS]
+                          [--run-name RUN_NAME] [--resume RESUME]
+                          [--level {4,2,1}] [--group-size GROUP_SIZE]
+                          [--steps STEPS] [--val-every VAL_EVERY]
+                          [--val-groups VAL_GROUPS]
+                          [--val-group-size VAL_GROUP_SIZE]
+                          [--val-seed VAL_SEED] [--log-every LOG_EVERY]
+                          [--ckpt-every CKPT_EVERY] [--val-png VAL_PNG]
+                          [--val-png-k VAL_PNG_K]
+                          [--val-png-group VAL_PNG_GROUP]
+                          [--val-png-gt-row VAL_PNG_GT_ROW]
+                          [--val-png-mean-col VAL_PNG_MEAN_COL]
+                          [--best-metric BEST_METRIC]
+                          [--optimizer {sgdw,sgd,adam,adamw}] [--lr LR]
+                          [--momentum MOMENTUM] [--dampening DAMPENING]
+                          [--nesterov NESTEROV] [--decoupled DECOUPLED]
+                          [--weight-decay WEIGHT_DECAY]
+                          [--exclude-from-weight-decay EXCLUDE_FROM_WEIGHT_DECAY]
+                          [--clipnorm CLIPNORM]
+                          [--schedule {cosine,poly,cycle,constant}]
+                          [--warmup-steps WARMUP_STEPS]
+                          [--min-lr-factor MIN_LR_FACTOR] [--power POWER]
+                          [--cycle-steps CYCLE_STEPS] [--amp AMP] [--xla XLA]
+                          [--gpu-memory-limit-mb GPU_MEMORY_LIMIT_MB]
+                          [--task-ratio TASK_RATIO]
+                          [--lambda-pair LAMBDA_PAIR]
+                          [--loss-scale-mm2 LOSS_SCALE_MM2]
+                          [--task-loss-weights TASK_LOSS_WEIGHTS]
+                          [--task-grad-norm TASK_GRAD_NORM]
+                          [--task-grad-norm-min TASK_GRAD_NORM_MIN]
+                          [--p-pair P_PAIR] [--min-pairs {1,n}]
+                          [--flip-prob FLIP_PROB]
+                          [--target-iters TARGET_ITERS]
+                          [--lambda-pdice LAMBDA_PDICE] [--p-pdice P_PDICE]
+                          [--lambda-dice-template LAMBDA_DICE_TEMPLATE]
+                          [--lambda-ncc-template LAMBDA_NCC_TEMPLATE]
+                          [--lambda-ncc-pair LAMBDA_NCC_PAIR]
+                          [--ncc-window NCC_WINDOW]
+                          [--lambda-smooth LAMBDA_SMOOTH]
+                          [--smooth-order {1,2}]
+                          [--integration-steps INTEGRATION_STEPS]
+                          [--decoder-widths DECODER_WIDTHS]
+                          [--deform-decoder {auto,true,false}]
+                          [--deform-residual-affine DEFORM_RESIDUAL_AFFINE]
+                          [--deform-group-size DEFORM_GROUP_SIZE]
+                          [--gradient-checkpointing {none,integrator,decoder,both,full}]
+                          [--lean-sampler LEAN_SAMPLER]
+                          [--lean-losses LEAN_LOSSES]
+                          [--pair-recompute PAIR_RECOMPUTE]
+                          [--split-group-conv SPLIT_GROUP_CONV]
+                          [--overfit-dice-threshold OVERFIT_DICE_THRESHOLD]
+                          [--overfit-fold-max OVERFIT_FOLD_MAX]
+                          [--val-deform-max-pairs VAL_DEFORM_MAX_PAIRS]
+                          [--val-pair-chunk VAL_PAIR_CHUNK]
+                          [--val-image-chunk VAL_IMAGE_CHUNK]
+                          [--rigid-rotation-deg RIGID_ROTATION_DEG]
+                          [--rigid-translation-mm RIGID_TRANSLATION_MM]
+                          [--rigid-log-scale RIGID_LOG_SCALE]
+                          [--rigid-shear RIGID_SHEAR]
+                          [--affine-rotation-deg AFFINE_ROTATION_DEG]
+                          [--affine-translation-mm AFFINE_TRANSLATION_MM]
+                          [--affine-log-scale AFFINE_LOG_SCALE]
+                          [--affine-shear AFFINE_SHEAR]
+                          [--intensity-aug INTENSITY_AUG]
+                          [--intensity-aug-device {dali,tf}]
+                          [--curriculum CURRICULUM]
+                          [--curriculum-ramp-steps CURRICULUM_RAMP_STEPS]
+                          [--rigid-rotation-deg-start RIGID_ROTATION_DEG_START]
+                          [--rigid-translation-mm-start RIGID_TRANSLATION_MM_START]
+                          [--rigid-log-scale-start RIGID_LOG_SCALE_START]
+                          [--rigid-shear-start RIGID_SHEAR_START]
+                          [--affine-rotation-deg-start AFFINE_ROTATION_DEG_START]
+                          [--affine-translation-mm-start AFFINE_TRANSLATION_MM_START]
+                          [--affine-log-scale-start AFFINE_LOG_SCALE_START]
+                          [--affine-shear-start AFFINE_SHEAR_START]
+                          [--global-transform GLOBAL_TRANSFORM]
+                          [--global-rot-max-deg GLOBAL_ROT_MAX_DEG]
+                          [--global-trans-max-mm GLOBAL_TRANS_MAX_MM]
+                          [--global-resample-every GLOBAL_RESAMPLE_EVERY]
+                          [--global-start-step GLOBAL_START_STEP]
+                          [--global-ramp-steps GLOBAL_RAMP_STEPS]
+                          [--init-weights INIT_WEIGHTS]
+                          [--cascade-from CASCADE_FROM]
+                          [--cascade-skip-prob CASCADE_SKIP_PROB]
+                          [--bn-recal-batches BN_RECAL_BATCHES]
+                          [--bn-recal-freeze BN_RECAL_FREEZE]
+                          [--bn-recal-validate BN_RECAL_VALIDATE]
+                          [--num-threads NUM_THREADS] [--prefetch PREFETCH]
+                          [--shuffle-mode {epoch,buffer}]
+                          [--group-config {A,B}] [--block {single,residual}]
+                          [--norm {batch,instance,none}]
+                          [--dense-norm {layer,batch,none}]
+                          [--head-activation {relu,none}] [--filters FILTERS]
+                          [--reductions REDUCTIONS] [--dense DENSE]
+                          [--dropout DROPOUT]
+                          [--dense-group-concat-first DENSE_GROUP_CONCAT_FIRST]
+                          [--negative-slope NEGATIVE_SLOPE]
+                          [--translation-scale TRANSLATION_SCALE]
+                          [--centering-iters CENTERING_ITERS]
+                          [--bn-momentum BN_MOMENTUM] [--seed SEED]
+                          [--nonfinite-patience NONFINITE_PATIENCE]
+                          [--quiet QUIET]
+                          [--log-backend {auto,dllogger,jsonl}] [--dry-run]
+                          [--overfit-one-group] [--overfit-synthetic]
+                          [--overfit-threshold-mm OVERFIT_THRESHOLD_MM]
+                          [--overfit-max-steps OVERFIT_MAX_STEPS]
+python -m unittest: error: argument --intensity-aug-device: invalid choice: 'gpu' (choose from 'dali', 'tf')
+ok
+test_resume_guard (tests.test_main.TestIntensityAugDevice) ... ok
+test_check_cascade_fingerprints (tests.test_main.TestLevel1CascadeErrors) ... ok
+test_level1_cascade_from_errors (tests.test_main.TestLevel1CascadeErrors) ... ERROR
+test_level1_chain_resume_and_checker (tests.test_main.TestLevel1CascadeMain) ... 
+[T-E1] level 4 -> 2 -> 1 + resume: 312 s
+ok
+test_dry_run_without_dali_fails_clearly (tests.test_main.TestMain) ... ok
+test_real_data_overfit_path (tests.test_main.TestMain) ... ok
+test_synthetic_overfit_dry_run (tests.test_main.TestMain) ... ok
+test_overfit_affine_below_1mm (tests.test_main.TestOverfit) ... 
+[overfit affine:1] steps 1846, reached True, best worst-task 10-step mean 0.7949 mm, per task {'affine': 0.7948701500892639}, median step 591 ms
+[overfit affine:1 val] step, eval_center_rms_mm, trainmode_center_rms_mm:
+  250   23.593    1.644
+  500    3.037    2.126
+  750    1.650    1.655
+  1000    1.157    1.052
+  1250    2.406    2.412
+  1500    1.499    1.467
+  1750    1.020    0.985
+  1846    0.606    0.618
+[overfit affine:1 final] affine eval 0.6063 mm, train mode 0.6180 mm
+[overfit affine final] scale 0.499 %, shear 0.549 %, QR rotation 0.617 deg (centered)
+ok
+test_overfit_mixed_rigid_affine_below_1mm (tests.test_main.TestOverfit) ... 
+[overfit rigid:1,affine:1] steps 2199, reached True, best worst-task 10-step mean 0.7903 mm, per task {'rigid': 0.6393289536237716, 'affine': 0.7903458118438721}, median step 560 ms
+[overfit rigid:1,affine:1 val] step, rigid_eval_center_rms_mm, rigid_trainmode_center_rms_mm, affine_eval_center_rms_mm, affine_trainmode_center_rms_mm:
+  250   18.503    8.116   22.480    7.458
+  500    2.304    1.967    4.195    3.922
+  750    1.394    1.404    3.642    3.649
+  1000    0.771    0.775    1.511    1.545
+  1250    1.215    1.204    1.585    1.530
+  1500    1.031    1.056    1.486    1.450
+  1750    0.767    0.781    1.048    1.007
+  2000    0.797    0.815    0.996    0.956
+  2199    0.318    0.336    0.605    0.620
+[overfit rigid:1,affine:1 final] rigid eval 0.3176 mm, train mode 0.3365 mm
+[overfit rigid:1,affine:1 final] affine eval 0.6053 mm, train mode 0.6201 mm
+ok
+test_overfit_synthetic_group_below_1mm (tests.test_main.TestOverfit) ... 
+[overfit curve] lr 3e-4, steps 593, reached True, best 10-step mean 0.7611 mm, median step 604 ms
+  step    1  center RMS  22.291 mm  pair RMS  41.478 mm
+  step   50  center RMS  12.744 mm  pair RMS  20.225 mm
+  step  100  center RMS  10.511 mm  pair RMS  19.724 mm
+  step  150  center RMS   8.059 mm  pair RMS   8.654 mm
+  step  200  center RMS   6.110 mm  pair RMS   5.501 mm
+  step  250  center RMS   4.789 mm  pair RMS   8.746 mm
+  step  300  center RMS   3.557 mm  pair RMS   5.931 mm
+  step  350  center RMS   1.938 mm  pair RMS   3.572 mm
+  step  400  center RMS   1.168 mm  pair RMS   2.522 mm
+  step  450  center RMS   2.033 mm  pair RMS   1.696 mm
+  step  500  center RMS   1.154 mm  pair RMS   0.858 mm
+  step  550  center RMS   0.884 mm  pair RMS   1.868 mm
+  step  593  center RMS   0.478 mm  pair RMS   1.063 mm
+[overfit val] step, eval-mode center RMS, train-mode center RMS (mm):
+   250   21.354    4.717
+   500    1.815    1.356
+   593    0.763    0.589
+ok
+test_init_weights_warm_start (tests.test_main.TestResumeControlsAndWarmStart) ... ok
+test_resumed_step_control_values_before_pipelines (tests.test_main.TestResumeControlsAndWarmStart) ... ok
+test_three_task_warm_start_smoke (tests.test_main.TestResumeControlsAndWarmStart) ... 
+[m7 smoke] seed 0
+  PASS final_step             last logged step 12 (expected >= 12)
+  PASS train_rigid            4 logged train_rigid/loss values, all finite
+  PASS train_affine           3 logged train_affine/loss values, all finite
+  PASS train_deform           5 logged train_deform/loss values, all finite
+  PASS val_rigid              final-step validation complete
+  PASS val_affine             final-step validation complete
+  PASS val_deform             final-step validation complete
+  PASS val_mean_pair_rms_mm   val/mean_pair_rms_mm = 38.394399245303006, linear task pair RMS [35.2103810776911, 41.578417412914916]
+  PASS trace_once             trace counts {'rigid': 1, 'affine': 1, 'deform': 1} (1 per task)
+  PASS finite_steps           non-finite steps: 0
+  PASS val_png                PNGs ['rigid_step0000012.png', 'affine_step0000012.png', 'deform_step0000012.png'] present: [True, True, True]
+  PASS best_checkpoint        ckpt/best has a checkpoint: True
+  PASS best_deform_checkpoint ckpt/best_deform has a checkpoint: True
+  PASS init_weights           mode partial (expected partial), restored ['centering', 'encoder', 'linear_decoder'], fresh ['deform_decoder'] (expected ['deform_decoder']), config diff {'deform_decoder': [False, True]}
+  PASS enc_grad_rigid         4/4 logged values, median raw 3817, eff 4.415, task grad_norm 103
+  PASS enc_grad_affine        3/3 logged values, median raw 1.212e+04, eff 7.398, task grad_norm 187.7
+  PASS enc_grad_deform        5/5 logged values, median raw 0.007556, eff 0.007556, task grad_norm 0.1843
+  PASS enc_grad_ratio         INFO median eff ratio linear/deform rigid 584, affine 979 (target [0.1, 10])
+ok
+test_invalid_values (tests.test_measure_memory.TestCliErrors) ... ok
+test_child_argv_custom_widths (tests.test_measure_memory.TestIsolate) ... ok
+test_child_crash_gives_error_record (tests.test_measure_memory.TestIsolate) ... dry run: steps 0 -> 2, trace counts {'rigid': 1, 'affine': 0, 'deform': 1}, finite True
+overfit: reached=False best 10-step mean center RMS (worst task) nan mm after 4 steps; final val center RMS: rigid eval 22.1609 mm, train mode 22.1605 mm; affine eval 26.3739 mm, train mode 26.3739 mm
+overfit deform: reached=False after 4 steps; 10-step window soft template Dice nan (threshold 0.9), fold nan (max 0.001); final val template Dice 0.8643, pair Dice 0.7742 (identity 0.8635 / 0.7742), neg J 0.0000 %
+dry run: steps 0 -> 2, trace counts {'deform': 1}, finite True
+dry run: steps 0 -> 2, trace counts {'deform': 1}, finite True
+overfit: reached=False best 10-step mean center RMS (worst task) nan mm after 3 steps; final val center RMS: rigid eval 21.1131 mm, train mode 21.1131 mm
+overfit: reached=False best 10-step mean center RMS (worst task) nan mm after 3 steps; final val center RMS: rigid eval 21.1183 mm, train mode 21.1183 mm
+overfit: reached=False best 10-step mean center RMS (worst task) nan mm after 3 steps; final val center RMS: rigid eval 21.1153 mm, train mode 21.1153 mm
+overfit: reached=False best 10-step mean center RMS (worst task) nan mm after 2 steps; final val center RMS: rigid eval 21.1149 mm, train mode 21.1149 mm
+overfit: reached=False best 10-step mean center RMS (worst task) 14.8880 mm after 20 steps; final val center RMS: rigid eval 18.3573 mm, train mode 13.7494 mm
+overfit: reached=False best 10-step mean center RMS (worst task) nan mm after 5 steps; final val center RMS: rigid eval 18.3149 mm, train mode 12.9966 mm
+dry run: steps 0 -> 2, trace counts {'rigid': 1}, finite True
+dry run: steps 0 -> 2, trace counts {'rigid': 1}, finite True
+overfit: reached=True best 10-step mean center RMS (worst task) 0.7949 mm after 1846 steps; final val center RMS: affine eval 0.6063 mm, train mode 0.6180 mm
+overfit: reached=True best 10-step mean center RMS (worst task) 0.7903 mm after 2199 steps; final val center RMS: rigid eval 0.3176 mm, train mode 0.3365 mm; affine eval 0.6053 mm, train mode 0.6201 mm
+overfit: reached=True best 10-step mean center RMS (worst task) 0.7611 mm after 593 steps; final val center RMS: rigid eval 0.7629 mm, train mode 0.5886 mm
+dry run: steps 0 -> 2, trace counts {'rigid': 1}, finite True
+dry run: steps 0 -> 2, trace counts {'rigid': 1}, finite True
+dry run: steps 0 -> 2, trace counts {'rigid': 1, 'deform': 1}, finite True
+overfit: reached=False best 10-step mean center RMS (worst task) nan mm after 6 steps; final val center RMS: rigid eval 22.1575 mm, train mode 21.9104 mm; affine eval 26.3671 mm, train mode 26.1441 mm
+overfit: reached=False best 10-step mean center RMS (worst task) nan mm after 12 steps; final val center RMS: rigid eval 22.1624 mm, train mode 20.5268 mm; affine eval 26.3354 mm, train mode 25.3044 mm
+overfit deform: reached=False after 12 steps; 10-step window soft template Dice nan (threshold 0.9), fold nan (max 0.001); final val template Dice 0.8438, pair Dice 0.6953 (identity 0.8345 / 0.6953), neg J 0.0000 %
+environment: {'python': '3.9.13', 'tensorflow': '2.10.0', 'numpy': '1.24.3', 'gpu': 'NVIDIA GeForce GTX 1080', 'gpu_memory_limit_mb': 6000, 'level': 4, 'warmup_steps': 2, 'measured_steps': 10, 'build_n': 2, 'val_pair_chunk': 16, 'cuda_visible_devices': None, 'tf_cudnn_use_autotune': '0'}
+deform N=2   narrow   casc=False ckpt=full       amp=False T=7 ls=0 ll=0 sp=0 ERROR: child exit code 1, no record written (val None)  pred    988.4 MB (D)
+ok
+test_one_child_per_configuration (tests.test_measure_memory.TestIsolate) ... written /tmp/mlm_iso_5g0o6xdo/iso.json
+environment: {'python': '3.9.13', 'tensorflow': '2.10.0', 'numpy': '1.24.3', 'gpu': 'NVIDIA GeForce GTX 1080', 'gpu_memory_limit_mb': 6000, 'level': 4, 'warmup_steps': 2, 'measured_steps': 10, 'build_n': 2, 'val_pair_chunk': 16, 'cuda_visible_devices': None, 'tf_cudnn_use_autotune': '0'}
+ok
+test_skip_after_child_oom (tests.test_measure_memory.TestIsolate) ... written /tmp/mlm_iso_0g1zhjdm/iso.json
+environment: {'python': '3.9.13', 'tensorflow': '2.10.0', 'numpy': '1.24.3', 'gpu': 'NVIDIA GeForce GTX 1080', 'gpu_memory_limit_mb': 6000, 'level': 4, 'warmup_steps': 2, 'measured_steps': 10, 'build_n': 2, 'val_pair_chunk': 16, 'cuda_visible_devices': None, 'tf_cudnn_use_autotune': '0'}
+deform N=3   narrow   casc=False ckpt=full       amp=False T=7 ls=1 ll=0 sp=0 SKIPPED: OOM at N = 2 (val None)  pred   1411.0 MB (D)
+ok
+test_incremental_write (tests.test_measure_memory.TestMeasureLevelMemory)
+Design 5.1 (v5): the output is merged and written atomically after every configuration. ... written /tmp/mlm_iso_si5nkqz4/iso.json
+environment: {'python': '3.9.13', 'tensorflow': '2.10.0', 'numpy': '1.24.3', 'gpu': 'NVIDIA GeForce GTX 1080', 'gpu_memory_limit_mb': 6000, 'level': 4, 'warmup_steps': 2, 'measured_steps': 10, 'build_n': 2, 'val_pair_chunk': 16, 'cuda_visible_devices': None, 'tf_cudnn_use_autotune': '0'}
+deform N=2   narrow   casc=False ckpt=none       amp=False T=7 ls=0 ll=0 sp=0 peak    200.0 MB (warm-up      1.0, resident     1.0)  step     1.0 ms  pred   2122.3 MB (F)
+deform N=3   narrow   casc=False ckpt=none       amp=False T=7 ls=0 ll=0 sp=0 peak    300.0 MB (warm-up      1.0, resident     1.0)  step     1.0 ms  pred   3071.2 MB (F)
+ok
+test_level1_chain_val_pass (tests.test_measure_memory.TestMeasureLevelMemory)
+T-C8 (milestone 9 phase 2): level-1 --cascade true --val-pass true runs the Trainer chain ... written /tmp/mlm_q34elgba/inc.json
+environment: {'python': '3.9.13', 'tensorflow': '2.10.0', 'numpy': '1.24.3', 'gpu': 'NVIDIA GeForce GTX 1080', 'gpu_memory_limit_mb': 6000, 'level': 1, 'warmup_steps': 1, 'measured_steps': 1, 'build_n': 2, 'val_pair_chunk': 4, 'cuda_visible_devices': None, 'tf_cudnn_use_autotune': '0'}
+deform N=2   tiny     casc=True  ckpt=full       amp=True  T=3 ls=1 ll=0 sp=0 OOM: Exception encountered when calling layer "group_reg_level_model_2" "                 f"(type GroupRegLevelModel). (val None)  pred  15492.0 MB (Fw)
+ok
+test_tiny_level1 (tests.test_measure_memory.TestMeasureLevelMemory)
+Design 5.6: level-1 TINY N 2 with the frozen-chain stand-in, AMP, full checkpointing and ... written /tmp/mlm_88ervc8g/memory_c8.json
+[T-C8] level-1 chain: status oom peak_mb None val None/None (41.1 s)
+environment: {'python': '3.9.13', 'tensorflow': '2.10.0', 'numpy': '1.24.3', 'gpu': 'NVIDIA GeForce GTX 1080', 'gpu_memory_limit_mb': 6000, 'level': 1, 'warmup_steps': 1, 'measured_steps': 1, 'build_n': 2, 'val_pair_chunk': 1, 'cuda_visible_devices': None, 'tf_cudnn_use_autotune': '0'}
+deform N=2   tiny     casc=True  ckpt=full       amp=True  T=3 ls=1 ll=1 sp=0 OOM: Exception encountered when calling layer "group_reg_level_model_2" "                 f"(type GroupRegLevelModel). (val None)  pred  15492.0 MB (Fw)
+rigid  N=2   tiny     casc=True  ckpt=none       amp=True  T=3 ls=0 ll=0 sp=0 peak   1968.3 MB (warm-up   1968.3, resident  1003.6)  step  1280.5 ms  frozen  215.6 ms peak   1506.7 MB  pred    716.8 MB (Z)
+written /tmp/mlm_pzf0m4sa/memory_l1.json
+[m9 tiny level 1] first invocation 99.7 s
+[m9 tiny level 1] deform status oom peak_mb None pred 15492.023295156412 (Fw) largest 440401920 frozen None/None val None/None
+[m9 tiny level 1] rigid status ok peak_mb 1968.286865234375 pred 716.8029374335721 (Z) largest 110100480 frozen ok/1506.654541015625 val None/None
+environment: {'python': '3.9.13', 'tensorflow': '2.10.0', 'numpy': '1.24.3', 'gpu': 'NVIDIA GeForce GTX 1080', 'gpu_memory_limit_mb': 6000, 'level': 1, 'warmup_steps': 1, 'measured_steps': 1, 'build_n': 2, 'val_pair_chunk': 1, 'cuda_visible_devices': None, 'tf_cudnn_use_autotune': '0'}
+rigid  N=3   tiny     casc=True  ckpt=none       amp=True  T=3 ls=0 ll=0 sp=0 peak   2585.4 MB (warm-up   2427.9, resident  1103.0)  step  1738.7 ms  frozen  291.5 ms peak   1735.6 MB  pred   1026.2 MB (Z)
+ok
+test_tiny_level2_cascade (tests.test_measure_memory.TestMeasureLevelMemory) ... written /tmp/mlm_pzf0m4sa/memory_l1.json
+[m9 tiny level 1] both invocations 163.8 s
+environment: {'python': '3.9.13', 'tensorflow': '2.10.0', 'numpy': '1.24.3', 'gpu': 'NVIDIA GeForce GTX 1080', 'gpu_memory_limit_mb': 6000, 'level': 2, 'warmup_steps': 1, 'measured_steps': 2, 'build_n': 2, 'val_pair_chunk': 16, 'cuda_visible_devices': None, 'tf_cudnn_use_autotune': '0'}
+deform N=2   tiny     casc=True  ckpt=both       amp=False T=3 ls=0 ll=0 sp=0 peak   5037.5 MB (warm-up   4223.9, resident   860.9)  step  2336.0 ms  frozen   84.7 ms peak   1002.0 MB  val ok peak   2201.5 MB  9904.2 ms  pred   4040.7 MB (F)
+rigid  N=2   tiny     casc=True  ckpt=none       amp=False T=3 ls=0 ll=0 sp=0 peak   1569.3 MB (warm-up   1569.3, resident   765.5)  step   577.5 ms  frozen   60.5 ms peak    863.8 MB  pred    697.5 MB (E)
+ok
+test_custom_widths_and_classify (tests.test_measure_memory.TestMergeOldRecord) ... ok
+test_merge_old_record (tests.test_measure_memory.TestMergeOldRecord) ... ok
+written /tmp/mlm_2gqbjxpi/memory.json
+[T15] deform status ok peak_mb 5037.51953125 warmup_peak_mb 4223.947265625 resident_mb 860.905029296875 step_ms 2335.9580039978027 frozen_ms 84.66947078704834 val_status ok val_peak_mb 2201.478515625 val_ms 9904.15334701538
+[T15] rigid status ok peak_mb 1569.271728515625 warmup_peak_mb 1569.27197265625 resident_mb 765.46826171875 step_ms 577.5294303894043 frozen_ms 60.54127216339111 val_status None val_peak_mb None val_ms None
+
+Fitted coefficients (initial -> fitted, bounds):
+  c_net        1.000 ->  0.9990  [0.6, 2]  expected 1.03  taped decoder and head tensors
+  c_enc32      1.000 ->  1.0642  [0.6, 1.6]  expected 1.10  encoder tensors, fp32 compute
+  c_enc16      1.000 ->  0.7488  [0.6, 1.6]  expected 0.89  encoder tensors, fp16 compute (AMP)
+  c_loss       1.000 ->  0.5306  [0, 1]  expected 0.50  share of the non-largest loss terms alive at F
+  c_rec        1.000 ->  0.9124  [0.5, 2]  expected 1.00  recomputed decoder block in its backward phase
+  c_warp       1.000 ->  1.1971  [0.6, 2]  expected 1.02  default-sampler tensors (absorbs U4)
+  c_bwd        2.000 ->  2.6942  [0, 4]  expected 2.00  backward transient, x C_in x 4 B of the largest block
+  c0_cluster   0.300 ->  0.1032  [0, 2]  expected 0.30  allocator / context constant (GiB), RTX 8000 / A6000 / A100
+  c0_gtx1080   0.100 ->  0.0904  [0, 1]  expected 0.08  allocator / context constant (GiB), GTX 1080 at 6000 MB
+Accuracy (fitted):
+  point                                        status        meas GiB  pred GiB    err %  phase check
+  l2_deform_fp32_none_n2                       ok               19.00     18.95     -0.3  F     ok
+  l2_deform_fp32_none_n3                       ok               27.50     27.73     +0.8  F     ok
+  l2_deform_fp32_none_n4                       ok               36.40     36.52     +0.3  F     ok
+  l2_deform_fp32_none_n6                       oom                  -     55.62        -  F     ok (infeasible)
+  l2_deform_fp32_integrator_n2                 ok               15.60     15.77     +1.1  I     ok
+  l2_deform_fp32_integrator_n4                 ok               30.70     30.94     +0.8  I     ok
+  l2_deform_fp32_integrator_n6                 ok               45.30     46.11     +1.8  I     ok
+  l2_deform_fp32_both_n2                       ok               12.20     12.29     +0.8  D     ok
+  l2_deform_fp32_both_n3                       ok               17.90     18.13     +1.3  D     ok
+  l2_deform_fp32_both_n4                       ok               23.90     23.98     +0.3  D     ok
+  l2_deform_fp32_both_n6                       ok               35.20     35.66     +1.3  D     ok
+  l2_deform_amp_none_n2                        ok               13.90     13.88     -0.1  F     ok
+  l2_deform_amp_none_n4                        ok               27.00     26.35     -2.4  F     ok
+  l2_deform_amp_none_n6                        ok               39.90     40.36     +1.2  F     ok
+  l2_deform_amp_integrator_n2                  ok               10.90     10.71     -1.8  I     ok
+  l2_deform_amp_integrator_n4                  ok               20.80     20.77     -0.1  I     ok
+  l2_deform_amp_integrator_n6                  ok               30.80     30.84     +0.1  I     ok
+  l2_deform_amp_integrator_n8                  ok               40.90     40.91     +0.0  I     ok
+  l2_deform_amp_both_n2                        ok                7.60      7.45     -2.0  D     ok
+  l2_deform_amp_both_n4                        ok               14.40     14.26     -1.0  D     ok
+  l2_deform_amp_both_n6                        ok               21.20     21.07     -0.6  D     ok
+  l2_deform_amp_both_n8                        ok               27.80     27.88     +0.3  D     ok
+  l2_linear_fp32_n4                            ok                5.90      5.85     -0.8  E     ok
+  l2_linear_fp32_n8                            ok               11.00     11.07     +0.7  E     ok
+  l2_linear_fp32_n12                           failed_d2            -     16.30        -  E     ok (limit flag: build/d2 group concat 12x80x112x96x256 fp32 2642411520 elements > 2147483647 (fwd))
+  l2_linear_amp_n4                             ok                3.20      3.24     +1.4  E     ok
+  l2_linear_amp_n8                             ok                5.80      5.82     +0.3  E     ok
+  l2_linear_amp_n12                            ok                8.50      8.39     -1.3  E     ok
+  l2_linear_amp_n16                            ok               10.90     10.97     +0.6  E     ok
+  l4_a6000_default_none_n8                     ok               16.60     16.39     -1.3  F     ok
+  l4_a6000_default_none_n12                    ok               24.80     24.72     -0.3  F     ok
+  l4_a6000_default_none_n16                    ok               33.80     33.65     -0.5  F     ok
+  l4_gtx_m6_default_both_n2                    ok                3.82      3.90     +2.0  D     ok
+  l4_gtx_m6_default_both_n4                    oom                  -      7.31        -  D     ok (infeasible)
+  l4_gtx_m6_default_none_n2                    ok                4.33      4.42     +1.9  F     ok
+  l4_gtx_m6_default_none_n3                    oom                  -      6.34        -  F     ok (infeasible)
+  l4_gtx_m6_default_none_n4                    oom                  -      8.27        -  F     ok (infeasible)
+  l4_gtx_m6_narrow_both_n4                     ok                2.45      2.39     -2.7  D     ok
+  l4_gtx_m6_narrow_both_n8                     ok                4.67      4.63     -0.8  D     ok
+  l4_gtx_m6_narrow_both_n16                    oom                  -      9.12        -  D     ok (infeasible)
+  l4_gtx_m6_narrow_none_n2                     ok                2.04      2.07     +1.6  F     ok
+  l4_gtx_m6_narrow_none_n3                     ok                2.94      3.00     +2.1  F     ok
+  l4_gtx_m6_narrow_none_n4                     ok                3.92      3.93     +0.3  F     ok
+  l4_gtx_m6_narrow_none_n6                     oom                  -      5.94        -  F     ok (infeasible)
+  l4_gtx_m6_narrow_none_n8                     oom                  -      8.03        -  F     ok (infeasible)
+  l4_gtx_lncc_off_default_none_n2              ok                4.56      4.42     -3.1  F     ok
+  l4_gtx_lncc_on_default_none_n2               ok                4.51      4.47     -1.0  F     ok
+  l4_gtx_lncc_off_narrow_none_n2               ok                2.05      2.07     +1.3  F     ok
+  l4_gtx_lncc_off_narrow_none_n3               ok                3.11      3.00     -3.7  F     ok
+  l4_gtx_lncc_off_narrow_none_n4               ok                3.99      3.93     -1.6  F     ok
+  l4_gtx_lncc_on_narrow_none_n2                ok                2.11      2.12     +0.6  F     ok
+  l4_gtx_lncc_on_narrow_none_n3                ok                3.10      3.06     -1.0  F     ok
+  l4_gtx_lncc_on_narrow_none_n4                ok                3.95      4.01     +1.4  F     ok
+  l4_linear_range_n32                          range                -     22.10        -  E     ok (range 26.0-34.0, upper containment ok)
+ok points: 45, fitted error range -3.7 ... +2.1 % (pre-fit -9.5 ... +13.7 %)
+Leave-one-mode-out (refit without the group, its errors):
+  fp32_none        l2_deform_fp32_none_n2 -0.2 %, l2_deform_fp32_none_n3 +0.9 %, l2_deform_fp32_none_n4 +0.4 %
+  fp32_integrator  l2_deform_fp32_integrator_n2 +1.9 %, l2_deform_fp32_integrator_n4 +1.6 %, l2_deform_fp32_integrator_n6 +2.6 %
+  fp32_both        l2_deform_fp32_both_n2 +2.0 %, l2_deform_fp32_both_n3 +2.5 %, l2_deform_fp32_both_n4 +1.5 %, l2_deform_fp32_both_n6 +2.5 %
+  amp_none         l2_deform_amp_none_n2 -0.7 %, l2_deform_amp_none_n4 -2.8 %, l2_deform_amp_none_n6 +0.6 %
+  amp_integrator   l2_deform_amp_integrator_n2 -2.8 %, l2_deform_amp_integrator_n4 -1.1 %, l2_deform_amp_integrator_n6 -0.8 %, l2_deform_amp_integrator_n8 -0.9 %
+  amp_both         l2_deform_amp_both_n2 -6.5 %, l2_deform_amp_both_n4 -5.7 %, l2_deform_amp_both_n6 -5.4 %, l2_deform_amp_both_n8 -4.6 %
+Hold-out (never fitted; one-sided gate err >= -20 %, OOM infeasible):
+  point                                        status        meas GiB  pred GiB    err %  phase check
+  hold_l2_tiny_full_amp_ls0_ll0_sp0_t7_n2      holdout_ok        5.16      6.03    +17.0  I     ok
+  hold_l2_tiny_full_amp_ls1_ll0_sp0_t7_n2      holdout_ok        2.36      2.05    -13.0  I     ok
+  hold_l2_tiny_full_amp_ls1_ll1_sp0_t7_n2      holdout_ok        2.33      2.05    -12.0  I     ok
+  hold_l2_tiny_full_amp_ls1_ll1_sp1_t7_n2      holdout_ok        2.32      2.05    -11.7  I     ok
+  hold_l2_tiny_full_fp32_ls0_ll0_sp0_t7_n2     holdout_ok        5.24      6.15    +17.5  I     ok
+  hold_l2_tiny_full_fp32_ls1_ll0_sp0_t7_n2     holdout_ok        2.52      2.44     -3.1  D     ok
+  hold_l2_tiny_full_fp32_ls1_ll1_sp0_t7_n2     holdout_ok        2.50      2.44     -2.5  D     ok
+  hold_l2_tiny_full_fp32_ls1_ll1_sp1_t7_n2     holdout_ok        2.47      2.31     -6.3  D     ok
+  hold_l4_default_full_amp_ls0_ll0_sp0_t7_n2   holdout_ok        1.64      2.02    +23.1  D     ok (over-prediction > +20 % (conservative, not gated))
+  hold_l4_default_full_amp_ls1_ll0_sp0_t7_n2   holdout_ok        1.71      2.02    +18.2  D     ok
+  hold_l4_default_full_amp_ls1_ll1_sp0_t7_n2   holdout_ok        1.62      2.02    +24.6  D     ok (over-prediction > +20 % (conservative, not gated))
+  hold_l4_default_full_amp_ls1_ll1_sp1_t7_n2   holdout_ok        1.42      1.93    +36.2  D     ok (over-prediction > +20 % (conservative, not gated))
+  hold_l4_default_full_fp32_ls0_ll0_sp0_t7_n2  holdout_ok        2.69      3.04    +12.8  D     ok
+  hold_l4_default_full_fp32_ls1_ll0_sp0_t7_n2  holdout_ok        2.68      3.04    +13.2  D     ok
+  hold_l4_default_full_fp32_ls1_ll1_sp0_t7_n2  holdout_ok        2.69      3.04    +13.0  D     ok
+  hold_l4_default_full_fp32_ls1_ll1_sp1_t7_n2  holdout_ok        2.39      2.87    +20.1  D     ok (over-prediction > +20 % (conservative, not gated))
+  hold_l4_narrow_full_amp_ls0_ll0_sp0_t7_n2    holdout_ok        0.72      0.90    +24.6  I     ok (over-prediction > +20 % (conservative, not gated))
+  hold_l4_narrow_full_amp_ls0_ll0_sp0_t7_n3    holdout_ok        1.03      1.28    +23.5  I     ok (over-prediction > +20 % (conservative, not gated))
+  hold_l4_narrow_full_amp_ls0_ll0_sp0_t7_n4    holdout_ok        1.38      1.65    +19.7  I     ok
+  hold_l4_narrow_full_amp_ls1_ll0_sp0_t7_n2    holdout_ok        0.49      0.62    +26.0  D     ok (over-prediction > +20 % (conservative, not gated))
+  hold_l4_narrow_full_amp_ls1_ll0_sp0_t7_n3    holdout_ok        0.68      0.86    +26.6  D     ok (over-prediction > +20 % (conservative, not gated))
+  hold_l4_narrow_full_amp_ls1_ll0_sp0_t7_n4    holdout_ok        0.86      1.10    +27.9  D     ok (over-prediction > +20 % (conservative, not gated))
+  hold_l4_narrow_full_amp_ls1_ll1_sp0_t7_n2    holdout_ok        0.48      0.62    +28.3  D     ok (over-prediction > +20 % (conservative, not gated))
+  hold_l4_narrow_full_amp_ls1_ll1_sp0_t7_n3    holdout_ok        0.69      0.86    +24.1  D     ok (over-prediction > +20 % (conservative, not gated))
+  hold_l4_narrow_full_amp_ls1_ll1_sp0_t7_n4    holdout_ok        0.91      1.10    +21.1  D     ok (over-prediction > +20 % (conservative, not gated))
+  hold_l4_narrow_full_amp_ls1_ll1_sp1_t7_n2    holdout_ok        0.39      0.59    +52.0  D     ok (over-prediction > +20 % (conservative, not gated))
+  hold_l4_narrow_full_amp_ls1_ll1_sp1_t7_n3    holdout_ok        0.56      0.80    +42.8  D     ok (over-prediction > +20 % (conservative, not gated))
+  hold_l4_narrow_full_amp_ls1_ll1_sp1_t7_n4    holdout_ok        0.71      1.02    +43.0  D     ok (over-prediction > +20 % (conservative, not gated))
+  hold_l4_narrow_full_fp32_ls0_ll0_sp0_t7_n2   holdout_ok        0.87      0.97    +10.5  D     ok
+  hold_l4_narrow_full_fp32_ls0_ll0_sp0_t7_n3   holdout_ok        1.30      1.38     +6.3  D     ok
+  hold_l4_narrow_full_fp32_ls0_ll0_sp0_t7_n4   holdout_ok        1.64      1.79     +9.5  D     ok
+  hold_l4_narrow_full_fp32_ls1_ll0_sp0_t7_n2   holdout_ok        0.84      0.97    +15.0  D     ok
+  hold_l4_narrow_full_fp32_ls1_ll0_sp0_t7_n3   holdout_ok        1.24      1.38    +11.4  D     ok
+  hold_l4_narrow_full_fp32_ls1_ll0_sp0_t7_n4   holdout_ok        1.58      1.79    +13.5  D     ok
+  hold_l4_narrow_full_fp32_ls1_ll1_sp0_t7_n2   holdout_ok        0.85      0.97    +13.6  D     ok
+  hold_l4_narrow_full_fp32_ls1_ll1_sp0_t7_n3   holdout_ok        1.23      1.38    +12.2  D     ok
+  hold_l4_narrow_full_fp32_ls1_ll1_sp0_t7_n4   holdout_ok        1.64      1.79     +9.4  D     ok
+  hold_l4_narrow_full_fp32_ls1_ll1_sp1_t7_n2   holdout_ok        0.70      0.91    +30.1  D     ok (over-prediction > +20 % (conservative, not gated))
+  hold_l4_narrow_full_fp32_ls1_ll1_sp1_t7_n3   holdout_ok        1.00      1.27    +27.3  D     ok (over-prediction > +20 % (conservative, not gated))
+  hold_l4_narrow_full_fp32_ls1_ll1_sp1_t7_n4   holdout_ok        1.27      1.63    +28.0  D     ok (over-prediction > +20 % (conservative, not gated))
+hold-out gate (one-sided) PASSED, worst under-prediction 13.0 %, margin m = 0.150; symmetric +-20 % FAILED (max |err| 52.0 %, 18 points over-predicted by > 20 %)
+warmup_excess_gib = 0.207 (accepted, not budgeted; design 4.1, U12)
+test_calibration_schema (tests.test_memory_model.TestCalibrationAndFit) ... ok
+test_coefficients_file_current (tests.test_memory_model.TestCalibrationAndFit) ... ok
+test_every_point_within_tolerance (tests.test_memory_model.TestCalibrationAndFit) ... ok
+test_failed_d2_via_build_flag (tests.test_memory_model.TestCalibrationAndFit) ... ok
+test_fake_oom_feasible_fails_fit (tests.test_memory_model.TestCalibrationAndFit) ... ok
+test_holdout_gate (tests.test_memory_model.TestCalibrationAndFit) ... ok
+test_holdout_gate_one_sided_rule (tests.test_memory_model.TestCalibrationAndFit)
+Synthetic rows: +30 % passes (flagged), -25 % fails, margin from the under-prediction. ... ok
+test_leave_one_mode_out_printed (tests.test_memory_model.TestCalibrationAndFit) ... ok
+test_no_tensorflow (tests.test_memory_model.TestCalibrationAndFit) ... /mnt/d/Research/Brain_Registration_Projects/brain-group-rad/tests/test_memory_model.py:79: ResourceWarning: unclosed file <_io.TextIOWrapper name='/mnt/d/Research/Brain_Registration_Projects/brain-group-rad/scripts/memory_model.py' mode='r' encoding='UTF-8'>
+  for src in (inspect.getsource(MM), open(os.path.join(REPO, "scripts", "memory_model.py")).read()):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+ok
+test_oom_hinge (tests.test_memory_model.TestCalibrationAndFit) ... ok
+test_calibration_points_and_scaling (tests.test_memory_model.TestDaliTerm) ... ok
+test_cli_dali_flag (tests.test_memory_model.TestDaliTerm) ... ok
+test_predict_and_feasible_budget (tests.test_memory_model.TestDaliTerm) ... ok
+test_bound_and_fb (tests.test_memory_model.TestFwFbRules) ... ok
+test_lean_integrator_moments (tests.test_memory_model.TestFwFbRules) ... ok
+test_no_lean_no_fw_fb (tests.test_memory_model.TestFwFbRules) ... ok
+test_timed_fw_is_shared_plus_onehot_moment (tests.test_memory_model.TestFwFbRules) ... ok
+test_build_n (tests.test_memory_model.TestLimitsAndBuild) ... ok
+test_f0d1_split (tests.test_memory_model.TestLimitsAndBuild) ... ok
+test_tensor_limits_override (tests.test_memory_model.TestLimitsAndBuild) ... ok
+test_counts (tests.test_memory_model.TestMinPairs) ... ok
+test_level1_deform_n4 (tests.test_memory_model.TestMinPairs) ... ok
+test_level1_f0d1_ls (tests.test_memory_model.TestPrefitPins) ... ok
+test_level2_deform_rows (tests.test_memory_model.TestPrefitPins) ... ok
+test_level2_linear_table (tests.test_memory_model.TestPrefitPins) ... ok
+test_m8_recipe (tests.test_memory_model.TestPrefitPins) ... ok
+test_uniform_and_counts (tests.test_memory_model.TestPresets) ... ok
+test_grid_printed (tests.test_memory_model.TestRecommendation) ... ok
+test_prefit_per_n (tests.test_memory_model.TestRecommendation) ... ok
+test_recommend_fields (tests.test_memory_model.TestRecommendation) ... 
+coefficients at a bound: none
+Fitted coefficients (initial -> fitted, bounds):
+  c_net        1.000 ->  2.0000  [0.6, 2]  expected 1.03  taped decoder and head tensors
+  c_enc32      1.000 ->  1.6000  [0.6, 1.6]  expected 1.10  encoder tensors, fp32 compute
+  c_enc16      1.000 ->  0.6000  [0.6, 1.6]  expected 0.89  encoder tensors, fp16 compute (AMP)
+  c_loss       1.000 ->  1.0000  [0, 1]  expected 0.50  share of the non-largest loss terms alive at F
+  c_rec        1.000 ->  0.7748  [0.5, 2]  expected 1.00  recomputed decoder block in its backward phase
+  c_warp       1.000 ->  1.3957  [0.6, 2]  expected 1.02  default-sampler tensors (absorbs U4)
+  c_bwd        2.000 ->  2.0650  [0, 4]  expected 2.00  backward transient, x C_in x 4 B of the largest block
+  c0_cluster   0.300 ->  0.1803  [0, 2]  expected 0.30  allocator / context constant (GiB), RTX 8000 / A6000 / A100
+  c0_gtx1080   0.100 ->  1.0000  [0, 1]  expected 0.08  allocator / context constant (GiB), GTX 1080 at 6000 MB
+  NOTE: c_net at upper bound 2 (model-form check: a coefficient at a bound is reported, design 4.3)
+  NOTE: c_enc32 at upper bound 1.6 (model-form check: a coefficient at a bound is reported, design 4.3)
+  NOTE: c_enc16 at lower bound 0.6 (model-form check: a coefficient at a bound is reported, design 4.3)
+  NOTE: c_loss at upper bound 1 (model-form check: a coefficient at a bound is reported, design 4.3)
+  NOTE: c0_gtx1080 at upper bound 1 (model-form check: a coefficient at a bound is reported, design 4.3)
+Accuracy (fitted):
+  point                                        status        meas GiB  pred GiB    err %  phase check
+  l2_deform_amp_both_n2                        ok                7.60      7.57     -0.5  I     ok
+  l2_deform_amp_both_n4                        ok               14.40     14.41     +0.1  I     ok
+  l2_deform_amp_both_n6                        ok               21.20     21.26     +0.3  I     ok
+  l2_deform_amp_both_n8                        ok               27.80     28.11     +1.1  I     ok
+  fake_oom_feasible                            oom                  -      3.99        -  F     FAIL (OOM predicted feasible (3.99 <= cap 5.86))
+ok points: 4, fitted error range -0.5 ... +1.1 % (pre-fit +0.5 ... +1.2 %)
+Hold-out: no hold-out records yet (FEAT-004 adds them); margin m = 0.15
+warmup_excess_gib = n/a (accepted, not budgeted; design 4.1, U12)
+FIT FAILURE: fake_oom_feasible oom: OOM predicted feasible (3.99 <= cap 5.86)
+wrote /tmp/bgr_mm_j2fc2tav/co.json
+fit: 1 check(s) failed (tolerance not loosened; design 4.3)
+
+Hold-out:
+  point                                        status        meas GiB  pred GiB    err %  phase check
+  hold_l2_tiny_full_amp_ls0_ll0_sp0_t7_n2      holdout_ok        5.16      6.03    +17.0  I     ok
+  hold_l2_tiny_full_amp_ls1_ll0_sp0_t7_n2      holdout_ok        2.36      2.05    -13.0  I     ok
+  hold_l2_tiny_full_amp_ls1_ll1_sp0_t7_n2      holdout_ok        2.33      2.05    -12.0  I     ok
+  hold_l2_tiny_full_amp_ls1_ll1_sp1_t7_n2      holdout_ok        2.32      2.05    -11.7  I     ok
+  hold_l2_tiny_full_fp32_ls0_ll0_sp0_t7_n2     holdout_ok        5.24      6.15    +17.5  I     ok
+  hold_l2_tiny_full_fp32_ls1_ll0_sp0_t7_n2     holdout_ok        2.52      2.44     -3.1  D     ok
+  hold_l2_tiny_full_fp32_ls1_ll1_sp0_t7_n2     holdout_ok        2.50      2.44     -2.5  D     ok
+  hold_l2_tiny_full_fp32_ls1_ll1_sp1_t7_n2     holdout_ok        2.47      2.31     -6.3  D     ok
+  hold_l4_default_full_amp_ls0_ll0_sp0_t7_n2   holdout_ok        1.64      2.02    +23.1  D     ok (over-prediction > +20 % (conservative, not gated))
+  hold_l4_default_full_amp_ls1_ll0_sp0_t7_n2   holdout_ok        1.71      2.02    +18.2  D     ok
+  hold_l4_default_full_amp_ls1_ll1_sp0_t7_n2   holdout_ok        1.62      2.02    +24.6  D     ok (over-prediction > +20 % (conservative, not gated))
+  hold_l4_default_full_amp_ls1_ll1_sp1_t7_n2   holdout_ok        1.42      1.93    +36.2  D     ok (over-prediction > +20 % (conservative, not gated))
+  hold_l4_default_full_fp32_ls0_ll0_sp0_t7_n2  holdout_ok        2.69      3.04    +12.8  D     ok
+  hold_l4_default_full_fp32_ls1_ll0_sp0_t7_n2  holdout_ok        2.68      3.04    +13.2  D     ok
+  hold_l4_default_full_fp32_ls1_ll1_sp0_t7_n2  holdout_ok        2.69      3.04    +13.0  D     ok
+  hold_l4_default_full_fp32_ls1_ll1_sp1_t7_n2  holdout_ok        2.39      2.87    +20.1  D     ok (over-prediction > +20 % (conservative, not gated))
+  hold_l4_narrow_full_amp_ls0_ll0_sp0_t7_n2    holdout_ok        0.72      0.90    +24.6  I     ok (over-prediction > +20 % (conservative, not gated))
+  hold_l4_narrow_full_amp_ls0_ll0_sp0_t7_n3    holdout_ok        1.03      1.28    +23.5  I     ok (over-prediction > +20 % (conservative, not gated))
+  hold_l4_narrow_full_amp_ls0_ll0_sp0_t7_n4    holdout_ok        1.38      1.65    +19.7  I     ok
+  hold_l4_narrow_full_amp_ls1_ll0_sp0_t7_n2    holdout_ok        0.49      0.62    +26.0  D     ok (over-prediction > +20 % (conservative, not gated))
+  hold_l4_narrow_full_amp_ls1_ll0_sp0_t7_n3    holdout_ok        0.68      0.86    +26.6  D     ok (over-prediction > +20 % (conservative, not gated))
+  hold_l4_narrow_full_amp_ls1_ll0_sp0_t7_n4    holdout_ok        0.86      1.10    +27.9  D     ok (over-prediction > +20 % (conservative, not gated))
+  hold_l4_narrow_full_amp_ls1_ll1_sp0_t7_n2    holdout_ok        0.48      0.62    +28.3  D     ok (over-prediction > +20 % (conservative, not gated))
+  hold_l4_narrow_full_amp_ls1_ll1_sp0_t7_n3    holdout_ok        0.69      0.86    +24.1  D     ok (over-prediction > +20 % (conservative, not gated))
+  hold_l4_narrow_full_amp_ls1_ll1_sp0_t7_n4    holdout_ok        0.91      1.10    +21.1  D     ok (over-prediction > +20 % (conservative, not gated))
+  hold_l4_narrow_full_amp_ls1_ll1_sp1_t7_n2    holdout_ok        0.39      0.59    +52.0  D     ok (over-prediction > +20 % (conservative, not gated))
+  hold_l4_narrow_full_amp_ls1_ll1_sp1_t7_n3    holdout_ok        0.56      0.80    +42.8  D     ok (over-prediction > +20 % (conservative, not gated))
+  hold_l4_narrow_full_amp_ls1_ll1_sp1_t7_n4    holdout_ok        0.71      1.02    +43.0  D     ok (over-prediction > +20 % (conservative, not gated))
+  hold_l4_narrow_full_fp32_ls0_ll0_sp0_t7_n2   holdout_ok        0.87      0.97    +10.5  D     ok
+  hold_l4_narrow_full_fp32_ls0_ll0_sp0_t7_n3   holdout_ok        1.30      1.38     +6.3  D     ok
+  hold_l4_narrow_full_fp32_ls0_ll0_sp0_t7_n4   holdout_ok        1.64      1.79     +9.5  D     ok
+  hold_l4_narrow_full_fp32_ls1_ll0_sp0_t7_n2   holdout_ok        0.84      0.97    +15.0  D     ok
+  hold_l4_narrow_full_fp32_ls1_ll0_sp0_t7_n3   holdout_ok        1.24      1.38    +11.4  D     ok
+  hold_l4_narrow_full_fp32_ls1_ll0_sp0_t7_n4   holdout_ok        1.58      1.79    +13.5  D     ok
+  hold_l4_narrow_full_fp32_ls1_ll1_sp0_t7_n2   holdout_ok        0.85      0.97    +13.6  D     ok
+  hold_l4_narrow_full_fp32_ls1_ll1_sp0_t7_n3   holdout_ok        1.23      1.38    +12.2  D     ok
+  hold_l4_narrow_full_fp32_ls1_ll1_sp0_t7_n4   holdout_ok        1.64      1.79     +9.4  D     ok
+  hold_l4_narrow_full_fp32_ls1_ll1_sp1_t7_n2   holdout_ok        0.70      0.91    +30.1  D     ok (over-prediction > +20 % (conservative, not gated))
+  hold_l4_narrow_full_fp32_ls1_ll1_sp1_t7_n3   holdout_ok        1.00      1.27    +27.3  D     ok (over-prediction > +20 % (conservative, not gated))
+  hold_l4_narrow_full_fp32_ls1_ll1_sp1_t7_n4   holdout_ok        1.27      1.63    +28.0  D     ok (over-prediction > +20 % (conservative, not gated))
+
+one-sided gate passed True, worst under-prediction 13.0 %, symmetric passed False (max |err| 52.0 %, 18 over +20 %)
+
+pre-fit per-N table (timed rule)
+  N   widths   knobs  T       peak  w/ margin phase   params A100 (margin / none)
+  2   default  L      7      23.75      27.31 D       29.63M yes / yes
+  3   default  LS     7      32.96      37.90 D       29.63M no / yes
+  4   f0d1     LS     7      33.60      38.65 D       29.54M no / yes
+  5   none feasible
+  6   none feasible
+  7   none feasible
+  8   none feasible
+
+ok
+test_t_rule (tests.test_memory_model.TestRecommendation) ... ok
+test_lncc_on_off (tests.test_memory_model.TestResidentAndLncc) ... ok
+test_resident_parts (tests.test_memory_model.TestResidentAndLncc) ... ok
+test_level1_full (tests.test_memory_model.TestSkipGradients) ... ok
+test_level2_both_only_stem_skip (tests.test_memory_model.TestSkipGradients) ... ok
+test_m7_chain (tests.test_memory_model.TestStepTimes) ... ok
+test_model_reproduces_its_points (tests.test_memory_model.TestStepTimes) ... ok
+test_graph_has_recompute_scope_only_when_on (tests.test_pair_recompute.TestPairRecomputeLoss) ... ok
+test_num_pairs_static (tests.test_pair_recompute.TestPairRecomputeLoss) ... ok
+test_values_and_gradients_match (tests.test_pair_recompute.TestPairRecomputeLoss) ... 
+[pair recompute] max relative |grad diff| 2.15e-06
+ok
+test_without_pair_ncc_and_static_count (tests.test_pair_recompute.TestPairRecomputeLoss) ... ok
+test_peak_1_vs_4_pairs (tests.test_pair_recompute.TestPairRecomputeMemory) ... 
+[pair recompute memory, 64x80x64 N 4] default 1 / 4 pairs: 1985 / 2442 MiB; recompute 1 / 4 pairs: 2002 / 2224 MiB
+FAIL
+test_step_matches_default (tests.test_pair_recompute.TestPairRecomputeTrainer) ... ok
+test_s_matrix_from_synthetic_mask (tests.test_postprocess.TestBrainS) ... ok
+test_flips_shared_and_onehot (tests.test_postprocess.TestDeformPostprocess) ... ok
+test_pairs_distinct_and_deterministic (tests.test_postprocess.TestDeformPostprocess) ... ok
+test_residual_t_conjugated (tests.test_postprocess.TestDeformPostprocess) ... ok
+test_tf_function_uint8_random_flips (tests.test_postprocess.TestDeformPostprocess) ... ok
+test_flip_sampling (tests.test_postprocess.TestFlips) ... ok
+test_image_and_matrix_flip_consistent (tests.test_postprocess.TestFlips) ... ok
+test_default_builds_no_op (tests.test_postprocess.TestIntensityAugPostprocess) ... ok
+test_deform_labels_never_augmented (tests.test_postprocess.TestIntensityAugPostprocess) ... ok
+test_flip_commutes (tests.test_postprocess.TestIntensityAugPostprocess) ... ok
+test_linear_images_change_rest_unchanged (tests.test_postprocess.TestIntensityAugPostprocess) ... ok
+test_affine_target_is_full_t_and_flip_equivariant (tests.test_postprocess.TestLinearPostprocess) ... ok
+test_dali_to_mm_matches_models_transforms (tests.test_postprocess.TestLinearPostprocess) ... ok
+test_images_flipped_with_random_state_and_tf_function (tests.test_postprocess.TestLinearPostprocess) ... ok
+test_rigid_targets_use_rt_and_are_central (tests.test_postprocess.TestLinearPostprocess) ... ok
+test_counts_match_checker (tests.test_postprocess.TestMinPairs) ... ok
+test_counts_match_memory_model (tests.test_postprocess.TestMinPairs) ... ok
+test_counts_table (tests.test_postprocess.TestMinPairs) ... ok
+test_cycle_eager_and_graph (tests.test_postprocess.TestMinPairs) ... ok
+test_generator_advance_unchanged (tests.test_postprocess.TestMinPairs) ... ok
+test_more_pairs_than_n_equal_today (tests.test_postprocess.TestMinPairs) ... ok
+test_same_seed_same_pairs (tests.test_postprocess.TestMinPairs) ... ok
+test_deform_cycle (tests.test_postprocess.TestMinPairsPostprocess) ... ok
+test_linear_count (tests.test_postprocess.TestMinPairsPostprocess) ... ok
+test_counts (tests.test_postprocess.TestPairs) ... ok
+test_valid_unique_deterministic (tests.test_postprocess.TestPairs) ... ok
+test_configure_returns_state (tests.test_precision.TestPrecision) ... ok
+test_float32_matmul_is_full_precision (tests.test_precision.TestPrecision) ... ok
+test_tf32_disabled_by_test_setup (tests.test_precision.TestPrecision) ... ok
+test_graph_mode_level2_n12 (tests.test_probe_tensor_limit.TestProbeTensorLimit) ... ok
+test_m8_errors_no_tf (tests.test_probe_tensor_limit.TestProbeTensorLimit) ... ok
+test_run_mode_tiny (tests.test_probe_tensor_limit.TestProbeTensorLimit) ... 
+WARNING: no --t6-verdict: T = 6 excluded (fail-safe, design 4.4 step 1)
+Level-1 grid summary (AMP, full, chain42, LNCC 1/1, margin 0.15; timed rule):
+  default   29.63M  largest N 3 (LS, T 7, 34.26 GiB, D)
+  u075      22.17M  largest N 4 (LS, T 7, 35.88 GiB, D)
+  u050      16.82M  largest N 4 (L, T 7, 32.23 GiB, I)
+  u0375     15.00M  largest N 4 (L, T 7, 32.13 GiB, I)
+  f0d1      29.54M  largest N 4 (LS, T 7, 34.99 GiB, D)
+  fr50      29.14M  largest N 4 (L, T 7, 32.57 GiB, I)
+  fr25      28.96M  largest N 4 (L, T 7, 32.18 GiB, I)
+Per-N table (timed rule; selection):
+  N   widths   knobs  T       peak  w/ margin phase   params A100 (margin / none)
+  2   default  L      7      24.43      28.09 D       29.63M yes / yes
+  3   default  LS     7      34.26      39.40 D       29.63M no / yes
+  4   f0d1     LS     7      34.99      40.24 D       29.54M no / yes
+  5   none feasible
+  6   none feasible
+  7   none feasible
+  8   none feasible
+Per-N table (skip-gradient bound):
+  N   widths   knobs  T       peak  w/ margin phase   params A100 (margin / none)
+  2   default  L      7      25.52      29.34 D       29.63M yes / yes
+  3   default  LS     7      35.89      41.27 D       29.63M no / yes
+  4   f0d1     LS     7      36.34      41.80 D       29.54M no / no
+  5   none feasible
+  6   none feasible
+  7   none feasible
+  8   none feasible
+Per-N table (order-independent estimate, one overlapping sampler forward):
+  N   widths   knobs  T       peak  w/ margin phase   params A100 (margin / none)
+  2   default  L      7      24.43      28.09 D       29.63M yes / yes
+  3   default  LS     7      34.26      39.40 D       29.63M no / yes
+  4   f0d1     LLS    7      34.99      40.24 D       29.54M no / yes
+  5   none feasible
+  6   none feasible
+  7   none feasible
+  8   none feasible
+Recommendation: widths f0d1 (filters [16, 64, 128, 192, 256, 384], decoder [128, 96, 64, 32, 8]), AMP, full, lean sampler True, lean losses False, split True, T 7
+  level 1: deform N* = 4 (n_target 4; 5 without the margin), peak 34.99 GiB (40.24 with margin 0.15), phase D; linear N 16 at 13.51 GiB; val_pair_chunk 16
+  order-independent estimate (one overlapping sampler forward): 38.60 GiB (44.39 with margin); bound alternative {'lean_losses': True}
+  A100 (<= 36 GiB): deform N 3 with margin, 4 without (3 under the bound), linear N 16
+  level 2 (m8 recipe): deform N8 25.57 GiB, linear N16 7.26 GiB, largest deform N on A100 {'both': 9, 'full': 13}
+  level 4 (m7 recipe): deform N16 33.08 GiB, linear N32 21.12 GiB, largest deform N on A100 {'none': 17}
+  step times rtx8000 (s, estimate x0.5..x1.5, model (pre-measurement)): l4_deform 1.79-5.36, l4_linear 0.84-2.51, l2_deform 3.39-10.17, l2_linear 0.46-1.37, l1_deform 11.42-34.25, l1_linear 0.54-1.63
+  step times a100 (s, estimate x0.5..x1.5, model (pre-measurement)): l4_deform 1.25-3.75, l4_linear 0.53-1.58, l2_deform 2.37-7.12, l2_linear 0.29-0.87, l1_deform 7.99-23.98, l1_linear 0.34-1.03
+  m7 consistency (A100 level 4): predicted / measured 1.12 -> r_task
+  level-1 long run rtx8000: 13.8-41.3 h
+  level-1 long run a100: 9.7-29.2 h
+PROVISIONAL until slurm/m9_memory.sh measures it (N 4 with margin 0.15, 5 without)
+
+graph mode: level 2, N 12, widths default, task rigid (+ deform forward), amp False; tf.Graph + placeholder; 7023 ops
+op outputs with more than 2147483647 elements: 1
+   1. ConcatV2               group_reg_level_model_1/deform_decoder/d2/concat                       [12, 80, 112, 96, 256]       float32    2642411520 elements    10.57 GB
+hypothesis limit: 2147483647 elements (int32 index); run mode decides
+written /tmp/ptl_449brki0/graph.json
+
+m8 memory JSON /tmp/ptl_l2gp82es/m8.json: 2 records, 1 not ok
+  [error] level=2 task=rigid n=12 widths=default cascade=True gradient_checkpointing=none amp=False integration_steps=0
+      error: InternalError('Failed to call ThenRnnForward ... d2')
+peak columns (MB):
+  task   N   widths   casc  ckpt       amp   status    peak_mb warmup_peak_mb
+  rigid  12  default  True  none       False error           -              -
+  deform 4   default  True  both       True  ok        14800.5        15000.2
+
+environment: {'python': '3.9.13', 'tensorflow': '2.10.0', 'gpu': 'NVIDIA GeForce GTX 1080', 'device_limit_mb': 6000.0, 'gpu_memory_limit_mb': 6000, 'tf_cudnn_use_autotune': '0'}
+fp32 fwd conv3d                 E         4096 [1, 1, 4, 128, 8]            est    0.00 GB  ok
+fp32 fwd transpose_ncdhw        E         4096 [1, 1, 4, 128, 8]            est    0.00 GB  ok
+fp32 fwd group_mean_concat      E         4096 [1, 1, 4, 128, 8]            est    0.00 GB  ok
+fp32 fwd batch_norm             E         4096 [1, 1, 4, 128, 8]            est    0.00 GB  ok
+fp32 fwd leaky_relu             E         4096 [1, 1, 4, 128, 8]            est    0.00 GB  ok
+fp32 fwd reduce_mean_axis0      E         4096 [1, 1, 4, 128, 8]            est    0.00 GB  ok
+fp32 fwd gather                 E         4096 [1, 1, 4, 128, 8]            est    0.00 GB  ok
+fp32 fwd unsorted_segment_sum   E         4096 [1, 1, 4, 128, 8]            est    0.00 GB  ok
+fp32 bwd conv3d                 E         4096 [1, 1, 4, 128, 8]            est    0.00 GB  ok
+fp32 bwd batch_norm             E         4096 [1, 1, 4, 128, 8]            est    0.00 GB  ok
+fp32 bwd leaky_relu             E         4096 [1, 1, 4, 128, 8]            est    0.00 GB  ok
+fp16 fwd conv3d                 E         8192 [1, 1, 8, 128, 8]            est    0.00 GB  ok
+fp16 fwd transpose_ncdhw        E         8192 [1, 1, 8, 128, 8]            est    0.00 GB  ok
+fp16 fwd group_mean_concat      E         8192 [1, 1, 8, 128, 8]            est    0.00 GB  ok
+fp16 fwd batch_norm             E         8192 [1, 1, 8, 128, 8]            est    0.00 GB  ok
+fp16 fwd leaky_relu             E         8192 [1, 1, 8, 128, 8]            est    0.00 GB  ok
+fp16 fwd reduce_mean_axis0      E         8192 [1, 1, 8, 128, 8]            est    0.00 GB  ok
+fp16 fwd gather                 E         8192 [1, 1, 8, 128, 8]            est    0.00 GB  ok
+fp16 fwd unsorted_segment_sum   E         8192 [1, 1, 8, 128, 8]            est    0.00 GB  ok
+fp16 bwd conv3d                 E         8192 [1, 1, 8, 128, 8]            est    0.00 GB  ok
+fp16 bwd batch_norm             E         8192 [1, 1, 8, 128, 8]            est    0.00 GB  ok
+fp16 bwd leaky_relu             E         8192 [1, 1, 8, 128, 8]            est    0.00 GB  ok
+fp32 fwd conv3d                 E 1099511627776 [1, 8388608, 128, 128, 8]    est 13194.14 GB  skipped_mem
+fp32 fwd transpose_ncdhw        E 1099511627776 [1, 8388608, 128, 128, 8]    est 13194.14 GB  skipped_mem
+fp32 fwd group_mean_concat      E 1099511627776 [1, 8388608, 128, 128, 8]    est 19791.21 GB  skipped_mem
+fp32 fwd batch_norm             E 1099511627776 [1, 8388608, 128, 128, 8]    est 13194.14 GB  skipped_mem
+fp32 fwd leaky_relu             E 1099511627776 [1, 8388608, 128, 128, 8]    est 13194.14 GB  skipped_mem
+fp32 fwd reduce_mean_axis0      E 1099511627776 [1, 8388608, 128, 128, 8]    est 7421.70 GB  skipped_mem
+fp32 fwd gather                 E 1099511627776 [1, 8388608, 128, 128, 8]    est 14018.77 GB  skipped_mem
+fp32 fwd unsorted_segment_sum   E 1099511627776 [1, 8388608, 128, 128, 8]    est 14018.77 GB  skipped_mem
+fp32 bwd conv3d                 E 1099511627776 [1, 8388608, 128, 128, 8]    est 26388.28 GB  skipped_mem
+fp32 bwd batch_norm             E 1099511627776 [1, 8388608, 128, 128, 8]    est 26388.28 GB  skipped_mem
+fp32 bwd leaky_relu             E 1099511627776 [1, 8388608, 128, 128, 8]    est 26388.28 GB  skipped_mem
+verified_max_elements: {"fp32": {"fwd": 4096, "bwd": 4096}, "fp16": {"fwd": 8192, "bwd": 8192}}
+written /tmp/ptl_9ny2hmzw/tensor_limit.json
+ok
+test_sizes_and_shapes (tests.test_probe_tensor_limit.TestProbeTensorLimit) ... ok
+test_verified_max (tests.test_probe_tensor_limit.TestProbeTensorLimit) ... ok
+test_best_metric_defaults (tests.test_runtime_infra.TestArgs) ... ok
+test_best_metric_with_deform (tests.test_runtime_infra.TestArgs) ... ok
+test_cascade_flags (tests.test_runtime_infra.TestArgs) ... ok
+test_controls_skip_deform (tests.test_runtime_infra.TestArgs) ... ok
+test_deform_flag_defaults (tests.test_runtime_infra.TestArgs) ... ok
+test_level_defaults_and_overfit_dropout (tests.test_runtime_infra.TestArgs) ... ok
+test_loss_scale_and_head_activation_flags (tests.test_runtime_infra.TestArgs) ... ok
+test_memory_knob_flags (tests.test_runtime_infra.TestArgs) ... ok
+test_min_pairs_flag (tests.test_runtime_infra.TestArgs) ... ok
+test_model_config_round_trip (tests.test_runtime_infra.TestArgs) ... ok
+test_ncc_flags (tests.test_runtime_infra.TestArgs) ... ok
+test_ratio_and_required_data (tests.test_runtime_infra.TestArgs) ... ok
+test_str2bool (tests.test_runtime_infra.TestArgs) ... ok
+test_task_grad_norm_flag (tests.test_runtime_infra.TestArgs) ... ok
+test_task_loss_weights_flag (tests.test_runtime_infra.TestArgs) ... ok
+test_todays_config_and_args_restore (tests.test_runtime_infra.TestArgs) ... ok
+test_fingerprints_match (tests.test_runtime_infra.TestCascadeSourceLevel1) ... ok
+test_level1_source (tests.test_runtime_infra.TestCascadeSourceLevel1) ... ok
+test_best_and_keep_last (tests.test_runtime_infra.TestCheckpoint) ... ok
+test_config_json_and_compatibility (tests.test_runtime_infra.TestCheckpoint) ... ok
+test_extra_best (tests.test_runtime_infra.TestCheckpoint) ... WARNING:tensorflow:Detecting that an object or model or tf.train.Checkpoint is being deleted with unrestored values. See the following logs for the specific values in question. To silence these warnings, use `status.expect_partial()`. See https://www.tensorflow.org/api_docs/python/tf/train/Checkpoint#restorefor details about the status object returned by the restore function.
+WARNING:tensorflow:Value in checkpoint could not be found in the restored object: (root).best_metric_deform
+ok
+test_load_model_weights_warm_start (tests.test_runtime_infra.TestCheckpoint) ... ok
+test_peek_last_step (tests.test_runtime_infra.TestCheckpoint) ... ok
+test_round_trip_bit_exact (tests.test_runtime_infra.TestCheckpoint) ... ok
+test_warm_start_deform_into_linear_and_full (tests.test_runtime_infra.TestCheckpoint) ... ok
+test_warm_start_linear_into_deform (tests.test_runtime_infra.TestCheckpoint) ... ok
+test_cross_level_records (tests.test_runtime_infra.TestCrossLevelWarmStart) ... ok
+test_dllogger_backend (tests.test_runtime_infra.TestDLLoggerBackend) ... skipped 'dllogger is not importable here (the container may have it)'
+test_dali_batch_round_trip (tests.test_runtime_infra.TestFixedData) ... ok
+test_load_level_images (tests.test_runtime_infra.TestFixedData) ... ok
+test_transform_ranges (tests.test_runtime_infra.TestFixedData) ... ok
+test_validation_set_deterministic (tests.test_runtime_infra.TestFixedData) ... ok
+test_validation_set_independent_of_task_order (tests.test_runtime_infra.TestFixedData) ... ok
+test_jsonl_and_tensorboard (tests.test_runtime_infra.TestLogging) ... ok
+test_affine_matrix_errors_reference (tests.test_runtime_losses_metrics.TestAffineMetrics) ... ok
+test_group_errors_affine_keys_and_pairs (tests.test_runtime_losses_metrics.TestAffineMetrics) ... ok
+test_mean_pair_rms (tests.test_runtime_losses_metrics.TestAffineMetrics) ... ok
+test_qr_factors_recover_known_factors (tests.test_runtime_losses_metrics.TestAffineMetrics) ... ok
+test_dice_template_weight_zero (tests.test_runtime_losses_metrics.TestDeformLosses) ... ok
+test_ncc_defaults_unchanged (tests.test_runtime_losses_metrics.TestDeformLosses) ... ok
+test_ncc_total_and_keys (tests.test_runtime_losses_metrics.TestDeformLosses) ... ok
+test_perfect_alignment_zero_and_shift (tests.test_runtime_losses_metrics.TestDeformLosses) ... ok
+test_smoothness_orders (tests.test_runtime_losses_metrics.TestDeformLosses) ... ok
+test_soft_dice_matches_numpy_and_excludes_absent (tests.test_runtime_losses_metrics.TestDeformLosses) ... ok
+test_template_gradient_flows_through_template (tests.test_runtime_losses_metrics.TestDeformLosses) ... ok
+test_total_loss (tests.test_runtime_losses_metrics.TestDeformLosses) ... ok
+test_deform_group_errors (tests.test_runtime_losses_metrics.TestDeformMetrics) ... ok
+test_hard_dice_hand_made (tests.test_runtime_losses_metrics.TestDeformMetrics) ... ok
+test_affine_intensity_invariance (tests.test_runtime_losses_metrics.TestLNCC) ... ok
+test_box_sum_and_counts (tests.test_runtime_losses_metrics.TestLNCC) ... ok
+test_dtypes_and_window_validation (tests.test_runtime_losses_metrics.TestLNCC) ... ok
+test_flat_regions_finite (tests.test_runtime_losses_metrics.TestLNCC) ... ok
+test_leave_one_out (tests.test_runtime_losses_metrics.TestLNCC) ... ok
+test_local_ncc_matches_numpy (tests.test_runtime_losses_metrics.TestLNCC) ... ok
+test_pair_shift (tests.test_runtime_losses_metrics.TestLNCC) ... ok
+test_roi_excludes_far_background_and_border (tests.test_runtime_losses_metrics.TestLNCC) ... ok
+test_template_gradient_flows_through_template (tests.test_runtime_losses_metrics.TestLNCC) ... ok
+test_center_loss_matches_bruteforce (tests.test_runtime_losses_metrics.TestLosses) ... ok
+test_center_loss_units_mm2 (tests.test_runtime_losses_metrics.TestLosses) ... ok
+test_gradients_finite (tests.test_runtime_losses_metrics.TestLosses) ... ok
+test_pair_loss_matches_bruteforce (tests.test_runtime_losses_metrics.TestLosses) ... ok
+test_total_and_rms (tests.test_runtime_losses_metrics.TestLosses) ... ok
+test_cycle_error_zero (tests.test_runtime_losses_metrics.TestMetrics) ... ok
+test_group_metrics_keys_and_accumulator (tests.test_runtime_losses_metrics.TestMetrics) ... ok
+test_matrix_errors (tests.test_runtime_losses_metrics.TestMetrics) ... ok
+test_pairwise_all_ordered_pairs (tests.test_runtime_losses_metrics.TestMetrics) ... ok
+test_rotation_angle (tests.test_runtime_losses_metrics.TestMetrics) ... ok
+test_decoupled_decay_functional (tests.test_runtime_optim.TestOptimizers) ... ok
+test_default_clipnorm (tests.test_runtime_optim.TestOptimizers) ... ok
+test_every_optimizer_steps_and_lr_helpers (tests.test_runtime_optim.TestOptimizers) ... WARNING:tensorflow:You forgot to call LossScaleOptimizer.get_scaled_loss() and LossScaleOptimizer.get_unscaled_gradients() before calling LossScaleOptimizer.apply_gradients(). This will likely result in worse model quality, so please call them in the correct places! For example:
+    with tf.GradientTape() as tape:
+      loss = loss_fn()
+      scaled_loss = opt.get_scaled_loss(loss)
+    scaled_grads = tape.gradient(scaled_loss, vars)
+    grads = opt.get_unscaled_gradients(scaled_grads)
+    opt.apply_gradients([(grads, var)])
+For more information, see https://www.tensorflow.org/api_docs/python/tf/keras/mixed_precision/LossScaleOptimizer
+WARNING:tensorflow:You forgot to call LossScaleOptimizer.get_scaled_loss() and LossScaleOptimizer.get_unscaled_gradients() before calling LossScaleOptimizer.apply_gradients(). This will likely result in worse model quality, so please call them in the correct places! For example:
+    with tf.GradientTape() as tape:
+      loss = loss_fn()
+      scaled_loss = opt.get_scaled_loss(loss)
+    scaled_grads = tape.gradient(scaled_loss, vars)
+    grads = opt.get_unscaled_gradients(scaled_grads)
+    opt.apply_gradients([(grads, var)])
+For more information, see https://www.tensorflow.org/api_docs/python/tf/keras/mixed_precision/LossScaleOptimizer
+WARNING:tensorflow:You forgot to call LossScaleOptimizer.get_scaled_loss() and LossScaleOptimizer.get_unscaled_gradients() before calling LossScaleOptimizer.apply_gradients(). This will likely result in worse model quality, so please call them in the correct places! For example:
+    with tf.GradientTape() as tape:
+      loss = loss_fn()
+      scaled_loss = opt.get_scaled_loss(loss)
+    scaled_grads = tape.gradient(scaled_loss, vars)
+    grads = opt.get_unscaled_gradients(scaled_grads)
+    opt.apply_gradients([(grads, var)])
+For more information, see https://www.tensorflow.org/api_docs/python/tf/keras/mixed_precision/LossScaleOptimizer
+WARNING:tensorflow:You forgot to call LossScaleOptimizer.get_scaled_loss() and LossScaleOptimizer.get_unscaled_gradients() before calling LossScaleOptimizer.apply_gradients(). This will likely result in worse model quality, so please call them in the correct places! For example:
+    with tf.GradientTape() as tape:
+      loss = loss_fn()
+      scaled_loss = opt.get_scaled_loss(loss)
+    scaled_grads = tape.gradient(scaled_loss, vars)
+    grads = opt.get_unscaled_gradients(scaled_grads)
+    opt.apply_gradients([(grads, var)])
+For more information, see https://www.tensorflow.org/api_docs/python/tf/keras/mixed_precision/LossScaleOptimizer
+ok
+test_sgdw_matches_reference_update (tests.test_runtime_optim.TestOptimizers) ... ok
+test_weight_decay_exclusion (tests.test_runtime_optim.TestOptimizers) ... ok
+test_bad_name (tests.test_runtime_optim.TestSchedules) ... ok
+test_constant (tests.test_runtime_optim.TestSchedules) ... ok
+test_cosine_midpoint (tests.test_runtime_optim.TestSchedules) ... ok
+test_cycle_restarts (tests.test_runtime_optim.TestSchedules) ... ok
+test_warmup_and_endpoints (tests.test_runtime_optim.TestSchedules) ... ok
+test_bash_syntax (tests.test_slurm_scripts.TestStatic) ... ok
+test_m9_level1_script (tests.test_slurm_scripts.TestStatic)
+Milestone 9 phase 2 (design section 8): header comments, recipe, both container calls. ... ok
+test_m9_memory_script (tests.test_slurm_scripts.TestStatic)
+Milestone 9 phase 1 (design 5.5, AC11): header, </dev/null on every container call. ... ok
+test_memory_script (tests.test_slurm_scripts.TestStatic) ... ok
+test_sbatch_header_and_paths (tests.test_slurm_scripts.TestStatic) ... ok
+test_train_script (tests.test_slurm_scripts.TestStatic) ... ok
+test_m9_level1_default_recipe (tests.test_slurm_scripts.TestStubRuns)
+Design section 8: default argv of main.py and of the checker. ... ok
+test_m9_level1_deform64_and_guards (tests.test_slurm_scripts.TestStubRuns) ... ok
+test_m9_level1_exit_codes (tests.test_slurm_scripts.TestStubRuns)
+main.py's exit code if non-zero (checker not run), else the checker's. ... ok
+test_m9_level1_memory_recipe (tests.test_slurm_scripts.TestStubRuns)
+TF_MEM_LIMIT_MB / INTENSITY_AUG_DEVICE / PAIR_RECOMPUTE overrides and their guards. ... ok
+test_m9_level1_resume_skips_guard (tests.test_slurm_scripts.TestStubRuns) ... ok
+test_m9_memory_env_overrides (tests.test_slurm_scripts.TestStubRuns) ... ok
+test_m9_memory_exit_code (tests.test_slurm_scripts.TestStubRuns)
+Every call runs; the script exits with the first non-zero exit code. ... ok
+test_m9_memory_script (tests.test_slurm_scripts.TestStubRuns) ... ok
+test_memory_script (tests.test_slurm_scripts.TestStubRuns) ... ok
+test_train_default_recipe (tests.test_slurm_scripts.TestStubRuns) ... ok
+test_train_deform64 (tests.test_slurm_scripts.TestStubRuns) ... ok
+test_train_requires_n (tests.test_slurm_scripts.TestStubRuns) ... ok
+test_train_resume_skips_guard (tests.test_slurm_scripts.TestStubRuns) ... ok
+test_a_matches_scipy_map_coordinates (tests.test_spatial_transformer.TestTransformImage) ... ok
+test_b_integer_translation_shifts_exactly (tests.test_spatial_transformer.TestTransformImage) ... ok
+test_c_round_trip (tests.test_spatial_transformer.TestTransformImage) ... ok
+test_d_nearest_preserves_labels (tests.test_spatial_transformer.TestTransformImage) ... ok
+test_e_cpu_out_of_bounds (tests.test_spatial_transformer.TestTransformImage) ... ok
+test_f_gradient_matches_finite_difference (tests.test_spatial_transformer.TestTransformImage) ... ok
+test_flip_commutes_with_conjugated_warp (tests.test_spatial_transformer.TestTransformImage) ... ok
+test_g_dynamic_group_size_in_tf_function (tests.test_spatial_transformer.TestTransformImage) ... ok
+test_h_mixed_float16_policy (tests.test_spatial_transformer.TestTransformImage) ... ok
+test_i_multilevel_consistency (tests.test_spatial_transformer.TestTransformImage) ... ok
+test_block_fp16 (tests.test_split_group_conv.TestSplitBlock) ... 
+[split] fp16 block (stride 1) outputs rel 4.63e-04
+
+[split] fp16 block (stride 2) outputs rel 4.54e-04
+ok
+test_block_strided (tests.test_split_group_conv.TestSplitBlock) ... ok
+test_setter_rules (tests.test_split_group_conv.TestSplitBlock) ... ok
+test_outputs_and_gradients_fp32 (tests.test_split_group_conv.TestSplitModel) ... 
+[split] fp32 model outputs rel 5.39e-07 (training False)
+
+[split] fp32 model outputs rel 6.99e-07 (training True)
+[split] fp32 gradients rel 1.68e-06
+ok
+test_outputs_fp16 (tests.test_split_group_conv.TestSplitModel) ... 
+[split] AMP model outputs rel 1.05e-03
+ok
+test_cascade_per_task (tests.test_step_times.TestStepTimes) ... ok
+test_exit_zero_and_runs (tests.test_step_times.TestStepTimes) ... ok
+test_missing_run (tests.test_step_times.TestStepTimes) ... ok
+test_no_tensorflow (tests.test_step_times.TestStepTimes) ... /mnt/d/Research/Brain_Registration_Projects/brain-group-rad/tests/test_step_times.py:68: ResourceWarning: unclosed file <_io.TextIOWrapper name='/mnt/d/Research/Brain_Registration_Projects/brain-group-rad/scripts/step_times_from_metrics.py' mode='r' encoding='UTF-8'>
+  tree = ast.parse(open(os.path.join(REPO, "scripts", "step_times_from_metrics.py")).read())
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+ok
+test_plain_mixed_only (tests.test_step_times.TestStepTimes) ... ok
+test_t10_chain_statistics_vs_reference (tests.test_tf_intensity_aug.TestChain) ... 
+[T10] KS TF vs numpy (400 each): mean p=1, std p=0.111, p1 p=0.468, p50 p=0.998, p99 p=0.131, frac0 p=0.994, frac1 p=0.367
+ok
+test_t8_group_matches_reference (tests.test_tf_intensity_aug.TestChain) ... ok
+test_t9_parameter_statistics (tests.test_tf_intensity_aug.TestChain) ... ok
+test_t11_same_seed_same_output (tests.test_tf_intensity_aug.TestDeterminism) ... ok
+test_t12_checkpoint_resume_continues_stream (tests.test_tf_intensity_aug.TestDeterminism) ... ok
+test_t13_mixed_precision_policy_float32 (tests.test_tf_intensity_aug.TestDeterminism) ... ok
+test_t14_level1_n2 (tests.test_tf_intensity_aug.TestMemory) ... 
+[T14] level 1 N 2: transient peak 197.4 MiB (group 52.5 MiB, volume 26.2 MiB)
+ok
+test_t14_level2_n8 (tests.test_tf_intensity_aug.TestMemory) ... 
+[T14] level 2 N 8: transient peak 78.8 MiB (group 26.2 MiB, volume 3.3 MiB)
+ok
+test_t1_noise (tests.test_tf_intensity_aug.TestOps) ... ok
+test_t2_brightness (tests.test_tf_intensity_aug.TestOps) ... ok
+test_t3_contrast (tests.test_tf_intensity_aug.TestOps) ... ok
+test_t4_lowres_matches_two_stage_reference (tests.test_tf_intensity_aug.TestOps) ... 
+[T4] lowres TF vs two-stage numpy: max |diff| 1.66e-07
+ok
+test_t5_lowres_effective_resolution (tests.test_tf_intensity_aug.TestOps) ... ok
+test_t6_gamma (tests.test_tf_intensity_aug.TestOps) ... ok
+test_t7_clamp_and_disabled (tests.test_tf_intensity_aug.TestOps) ... ok
+test_crafted_values (tests.test_trainer.TestCollapseDiagnostics) ... ok
+test_healthy_group_logs_diagnostics (tests.test_trainer.TestCollapseDiagnostics) ... ok
+test_identical_images_zero_spread_and_warning (tests.test_trainer.TestCollapseDiagnostics) ... WARNING step 3: possible group collapse (3 consecutive steps with relative pre-head feature spread < 0.001 or grad norm < 0.001; now rel_spread 0, grad_norm 0, dead_frac 0.480)
+ok
+test_controls_written_each_step_and_logged (tests.test_trainer.TestControls) ... ok
+test_g_warmup_logged (tests.test_trainer.TestControls) ... ok
+test_named_val_sets_and_pngs (tests.test_trainer.TestControls) ... ok
+test_off_is_unchanged (tests.test_trainer.TestControls) ... ok
+test_lncc_only_and_validation_errors (tests.test_trainer.TestDeformNCC) ... ok
+test_ncc_step (tests.test_trainer.TestDeformNCC) ... ok
+test_three_task_logs_ncc (tests.test_trainer.TestDeformNCC) ... ok
+test_collapse_diag_deform (tests.test_trainer.TestDeformStep) ... WARNING step 3: possible group collapse (3 consecutive steps with relative pre-head feature spread < 0.001 or grad norm < 0.001; now rel_spread 0, grad_norm 3.39e-07, dead_frac 0.000)
+ok
+test_nan_guard_skips_update (tests.test_trainer.TestDeformStep) ... ok
+test_none_gradients_filtered (tests.test_trainer.TestDeformStep) ... ok
+test_residual_affine_step (tests.test_trainer.TestDeformStep) ... ok
+test_matches_golden (tests.test_trainer.TestDeformUnchanged) ... WARNING:tensorflow:5 out of the last 1067 calls to <function Trainer._make_train_step.<locals>.<lambda> at 0x7f841e5df8b0> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+
+[golden deform] max |diff| 0 (tolerance 0)
+ok
+test_best_metrics_with_deform (tests.test_trainer.TestDeformValidation) ... ok
+test_deform_validation_and_pngs (tests.test_trainer.TestDeformValidation) ... ok
+test_build_and_run (tests.test_trainer.TestHeadActivation) ... ok
+test_matches_golden (tests.test_trainer.TestLinearOnlyUnchanged) ... WARNING:tensorflow:6 out of the last 1068 calls to <function Trainer._make_train_step.<locals>.<lambda> at 0x7f84178d1dc0> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+
+[golden] max |diff| 0 (tolerance 0)
+ok
+test_gradient_scales_and_logged_terms_do_not (tests.test_trainer.TestLossScale) ... ok
+test_task_loss_weight_and_enc_grad_norms (tests.test_trainer.TestLossScale) ... ok
+test_graphs_and_results (tests.test_trainer.TestMinPairsTrainer) ... ok
+test_logged_key (tests.test_trainer.TestMinPairsTrainer) ... ok
+test_validation_unaffected_and_invalid (tests.test_trainer.TestMinPairsTrainer) ... ok
+test_interleaving_starting_rigid (tests.test_trainer.TestMixedTasks) ... ok
+test_mixed_validation_best_metric_and_pngs (tests.test_trainer.TestMixedTasks) ... ok
+test_mixed_precision_overflow_skips (tests.test_trainer.TestResumeAndValidation) ... 
+[amp overflow] 33 skipped steps, first applied step at loss scale 2^7
+ok
+test_mixed_precision_smoke (tests.test_trainer.TestResumeAndValidation) ... WARNING:tensorflow:You forgot to call LossScaleOptimizer.get_scaled_loss() and LossScaleOptimizer.get_unscaled_gradients() before calling LossScaleOptimizer.apply_gradients(). This will likely result in worse model quality, so please call them in the correct places! For example:
+    with tf.GradientTape() as tape:
+      loss = loss_fn()
+      scaled_loss = opt.get_scaled_loss(loss)
+    scaled_grads = tape.gradient(scaled_loss, vars)
+    grads = opt.get_unscaled_gradients(scaled_grads)
+    opt.apply_gradients([(grads, var)])
+For more information, see https://www.tensorflow.org/api_docs/python/tf/keras/mixed_precision/LossScaleOptimizer
+ok
+test_resume_continues_step_count (tests.test_trainer.TestResumeAndValidation) ... ok
+test_trainmode_validation_keeps_bn_statistics (tests.test_trainer.TestResumeAndValidation) ... ok
+test_validation_identity_model (tests.test_trainer.TestResumeAndValidation) ... ok
+test_checkpoint_keys (tests.test_trainer.TestTFIntensityAug) ... ok
+test_steps_finite_and_resume_continues_aug_stream (tests.test_trainer.TestTFIntensityAug) ... ok
+test_amp_normalised_and_overflow (tests.test_trainer.TestTaskGradNorm) ... ok
+test_eps_zero_grads (tests.test_trainer.TestTaskGradNorm) ... 
+[grad-norm eps] min 0: raw grad_norm 0, scale 1.2e+13, normed 3.89e-06
+
+[grad-norm eps] min 0.001: raw grad_norm 0, scale 1, normed 0
+ok
+test_gate_below_min (tests.test_trainer.TestTaskGradNorm) ... ok
+test_linear_and_deform_normalised (tests.test_trainer.TestTaskGradNorm) ... 
+[grad-norm] SGD |delta| / lr vs target rel. error affine 3.6e-08, deform 4.8e-08, rigid 7.7e-08
+ok
+test_nonfinite_unchanged (tests.test_trainer.TestTaskGradNorm) ... ok
+test_off_no_new_keys (tests.test_trainer.TestTaskGradNorm) ... ok
+test_trainer_validation (tests.test_trainer.TestTaskGradNorm) ... ok
+test_weights_after_normalisation (tests.test_trainer.TestTaskGradNorm) ... ok
+test_window_logs (tests.test_trainer.TestTaskGradNorm) ... ok
+test_equivalent_to_clipping_when_all_clipped (tests.test_trainer.TestTaskGradNormClipEquivalence) ... 
+[grad-norm equiv] A0 (clip off) vs B max |diff| 0, A12 (clip 12) vs B max |diff| 0.0011 (variables relative to 1 + |value|), A12 loss max rel. diff 9.17e-07
+ok
+test_eps_zero_gradients (tests.test_trainer.TestTaskGradNormHelpers) ... ok
+test_indexed_slices (tests.test_trainer.TestTaskGradNormHelpers) ... ok
+test_scale_and_gate (tests.test_trainer.TestTaskGradNormHelpers) ... ok
+test_deform_weight (tests.test_trainer.TestTaskLossWeightDeform) ... ok
+test_ratio_and_determinism (tests.test_trainer.TestTaskSchedule) ... ok
+test_deform_group_size_differs (tests.test_trainer.TestThreeTasks) ... ok
+test_enc_grad_diagnostics_logged (tests.test_trainer.TestThreeTasks) ... ok
+test_trace_once_mixed (tests.test_trainer.TestThreeTasks) ... ok
+test_nan_guard_skips_update (tests.test_trainer.TestTrainStep) ... ok
+test_none_gradients_filtered (tests.test_trainer.TestTrainStep) ... ok
+test_rebuild_steps_after_bn_freeze (tests.test_trainer.TestTrainStep) ... ok
+test_trace_once_per_task (tests.test_trainer.TestTrainStep) ... ok
+test_barycentric_targets (tests.test_transforms.TestBarycenter) ... ok
+test_batched_leading_axes (tests.test_transforms.TestBarycenter) ... ok
+test_centered_output_and_pairwise (tests.test_transforms.TestBarycenter) ... ok
+test_gradient_centering_plus_point_loss (tests.test_transforms.TestBarycenter) ... ok
+test_invariance_to_common_left_multiplication (tests.test_transforms.TestBarycenter) ... ok
+test_matches_demo_numpy (tests.test_transforms.TestBarycenter) ... ok
+test_affine_is_r_times_k (tests.test_transforms.TestBuilders) ... ok
+test_identity_params (tests.test_transforms.TestBuilders) ... ok
+test_qr_round_trip_recovers_scales (tests.test_transforms.TestBuilders) ... ok
+test_rigid_layout (tests.test_transforms.TestBuilders) ... ok
+test_dali_voxel_mm_round_trip_and_meaning (tests.test_transforms.TestDaliConversion) ... ok
+test_involution_and_composition (tests.test_transforms.TestDaliConversion) ... ok
+test_conjugated_rigid_stays_rotation (tests.test_transforms.TestFlipAlgebra) ... ok
+test_coarse_levels_share_centers (tests.test_transforms.TestMatrixHelpers) ... ok
+test_inverse_compose_layout (tests.test_transforms.TestMatrixHelpers) ... ok
+test_logm_expm (tests.test_transforms.TestMatrixHelpers) ... ok
+test_mm_voxel_conversion (tests.test_transforms.TestMatrixHelpers) ... ok
+test_second_moment_and_point_loss_bruteforce (tests.test_transforms.TestPointLoss) ... ok
+test_encode_decode_round_trip (tests.test_transforms.TestRotation10D) ... ok
+test_gradient_matches_finite_difference (tests.test_transforms.TestRotation10D) ... ok
+test_gradients_finite (tests.test_transforms.TestRotation10D) ... ok
+test_identity_encoding (tests.test_transforms.TestRotation10D) ... ok
+test_matches_numpy_rederivation (tests.test_transforms.TestRotation10D) ... ok
+test_matches_reference_implementation (tests.test_transforms.TestRotation10D) ... ok
+test_random_params_are_rotations (tests.test_transforms.TestRotation10D) ... ok
+test_dynamic_n_no_retrace (tests.test_upsample.TestUpsampleTrilinear2x) ... ok
+test_float16 (tests.test_upsample.TestUpsampleTrilinear2x) ... ok
+test_layer_and_gradient (tests.test_upsample.TestUpsampleTrilinear2x) ... ok
+test_matches_map_coordinates (tests.test_upsample.TestUpsampleTrilinear2x) ... ok
+test_matches_zoom_grid_mode (tests.test_upsample.TestUpsampleTrilinear2x) ... ok
+test_multichannel (tests.test_upsample.TestUpsampleTrilinear2x) ... ok
+test_ramp_exact_in_interior (tests.test_upsample.TestUpsampleTrilinear2x) ... ok
+test_metrics_equal (tests.test_val_chunk.TestChunkedEqualsUnchunked) ... ok
+test_peaks (tests.test_val_chunk.TestValidationMemory) ... 
+[val chunk, level 2 TINY N 2] train peak 5656 MiB; validation peak unchunked 2253 MiB (resident 1051; again after the chunked pass 2253), chunk 1 / pair chunk 1 1791 MiB (resident 1051)
+ok
+test_identity_panels (tests.test_val_png.TestDeformPanels) ... ok
+test_jacobian_padding_and_file (tests.test_val_png.TestDeformPanels) ... ok
+test_axial_display_convention (tests.test_val_png.TestPanels) ... ok
+test_figure_layout (tests.test_val_png.TestPanels) ... ok
+test_identity_and_perfect_rows (tests.test_val_png.TestPanels) ... ok
+test_select_indices_fixed (tests.test_val_png.TestPanels) ... ok
+test_off_writes_nothing_and_failure_does_not_raise (tests.test_val_png.TestTrainerPng) ... WARNING step 0: validation PNG for rigid failed: IndexError('too many indices for array: array is 0-dimensional, but 1 were indexed')
+ok
+test_written_at_validation_and_final_step (tests.test_val_png.TestTrainerPng) ... ok
+test_level1_template (tests.test_verify_dali_level.TestSetLevel)
+Milestone 9 (design 5.4): level 1 = full resolution, template_mask.npy (suffix ''). ... ok
+test_level2_template (tests.test_verify_dali_level.TestSetLevel) ... ok
+test_check_m_registered (tests.test_verify_dali_level.TestSourceScan)
+tf-intensity-aug: check (m) is in the default --checks and dispatched. ... ok
+test_no_level4_literals (tests.test_verify_dali_level.TestSourceScan) ... ok
+test_errors_name_the_field (tests.test_width_presets.TestModelConfigPositivity) ... ok
+test_existing_configs_pass (tests.test_width_presets.TestModelConfigPositivity) ... ok
+test_count_params_parts (tests.test_width_presets.TestPresets) ... 
+[presets] trainable parameters (M, deform decoder on):
+  default total 29.63  encoder 9.85  linear 12.64  deform 7.14
+  u075   total 22.17  encoder 5.54  linear 12.61  deform 4.03
+  u050   total 16.82  encoder 2.46  linear 12.57  deform 1.79
+  u0375  total 15.00  encoder 1.39  linear 12.55  deform 1.05
+  f0d1   total 29.54  encoder 9.79  linear 12.64  deform 7.10
+  fr50   total 29.14  encoder 9.54  linear 12.64  deform 6.96
+  fr25   total 28.96  encoder 9.41  linear 12.64  deform 6.90
+ok
+test_no_tensorflow (tests.test_width_presets.TestPresets) ... ok
+test_preset_args_and_kwargs (tests.test_width_presets.TestPresets) ... ok
+test_table (tests.test_width_presets.TestPresets) ... ok
+test_uniform_rounding (tests.test_width_presets.TestPresets) ... ok
+test_unknown_name (tests.test_width_presets.TestPresets) ... ok
+test_other_configs (tests.test_width_presets_tf.TestCountParams) ... 
+[presets tf] narrow   built 4.0328 M, count_params 4.0328 M
+
+[presets tf] tiny     built 0.2324 M, count_params 0.2324 M
+
+[presets tf] narrow-lin built 3.5475 M, count_params 3.5475 M
+
+[presets tf] res-B    built 3.7045 M, count_params 3.7045 M
+ok
+test_presets (tests.test_width_presets_tf.TestCountParams) ... 
+[presets tf] default  built 29.6286 M, count_params 29.6286 M
+
+[presets tf] u075     built 22.1732 M, count_params 22.1732 M
+
+[presets tf] u050     built 16.8183 M, count_params 16.8183 M
+
+[presets tf] u0375    built 14.9952 M, count_params 14.9952 M
+
+[presets tf] f0d1     built 29.5372 M, count_params 29.5372 M
+
+[presets tf] fr50     built 29.1430 M, count_params 29.1430 M
+
+[presets tf] fr25     built 28.9558 M, count_params 28.9558 M
+ok
+
+======================================================================
+ERROR: test_level1_cascade_from_errors (tests.test_main.TestLevel1CascadeErrors)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/mnt/d/Research/Brain_Registration_Projects/brain-group-rad/tests/test_main.py", line 690, in test_level1_cascade_from_errors
+    M.main(common + knobs + ["--level", "1", "--cascade-from", src, "--run-name", "bad2"])
+  File "/mnt/d/Research/Brain_Registration_Projects/brain-group-rad/main.py", line 269, in main
+    model = GroupRegLevelModel(level, model_cfg, gradient_checkpointing=args.gradient_checkpointing,
+  File "/mnt/d/Research/Brain_Registration_Projects/brain-group-rad/models/group_net.py", line 383, in build_model
+    self(x, task=DEFORM_TASK, training=False)
+  File "/home/jbpatel/miniconda3/envs/tf_gpu/lib/python3.9/site-packages/keras/utils/traceback_utils.py", line 70, in error_handler
+    raise e.with_traceback(filtered_tb) from None
+  File "/mnt/d/Research/Brain_Registration_Projects/brain-group-rad/models/group_net.py", line 300, in call
+    return self._call_deform(images, training, return_warped)
+  File "/mnt/d/Research/Brain_Registration_Projects/brain-group-rad/models/group_net.py", line 336, in _call_deform
+    u, u_inv = diffeo.exp_and_inverse(v, steps, lean=lean)
+  File "/mnt/d/Research/Brain_Registration_Projects/brain-group-rad/models/diffeo.py", line 95, in exp_and_inverse
+    return integrate_svf(v, steps, lean=lean), integrate_svf(-v, steps, lean=lean)
+  File "/mnt/d/Research/Brain_Registration_Projects/brain-group-rad/models/diffeo.py", line 88, in integrate_svf
+    u = compose(u, u, lean=lean)
+  File "/mnt/d/Research/Brain_Registration_Projects/brain-group-rad/models/diffeo.py", line 75, in compose
+    return u_b + warp_field(u_a, u_b, lean=lean)
+  File "/mnt/d/Research/Brain_Registration_Projects/brain-group-rad/models/diffeo.py", line 66, in warp_field
+    return warp(tf.cast(field, dt), tf.cast(u, dt), boundary="border", lean=lean)
+  File "/mnt/d/Research/Brain_Registration_Projects/brain-group-rad/models/diffeo.py", line 55, in warp
+    return L.sample_voxel_coords(vol, coords, interpolation=interpolation, fill_value=fill_value,
+  File "/mnt/d/Research/Brain_Registration_Projects/brain-group-rad/models/layers.py", line 149, in sample_voxel_coords
+    return _sample_linear_lean(images, coords, fill_value, boundary, lean_images_grad)
+  File "/mnt/d/Research/Brain_Registration_Projects/brain-group-rad/models/layers.py", line 385, in _sample_linear_lean
+    return lean(images, coords)
+  File "/mnt/d/Research/Brain_Registration_Projects/brain-group-rad/models/layers.py", line 378, in lean
+    out = _lean_linear_forward(img, crd, fill_value, boundary)
+  File "/mnt/d/Research/Brain_Registration_Projects/brain-group-rad/models/layers.py", line 281, in _lean_linear_forward
+    term = w[..., None] * tf.gather(flat, oxy + oz)
+tensorflow.python.framework.errors_impl.ResourceExhaustedError: Exception encountered when calling layer "group_reg_level_model" "                 f"(type GroupRegLevelModel).
+
+{{function_node __wrapped__Mul_device_/job:localhost/replica:0/task:0/device:GPU:0}} failed to allocate memory [Op:Mul]
+
+Call arguments received by layer "group_reg_level_model" "                 f"(type GroupRegLevelModel):
+  • images=tf.Tensor(shape=(2, 160, 224, 192, 1), dtype=float16)
+  • task='deform'
+  • training=False
+  • return_warped=False
+
+======================================================================
+FAIL: test_peak_1_vs_4_pairs (tests.test_pair_recompute.TestPairRecomputeMemory)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/mnt/d/Research/Brain_Registration_Projects/brain-group-rad/tests/test_pair_recompute.py", line 196, in test_peak_1_vs_4_pairs
+    self.assertLess(grow_rc, 0.35 * grow_default)
+AssertionError: 221.455322265625 not less than 160.19626464843748
+
+----------------------------------------------------------------------
+Ran 558 tests in 12006.280s
+
+FAILED (failures=1, errors=1, skipped=4)
+/tmp/bgr_step_times_f86u5dyl/cascade: ok (metrics ok, config ok, 41 windows >= step 1000, 2 unparsable, per_task True)
+  time/compute_ms              median   2059.0 ms  IQR   2049.0-  2069.0  (41 windows)
+  train_deform/compute_ms      median   5018.0 ms  IQR   4998.0-  5038.0  (41 windows)
+  train_rigid/compute_ms       median    759.0 ms  IQR    749.0-   769.0  (41 windows)
+  diag_u_res_max_vox           median 1.59 max 1.79 (41 windows)
+  args: {"group_size": 16, "global_start_step": 2000, "lr": null}
+/tmp/bgr_step_times_f86u5dyl/plain: ok (metrics ok, config missing, 41 windows >= step 1000, 0 unparsable, per_task False)
+  time/compute_ms              median   1650.0 ms  IQR   1650.0-  1650.0  (41 windows)
+  diag_u_res_max_vox           null
+  args: {"group_size": null, "global_start_step": null, "lr": null}
+/tmp/bgr_step_times_f86u5dyl/does_not_exist: missing (metrics missing, config missing, 0 windows >= step 1000, 0 unparsable, per_task False)
+  diag_u_res_max_vox           null
+  args: {"group_size": null, "global_start_step": null, "lr": null}
+wrote /tmp/bgr_step_times_f86u5dyl/out/step_times.json
+unittest exit code: 1, wall time: 12057 s
+SCRIPT_EXIT 0

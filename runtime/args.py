@@ -46,6 +46,12 @@ Pattern from the rigid project's ``runtime/args.py`` (argparse + ``str2bool``). 
 * minimum pair count (milestone 9 phase 2, `.agents/tasks/milestone-9-phase2/design-m9-phase2.md`
   section 5): --min-pairs 1 (today: at least 1 sampled training pair per step); 'n' raises the
   floor to the group size N. --p-pair and --p-pdice must be in (0, 1].
+* intensity augmentation (`.agents/tasks/tf-intensity-aug/plan.md`): --intensity-aug true,
+  --intensity-aug-device dali (in the DALI pipelines, every run unchanged); 'tf' runs the same
+  chain in the TF post-process (DALI gets IntensityAugConfig.off()); not with
+  --overfit-one-group. --intensity-aug false turns it off on both devices.
+* --pair-recompute false (default: today's ops); true = the deform training step's pairwise
+  Dice / LNCC one pair at a time under tf.recompute_grad (needs 'deform' in --task-ratio).
 """
 import argparse
 import collections
@@ -281,6 +287,10 @@ def build_parser():
     g.add_argument("--lean-losses", type=str2bool, default=False,
                    help="memory knob (milestone 9): Dice without materialised slices / broadcast and "
                    "LNCC under tf.recompute_grad; deform task only")
+    g.add_argument("--pair-recompute", type=str2bool, default=False,
+                   help="memory knob (tf-intensity-aug addendum): each sampled deform pair's warp, "
+                   "pairwise soft Dice and pairwise LNCC under tf.recompute_grad, one pair alive at a "
+                   "time in forward and backward (same values and gradients); deform task only")
     g.add_argument("--split-group-conv", type=str2bool, default=False,
                    help="memory knob (milestone 9): group blocks compute conv(x) + conv(group mean) "
                    "instead of conv(concat(x, mean)); same variables and checkpoints")
@@ -295,6 +305,11 @@ def build_parser():
                    help="deform validation: pairs evaluated per chunk (>= 1; default 16 = the "
                    "milestone-6 value). Smaller values lower the validation memory peak (level-2 "
                    "fallback, design §11) without changing the metrics")
+    g.add_argument("--val-image-chunk", type=int, default=0,
+                   help="deform validation: > 0 computes the metrics (warped one-hot / images, LNCC, "
+                   "Jacobian, inverse consistency) this many images at a time, the one-hot built per "
+                   "chunk (level-1 validation memory; same metrics up to float summation order); "
+                   "0 = unchunked (default)")
     g = p.add_argument_group("augmentation (half-widths of uniform ranges)")
     for task in TRAIN_TASKS:
         d = P.DEFAULT_LINEAR_RANGES[task]
@@ -304,6 +319,10 @@ def build_parser():
         g.add_argument("--%s-log-scale" % task, type=float, default=d["log_scale"])
         g.add_argument("--%s-shear" % task, type=float, default=d["shear"])
     g.add_argument("--intensity-aug", type=str2bool, default=True)
+    g.add_argument("--intensity-aug-device", choices=list(P.INTENSITY_AUG_DEVICES), default="dali",
+                   help="where the intensity augmentation runs: 'dali' (in the DALI pipelines, "
+                   "default) or 'tf' (DALI without it, the same chain in the TF post-process; "
+                   "frees ~9.5 GB of DALI device memory at level 1). Not with --overfit-one-group")
     g = p.add_argument_group("curriculum and global transform (design 3.2 v3.5; both default off)")
     g.add_argument("--curriculum", type=str2bool, default=False,
                    help="linear ramp of the per-image ranges from the --<task>-*-start values to "
@@ -368,6 +387,10 @@ def build_parser():
     g.add_argument("--bn-recal-freeze", type=str2bool, default=True,
                    help="freeze the BN statistics after the recalibration (ignored when "
                    "--bn-recal-batches is 0)")
+    g.add_argument("--bn-recal-validate", type=str2bool, default=True,
+                   help="run the bnrecal_pre / bnrecal_post validation passes around the BN "
+                   "recalibration (default true); false skips them (the recalibration still runs, "
+                   "no bn gap metrics are logged)")
     g = p.add_argument_group("DALI")
     g.add_argument("--num-threads", type=int, default=4)
     g.add_argument("--prefetch", type=int, default=1)
@@ -427,6 +450,9 @@ def parse_args(argv=None):
         parser.error("--data is required unless --overfit-one-group --overfit-synthetic is given")
     if args.overfit_synthetic and not args.overfit_one_group:
         parser.error("--overfit-synthetic needs --overfit-one-group")
+    if args.intensity_aug_device == "tf" and args.overfit_one_group:
+        parser.error("--intensity-aug-device tf needs the DALI training path (--overfit-one-group "
+                     "has no intensity augmentation)")
     if args.group_size is None:
         args.group_size = DEFAULT_GROUP_SIZE[args.level]
     if not (math.isfinite(args.loss_scale_mm2) and args.loss_scale_mm2 > 0):
@@ -448,7 +474,7 @@ def parse_args(argv=None):
     if not deform:
         if args.gradient_checkpointing == "full":
             parser.error("--gradient-checkpointing full needs 'deform' in --task-ratio")
-        for flag in ("lean_sampler", "lean_losses"):
+        for flag in ("lean_sampler", "lean_losses", "pair_recompute"):
             if getattr(args, flag):
                 parser.error("--%s needs 'deform' in --task-ratio" % flag.replace("_", "-"))
     if len(args.filters) != 6 or any(w < 1 for w in args.filters):
@@ -465,6 +491,8 @@ def parse_args(argv=None):
         parser.error("--val-deform-max-pairs must be >= 1, got %d" % args.val_deform_max_pairs)
     if args.val_pair_chunk < 1:
         parser.error("--val-pair-chunk must be >= 1, got %d" % args.val_pair_chunk)
+    if args.val_image_chunk < 0:
+        parser.error("--val-image-chunk must be >= 0 (0 = unchunked), got %d" % args.val_image_chunk)
     # Level cascade (milestone 8, design §10). Resolution of the --cascade-from path, the source
     # level and the config equality are checked in main.py (fresh runs only).
     cascade = args.cascade_from is not None
@@ -663,8 +691,22 @@ def train_config_from_args(args):
                        overfit_fold_max=args.overfit_fold_max,
                        val_deform_max_pairs=args.val_deform_max_pairs,
                        cascade_skip_prob=args.cascade_skip_prob, val_pair_chunk=args.val_pair_chunk,
+                       val_image_chunk=args.val_image_chunk,
                        lean_sampler=bool(args.lean_sampler), lean_losses=bool(args.lean_losses),
-                       min_pairs=args.min_pairs)
+                       min_pairs=args.min_pairs, intensity_aug_tf=intensity_aug_tf(args),
+                       pair_recompute=bool(args.pair_recompute))
+
+
+def intensity_aug_device(args):
+    """'off' (--intensity-aug false), else the --intensity-aug-device value ('dali' / 'tf')."""
+    return getattr(args, "intensity_aug_device", "dali") if args.intensity_aug else "off"
+
+
+def intensity_aug_tf(args):
+    """`IntensityAugConfig` for the TF post-process (--intensity-aug-device tf), else None."""
+    if intensity_aug_device(args) == "tf" and not args.overfit_one_group:
+        return P.IntensityAugConfig()
+    return None
 
 
 def args_to_dict(args):

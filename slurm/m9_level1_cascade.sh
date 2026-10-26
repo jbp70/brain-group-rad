@@ -25,7 +25,7 @@
 # --gradient-checkpointing full, --lean-sampler true, --split-group-conv true, T 7, --min-pairs n
 # (deform N 4 -> 4 pairs as a random 4-cycle; linear N 8 -> 8 pairs, an 8-cycle), p 0.1 / 0.1,
 # Dice + LNCC 1/1, smoothness 0.5, --task-grad-norm 12, G 45 deg / 10 mm from step 0, curriculum
-# off, skip 0 (SKIP_PROB; design D6, to be confirmed with Jay), --val-pair-chunk 4.
+# off, skip 0 (SKIP_PROB; design D6, to be confirmed with Jay), validation chunks below.
 # Validation group sizes follow N / DEFORM_N (the validation group-size flag is deliberately not
 # passed, it would override both).
 # After main.py, check_mixed_run.py checks the run dir (3-stage cascade provenance, _frozen and
@@ -40,6 +40,30 @@
 # Estimated mean step at 1:1:2 ~11.3 s on the RTX 8000 (deform ~18 s, linear ~4.5 s).
 # If the RTX 8000 smoke OOMs (peak > ~46 GiB): rerun the smoke with LEAN_LOSSES=true; if that
 # still fails, MIN_PAIRS=1 and report to Jay.
+#
+# Process memory (job 10517362, scratch/m9_oom_diag/10517362/, report
+# .agents/tasks/m9-level1-oom/report.md): DALI holds ~14 GB of device memory WITH intensity
+# augmentation (rigid N 8 + affine N 8 + deform N 4, prefetch 1) and ~4.5 GB without it. So:
+#   INTENSITY_AUG_DEVICE (default tf): --intensity-aug-device; 'tf' runs the same augmentation in
+#     the TF post-process (DALI without it, ~9.5 GB freed; TF transient ~0.5 GiB before the
+#     forward). 'dali' = the old placement.
+#   TF_MEM_LIMIT_MB (default 40000): fixed TF memory limit (--gpu-memory-limit-mb) instead of
+#     memory growth (BFC fragmentation under growth OOMed at 46.3 GB process total). 0 = growth.
+#     RTX 8000: 46080 MiB usable - CUDA context ~500 - DALI without aug ~4600 - >= 1024 headroom
+#     outside TF (cuBLAS / cuDNN handles, DALI pool growth) = 39956 -> 40000.
+#     A100 40 GB: 40536 - 500 - 4600 - 1024 = 34412 -> TF_MEM_LIMIT_MB=34000 (A100 line below).
+#     INTENSITY_AUG_DEVICE=dali with TF_MEM_LIMIT_MB > 30000 exits 2: DALI needs ~14 GB then and
+#     a 38000 MB limit already failed at cuBLAS handle creation (job 10517362).
+#   PAIR_RECOMPUTE (default true): --pair-recompute; each sampled deform pair's warp + pairwise
+#     Dice + pairwise LNCC under tf.recompute_grad, one pair alive at a time (job 10517366: 4
+#     pairs OOMed at the 40000 MB limit on the [4,160,224,192,19] one-hot gather; 1 pair ~30.7 GB).
+#   VAL_IMAGE_CHUNK (default 1) / VAL_PAIR_CHUNK (default 1): --val-image-chunk / --val-pair-chunk;
+#     the deform validation metrics one image / one pair at a time (job 10517503: the first deform
+#     step AFTER an unchunked validation pass (~22 GB, 600 s) OOMed inside the fixed 40000 MB region
+#     = fragmentation by the large, differently shaped validation tensors). 0 = unchunked.
+#   BN_RECAL_VALIDATE (default false): --bn-recal-validate; skips the bnrecal_pre / bnrecal_post
+#     validation passes (~20 min per fresh run at level 1); the recalibration itself still runs and
+#     the checker's bn_gap INFO lines are then simply absent.
 #
 # A100 rule: -p dgx-a100 ONLY if the smoke's 'INFO gpu_peak' line says it fits the 36 GiB
 # budget (peak <= 36 GiB); same 3 CPUs / --mem=64G. Otherwise keep rtx8000.
@@ -81,7 +105,7 @@
 #     1.3 x (8000 x 11.3 + 16 x 300 + 1000) ~ 1.3 x 96200 s ~ 35 h -> --time 48:00:00.
 #   RUN_NAME=m9_level1_cascade sbatch --job-name=m9long --time=48:00:00 --mem=64G slurm/m9_level1_cascade.sh
 #   A100 (only if the smoke peak <= 36 GiB; ~1.5x faster, ~24 h):
-#   RUN_NAME=m9_level1_cascade sbatch -p dgx-a100 --job-name=m9long --time=36:00:00 --mem=64G slurm/m9_level1_cascade.sh
+#   TF_MEM_LIMIT_MB=34000 RUN_NAME=m9_level1_cascade sbatch -p dgx-a100 --job-name=m9long --time=36:00:00 --mem=64G slurm/m9_level1_cascade.sh
 # Resume plan: checkpoints every 250 steps (CKPT_EVERY, ~47 min at 11.3 s). If the job hits
 # --time, fails or is preempted, resubmit the identical line with the same RUN_NAME (Jay's
 # approval; at most two active jobs): --resume (default true) restores ckpt/last, both frozen
@@ -115,7 +139,35 @@ SKIP_PROB="${SKIP_PROB:-0}"
 MIN_PAIRS="${MIN_PAIRS:-n}"
 LEAN_LOSSES="${LEAN_LOSSES:-false}"
 PREFETCH="${PREFETCH:-1}"
+INTENSITY_AUG_DEVICE="${INTENSITY_AUG_DEVICE:-tf}"
+TF_MEM_LIMIT_MB="${TF_MEM_LIMIT_MB:-40000}"
+PAIR_RECOMPUTE="${PAIR_RECOMPUTE:-true}"
+VAL_IMAGE_CHUNK="${VAL_IMAGE_CHUNK:-1}"
+VAL_PAIR_CHUNK="${VAL_PAIR_CHUNK:-1}"
+BN_RECAL_VALIDATE="${BN_RECAL_VALIDATE:-false}"
 EXTRA_ARGS="${EXTRA_ARGS:-}"
+
+case "$INTENSITY_AUG_DEVICE" in
+    dali|tf) ;;
+    *) echo "ERROR: INTENSITY_AUG_DEVICE must be dali or tf, got '$INTENSITY_AUG_DEVICE'" >&2; exit 2 ;;
+esac
+case "$TF_MEM_LIMIT_MB" in ''|*[!0-9]*) echo "ERROR: TF_MEM_LIMIT_MB must be a non-negative integer (MB), got '$TF_MEM_LIMIT_MB'" >&2; exit 2;; esac
+case "$VAL_IMAGE_CHUNK" in ''|*[!0-9]*) echo "ERROR: VAL_IMAGE_CHUNK must be a non-negative integer, got '$VAL_IMAGE_CHUNK'" >&2; exit 2;; esac
+case "$VAL_PAIR_CHUNK" in ''|*[!0-9]*|0) echo "ERROR: VAL_PAIR_CHUNK must be an integer >= 1, got '$VAL_PAIR_CHUNK'" >&2; exit 2;; esac
+case "$BN_RECAL_VALIDATE" in
+    true|false) ;;
+    *) echo "ERROR: BN_RECAL_VALIDATE must be true or false, got '$BN_RECAL_VALIDATE'" >&2; exit 2 ;;
+esac
+case "$PAIR_RECOMPUTE" in
+    true|false) ;;
+    *) echo "ERROR: PAIR_RECOMPUTE must be true or false, got '$PAIR_RECOMPUTE'" >&2; exit 2 ;;
+esac
+if [ "$INTENSITY_AUG_DEVICE" = "dali" ] && [ "$TF_MEM_LIMIT_MB" -gt 30000 ]; then
+    echo "ERROR: INTENSITY_AUG_DEVICE=dali needs ~14 GB of DALI memory; TF_MEM_LIMIT_MB $TF_MEM_LIMIT_MB leaves no room (use <= 30000, 0 = growth, or INTENSITY_AUG_DEVICE=tf)" >&2
+    exit 2
+fi
+MEM_ARGS=""
+if [ "$TF_MEM_LIMIT_MB" -gt 0 ]; then MEM_ARGS="--gpu-memory-limit-mb $TF_MEM_LIMIT_MB"; fi
 
 case "$N" in ''|*[!0-9]*) echo "ERROR: N (linear group size) must be an integer, got '$N'" >&2; exit 2;; esac
 case "$DEFORM_N" in ''|*[!0-9]*) echo "ERROR: DEFORM_N must be an integer, got '$DEFORM_N'" >&2; exit 2;; esac
@@ -156,6 +208,8 @@ echo "host $(hostname) | job $JOB_ID | repo $(git rev-parse --short HEAD 2>/dev/
 nvidia-smi --query-gpu=index,name,memory.used,memory.total --format=csv,noheader 2>/dev/null || true
 echo "run $RUN_NAME | level 1 | steps $STEPS | val every $VAL_EVERY | ckpt every $CKPT_EVERY | warmup $WARMUP | N $N | deform N $DEFORM_N"
 echo "cascade from $CASCADE_FROM | grad balance $GRAD_BALANCE ($BAL_ARGS) | bn recal $BN_RECAL_BATCHES (freeze $BN_RECAL_FREEZE) | skip $SKIP_PROB | min pairs $MIN_PAIRS | lean losses $LEAN_LOSSES | prefetch $PREFETCH"
+echo "intensity aug device $INTENSITY_AUG_DEVICE | tf memory limit ${TF_MEM_LIMIT_MB} MB (0 = growth) | pair recompute $PAIR_RECOMPUTE"
+echo "val image chunk $VAL_IMAGE_CHUNK | val pair chunk $VAL_PAIR_CHUNK | bn recal validate $BN_RECAL_VALIDATE"
 
 rc=0
 # shellcheck disable=SC2086  # BAL_ARGS / EXTRA_ARGS are split on purpose
@@ -168,10 +222,12 @@ singularity exec --nv -B /scratch -B /autofs -B /cluster -B /space -B /vast "$SI
     --p-pair 0.1 --p-pdice 0.1 --min-pairs "$MIN_PAIRS" \
     --bn-recal-batches "$BN_RECAL_BATCHES" --bn-recal-freeze "$BN_RECAL_FREEZE" --cascade-skip-prob "$SKIP_PROB" \
     --amp true --gradient-checkpointing full --lean-sampler true --split-group-conv true \
-    --lean-losses "$LEAN_LOSSES" --val-pair-chunk 4 \
+    --lean-losses "$LEAN_LOSSES" --val-pair-chunk "$VAL_PAIR_CHUNK" --val-image-chunk "$VAL_IMAGE_CHUNK" \
+    --bn-recal-validate "$BN_RECAL_VALIDATE" \
     --global-transform true --global-rot-max-deg 45 --global-trans-max-mm 10 \
     --global-start-step 0 --global-ramp-steps 0 --curriculum false --val-png true \
     --num-threads "${SLURM_CPUS_PER_TASK:-3}" --prefetch "$PREFETCH" --log-every 25 --log-backend jsonl \
+    --intensity-aug-device "$INTENSITY_AUG_DEVICE" --pair-recompute "$PAIR_RECOMPUTE" $MEM_ARGS \
     $EXTRA_ARGS </dev/null || rc=$?
 echo "main.py exit code $rc $(date -Is)"
 if [ "$rc" -ne 0 ]; then

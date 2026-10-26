@@ -355,9 +355,94 @@ def pair_ncc_loss(images, disp, pair_i, pair_j, fg_moved, fg_target, window, eps
     return tf.reduce_mean(1.0 - ncc), ncc
 
 
+def pair_terms_recompute(onehot, u, u_inv, pair_i, pair_j, n_pairs, images=None, window=None,
+                         eps=1e-5, ncc_eps=NCC_EPS, lean_sampler=False, lean_losses=False):
+    """Pairwise soft Dice (and LNCC with ``images``) one pair at a time (--pair-recompute).
+
+    Per sampled pair p (static Python loop over ``n_pairs``, which must equal the pair count):
+    disp_p = compose(u_i, u_inv_j), moved one-hot / image = warp(x_i, disp_p), soft Dice vs
+    one-hot_j and (``images``) LNCC vs image_j over the ROI of max(fg(moved), fg(one-hot_j)), all
+    under ONE tf.recompute_grad block. The blocks form a chain: block p takes (u, u_inv) as passed
+    through by block p - 1 (identity outputs, listed first) plus the pair indices as floats, and
+    gathers u_i / u_inv_j inside (the one-hot / images are captured, so they get no input
+    gradient). Hence (1) the forwards run in order, (2) block p - 1's backward recomputation waits
+    for block p's input gradient (recompute_grad's data dependency is on the first output's
+    gradient), and (3) the gradient of u / u_inv is accumulated densely along the chain instead of
+    one gathered slice per pair waiting for a final AddN. The recompute's pair indices get that
+    data dependency too, so the recomputed gathers are distinct ops from the forward ones (Grappler
+    cannot merge them and keep the forward one-hot alive). Only one pair's intermediates are alive
+    at a time. Same values as `pair_dice_loss` /
+    `pair_ncc_loss`; everything float32. Returns (pdice loss, dice [P], ncc loss or None,
+    ncc [P] or None).
+    """
+    onehot = _float(onehot)
+    u = _float(u)
+    u_inv = tf.cast(u_inv, u.dtype)
+    n_pairs = int(n_pairs)
+    if n_pairs < 1:
+        raise ValueError("pair_terms_recompute needs n_pairs >= 1, got %d" % n_pairs)
+    pi = tf.ensure_shape(tf.reshape(tf.convert_to_tensor(pair_i), [-1]), [n_pairs])
+    pj = tf.ensure_shape(tf.reshape(tf.convert_to_tensor(pair_j), [-1]), [n_pairs])
+    with_ncc = images is not None
+    if with_ncc:
+        images = tf.cast(_as_volume(images), u.dtype)
+        window = check_ncc_window(window)
+
+    def block(uf, uif, ij):
+        out = pair_terms(uf, uif, ij)
+        # Pass-through FIRST: recompute_grad's backward data dependency uses the first output's
+        # gradient, i.e. the gradient arriving from the next pair's block.
+        return tf.identity(uf), tf.identity(uif), out
+
+    def pair_terms(uf, uif, ij):
+        idx = tf.cast(tf.round(ij), tf.int32)
+        i1, j1 = idx[:1], idx[1:2]
+        disp = diffeo.compose(tf.gather(uf, i1), tf.gather(uif, j1), lean=lean_sampler)
+        if lean_sampler:
+            moved = diffeo.warp(tf.gather(onehot, i1), disp, lean=True, lean_images_grad=False)
+        else:
+            moved = diffeo.warp(tf.gather(onehot, i1), disp)
+        target = tf.gather(onehot, j1)
+        dice = _soft_dice_lean(moved, target, eps) if lean_losses else soft_dice(moved, target, eps)
+        if not with_ncc:
+            return dice
+        if lean_sampler:
+            m_img = diffeo.warp(tf.gather(images, i1), tf.cast(disp, images.dtype), lean=True,
+                                lean_images_grad=False)
+        else:
+            m_img = diffeo.warp(tf.gather(images, i1), tf.cast(disp, images.dtype))
+        t_img = tf.gather(images, j1)
+        roi = ncc_roi(tf.maximum(foreground(moved), foreground(target)), window)
+        ncc = masked_mean(local_ncc(m_img, t_img, window, ncc_eps), roi)
+        return tf.concat([dice, ncc], axis=0)
+
+    run = tf.recompute_grad(block)
+    dices, nccs = [], []
+    uf, uif = u, u_inv
+    with tf.name_scope("pair_recompute"):
+        for p in range(n_pairs):
+            ij = tf.cast(tf.stack([pi[p], pj[p]]), u.dtype)
+            uf, uif, r = run(uf, uif, ij)
+            dices.append(r[:1])
+            if with_ncc:
+                nccs.append(r[1:2])
+        # The last block's pass-through must reach the loss so its backward gets a (zero) first
+        # output gradient: + s * z with z a data-dependent zero (a literal 0 * s would be removed
+        # by Grappler's constant folding).
+        s = tf.reduce_sum(uf[:1, :1, :1, :1, :1]) + tf.reduce_sum(uif[:1, :1, :1, :1, :1])
+        z = tf.where(tf.equal(s, s), tf.zeros_like(s), tf.ones_like(s))
+        dices[-1] = dices[-1] + s * z
+    dice = tf.concat(dices, axis=0)
+    pdice = tf.reduce_mean(1.0 - dice)
+    if not with_ncc:
+        return pdice, dice, None, None
+    ncc = tf.concat(nccs, axis=0)
+    return pdice, dice, tf.reduce_mean(1.0 - ncc), ncc
+
+
 def deform_loss(out, batch, lambda_pdice=1.0, lambda_smooth=0.5, smooth_order=1,
                 lambda_dice_tmpl=1.0, lambda_ncc_tmpl=0.0, lambda_ncc_pair=0.0, ncc_window=5,
-                lean_sampler=False, lean_losses=False):
+                lean_sampler=False, lean_losses=False, pair_recompute=False, n_pairs=None):
     """Total deformable loss from a model output (``u``, ``u_inv``) and a `DeformPostprocess`
     batch (``onehot``, ``pair_i``, ``pair_j``; ``images`` only when an LNCC weight is > 0).
 
@@ -367,7 +452,10 @@ def deform_loss(out, batch, lambda_pdice=1.0, lambda_smooth=0.5, smooth_order=1,
     choices). Memory knobs (milestone 9 design 3.3 / 3.4, default False = today's ops):
     ``lean_sampler`` = every warp uses the lean sampler (data volumes without an input
     gradient, the pairwise field composition with it); ``lean_losses`` = Dice without slices /
-    broadcast copies and LNCC under tf.recompute_grad.
+    broadcast copies and LNCC under tf.recompute_grad. ``pair_recompute`` (--pair-recompute,
+    default False = today's ops): the pairwise Dice / LNCC via `pair_terms_recompute`, one pair
+    alive at a time; ``n_pairs`` = the static pair count (default: the static length of
+    ``batch['pair_i']``). The template terms are unchanged.
     """
     lam_dt, lam_nt, lam_np = float(lambda_dice_tmpl), float(lambda_ncc_tmpl), float(lambda_ncc_pair)
     if (lam_nt > 0 or lam_np > 0) and "images" not in batch:
@@ -383,7 +471,19 @@ def deform_loss(out, batch, lambda_pdice=1.0, lambda_smooth=0.5, smooth_order=1,
     else:
         warped = diffeo.warp(onehot, u)
     tmpl, dice_t, template = template_dice_loss(warped, lean=bool(lean_losses))
-    if lam_np > 0:
+    pair_ncc = None
+    if pair_recompute:
+        if n_pairs is None:
+            n_pairs = batch["pair_i"].shape[0]
+        if n_pairs is None:
+            raise ValueError("deform_loss: pair_recompute needs a static pair count (n_pairs)")
+        pr_imgs = tf.cast(_float(batch["images"]), u.dtype) if lam_np > 0 else None
+        pdice, dice_p, np_loss_r, ncc_p_r = pair_terms_recompute(
+            onehot, u, u_inv, batch["pair_i"], batch["pair_j"], n_pairs, images=pr_imgs, window=ncc_window,
+            lean_sampler=bool(lean_sampler), lean_losses=bool(lean_losses))
+        if lam_np > 0:
+            pair_ncc = (np_loss_r, ncc_p_r)
+    elif lam_np > 0:
         disp = diffeo.pairwise_displacement(u, u_inv, batch["pair_i"], batch["pair_j"], lean=bool(lean_sampler))
         pdice, dice_p, moved_oh, target_oh = pair_dice_loss(onehot, u, u_inv, batch["pair_i"], batch["pair_j"],
                                                             disp=disp, return_moved=True, **lean_kw)
@@ -411,8 +511,11 @@ def deform_loss(out, batch, lambda_pdice=1.0, lambda_smooth=0.5, smooth_order=1,
         loss = loss + tf.constant(lam_nt, u.dtype) * nt_loss
         res.update(ncc_tmpl=tf.reduce_mean(ncc_t), ncc_tmpl_loss=nt_loss)
     if lam_np > 0:
-        np_loss, ncc_p = pair_ncc_loss(images, disp, batch["pair_i"], batch["pair_j"], foreground(moved_oh),
-                                       foreground(target_oh), ncc_window, **ncc_kw)
+        if pair_ncc is not None:
+            np_loss, ncc_p = pair_ncc
+        else:
+            np_loss, ncc_p = pair_ncc_loss(images, disp, batch["pair_i"], batch["pair_j"], foreground(moved_oh),
+                                           foreground(target_oh), ncc_window, **ncc_kw)
         loss = loss + tf.constant(lam_np, u.dtype) * np_loss
         res.update(ncc_pair=tf.reduce_mean(ncc_p), ncc_pair_loss=np_loss)
     res["loss"] = loss

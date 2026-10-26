@@ -25,7 +25,9 @@ BASH = shutil.which("bash")
 RECIPE_ENV = ("GRAD_BALANCE", "BN_RECAL_BATCHES", "BN_RECAL_FREEZE", "SKIP_PROB", "GRAD_CKPT", "AMP",
               "EXTRA_ARGS", "RUN_NAME", "STEPS", "VAL_EVERY", "WARMUP", "SLURM_JOB_ID", "N", "DEFORM_N",
               "CASCADE_FROM", "PROJ", "REPO", "RESULTS", "DATA", "SIF", "SCRATCH_ROOT", "TMPDIR", "SLURM_CPUS_PER_TASK",
-              "WIDTHS", "KNOBS", "MIN_PAIRS", "LEAN_LOSSES", "PREFETCH", "CKPT_EVERY")
+              "WIDTHS", "KNOBS", "MIN_PAIRS", "LEAN_LOSSES", "PREFETCH", "CKPT_EVERY",
+              "INTENSITY_AUG_DEVICE", "TF_MEM_LIMIT_MB", "PAIR_RECOMPUTE", "VAL_IMAGE_CHUNK", "VAL_PAIR_CHUNK",
+              "BN_RECAL_VALIDATE")
 
 
 def _read(path):
@@ -133,14 +135,19 @@ class TestStatic(unittest.TestCase):
                   "--time=04:00:00 --mem=64G slurm/m9_level1_cascade.sh",
                   "RUN_NAME=m9_level1_cascade sbatch --job-name=m9long --time=48:00:00 --mem=64G "
                   "slurm/m9_level1_cascade.sh",
-                  "RUN_NAME=m9_level1_cascade sbatch -p dgx-a100 --job-name=m9long --time=36:00:00 --mem=64G "
-                  "slurm/m9_level1_cascade.sh",
+                  "TF_MEM_LIMIT_MB=34000 RUN_NAME=m9_level1_cascade sbatch -p dgx-a100 --job-name=m9long "
+                  "--time=36:00:00 --mem=64G slurm/m9_level1_cascade.sh",
                   "grad_balance KEEP task-grad-norm", "FALLBACK", "UNDECIDED", "PREFETCH=2", "MaxRSS > 56 GB",
-                  "--mem=96G", "36 GiB", "31.0 GB, 15.6 s/step", "git pull", "Resume plan"):
+                  "--mem=96G", "36 GiB", "31.0 GB, 15.6 s/step", "git pull", "Resume plan",
+                  "job 10517362", "INTENSITY_AUG_DEVICE (default tf)", "TF_MEM_LIMIT_MB (default 40000)",
+                  "46080 MiB usable - CUDA context ~500 - DALI without aug ~4600", "34412",
+                  "PAIR_RECOMPUTE (default true)", "job 10517366", "VAL_IMAGE_CHUNK (default 1)",
+                  "BN_RECAL_VALIDATE (default false)", "job 10517503"):
             self.assertIn(k, header, k)
         body = text[re.search(r"(?m)^case ", text).start():]
         for var in ("BN_RECAL_BATCHES", "SKIP_PROB", "MIN_PAIRS", "LEAN_LOSSES", "PREFETCH", "GRAD_BALANCE",
-                    "N", "DEFORM_N", "CASCADE_FROM"):
+                    "N", "DEFORM_N", "CASCADE_FROM", "INTENSITY_AUG_DEVICE", "TF_MEM_LIMIT_MB", "PAIR_RECOMPUTE",
+                    "VAL_IMAGE_CHUNK", "VAL_PAIR_CHUNK", "BN_RECAL_VALIDATE"):
             self.assertNotIn("${%s:-" % var, body, var)
         for flag in ("--filters", "--decoder-widths", "--integration-steps", "--val-group-size"):
             self.assertNotIn(flag, body, flag)
@@ -268,11 +275,14 @@ class TestStubRuns(unittest.TestCase):
         self.assertEqual(main[1], "main.py")
         for seq in (["--level", "1"], ["--cascade-from", os.path.join(self.tmp, "ckpt")], ["--group-size", "8"],
                     ["--deform-group-size", "4"], ["--min-pairs", "n"], ["--gradient-checkpointing", "full"],
-                    ["--val-pair-chunk", "4"], ["--task-grad-norm", "12"], ["--amp", "true"],
+                    ["--val-pair-chunk", "1"], ["--val-image-chunk", "1"], ["--bn-recal-validate", "false"],
+                    ["--task-grad-norm", "12"], ["--amp", "true"],
                     ["--lean-sampler", "true"], ["--split-group-conv", "true"], ["--lean-losses", "false"],
                     ["--prefetch", "1"], ["--ckpt-every", "250"], ["--bn-recal-batches", "64"],
                     ["--cascade-skip-prob", "0"], ["--task-ratio", "rigid:1,affine:1,deform:2"],
-                    ["--p-pair", "0.1", "--p-pdice", "0.1"], ["--num-threads", "3"]):
+                    ["--p-pair", "0.1", "--p-pdice", "0.1"], ["--num-threads", "3"],
+                    ["--intensity-aug-device", "tf"], ["--gpu-memory-limit-mb", "40000"],
+                    ["--pair-recompute", "true"]):
             self.assertTrue(self._has_seq(main, seq), seq)
         for flag in ("--filters", "--decoder-widths", "--integration-steps", "--task-loss-weights",
                      "--val-group-size"):
@@ -298,6 +308,28 @@ class TestStubRuns(unittest.TestCase):
         self.assertTrue(self._has_seq(main, ["--min-pairs", "1"]))
         self.assertTrue(self._has_seq(self._args(calls[1]), ["--expect-min-pairs", "1"]))
         for env in (dict(MIN_PAIRS="x"), dict(DEFORM_N="abc"), dict(N="1.5"), dict(GRAD_BALANCE="other")):
+            r, calls = self.run_script(M9L1, **self.l1_env(**env))
+            self.assertEqual(r.returncode, 2, (env, r.stderr))
+            self.assertIsNone(calls)
+
+    def test_m9_level1_memory_recipe(self):
+        """TF_MEM_LIMIT_MB / INTENSITY_AUG_DEVICE / PAIR_RECOMPUTE overrides and their guards."""
+        self._m9_stub()
+        r, calls = self.run_script(M9L1, **self.l1_env(TF_MEM_LIMIT_MB="0"))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("--gpu-memory-limit-mb", self._args(calls[0]))
+        r, calls = self.run_script(M9L1, **self.l1_env(INTENSITY_AUG_DEVICE="dali", TF_MEM_LIMIT_MB="28000",
+                                                       PAIR_RECOMPUTE="false", VAL_IMAGE_CHUNK="0",
+                                                       VAL_PAIR_CHUNK="4", BN_RECAL_VALIDATE="true"))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        main = self._args(calls[0])
+        for seq in (["--intensity-aug-device", "dali"], ["--gpu-memory-limit-mb", "28000"],
+                    ["--pair-recompute", "false"], ["--val-image-chunk", "0"], ["--val-pair-chunk", "4"],
+                    ["--bn-recal-validate", "true"]):
+            self.assertTrue(self._has_seq(main, seq), seq)
+        for env in (dict(INTENSITY_AUG_DEVICE="dali"), dict(INTENSITY_AUG_DEVICE="gpu"),
+                    dict(TF_MEM_LIMIT_MB="4e4"), dict(PAIR_RECOMPUTE="yes"), dict(VAL_IMAGE_CHUNK="-1"),
+                    dict(VAL_PAIR_CHUNK="0"), dict(BN_RECAL_VALIDATE="no")):
             r, calls = self.run_script(M9L1, **self.l1_env(**env))
             self.assertEqual(r.returncode, 2, (env, r.stderr))
             self.assertIsNone(calls)

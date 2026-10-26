@@ -216,6 +216,75 @@ class TestMinPairs(_Base):
             w1.replace(min_pairs="x")
 
 
+class TestDaliTerm(_Base):
+    """tf-intensity-aug: DALI device-memory term (calibration job 10517362) and the budgets."""
+
+    def test_calibration_points_and_scaling(self):
+        d = MM.dali_memory(1, {"rigid": 8, "affine": 8, "deform": 4}, "dali")
+        self.assertAlmostEqual(d["total_gib"], 14.0, places=6)
+        for t, want in (("rigid", 5.6), ("affine", 5.6), ("deform", 2.8)):
+            self.assertAlmostEqual(d["per_pipeline"][t], want, places=6)
+        self.assertAlmostEqual(MM.dali_memory(1, None, "tf")["total_gib"], 4.5, places=6)
+        self.assertAlmostEqual(MM.dali_memory(1, None, "off")["total_gib"], 4.5, places=6)
+        self.assertAlmostEqual(MM.dali_memory(2, {"rigid": 16, "affine": 16, "deform": 8}, "dali")["total_gib"],
+                               3.5, places=6)
+        self.assertAlmostEqual(MM.dali_memory(4, {"rigid": 32, "affine": 32, "deform": 16}, "dali")["total_gib"],
+                               0.875, places=6)
+        self.assertIn("10517362", d["calibration"])
+        with self.assertRaises(ValueError):
+            MM.dali_memory(1, None, "gpu")
+        with self.assertRaises(ValueError):
+            MM.dali_memory(1, {"bogus": 2}, "tf")
+
+    def test_predict_and_feasible_budget(self):
+        w = MM.level1_workload("default", 2, 7, LS)
+        p0 = MM.predict(w, self.co, 0.15)
+        p1 = MM.predict(w, self.co, 0.15, dali_gib=0.0)
+        for k in ("peak_gib", "feasible_44", "feasible_36", "val_peak_gib", "phases"):
+            self.assertEqual(p0[k], p1[k], k)
+        self.assertEqual(p0["dali_gib"], 0.0)
+        self.assertEqual(p0["total_gib"], p0["peak_gib"])
+        m = 0.15
+        room = MM.BUDGET_GIB - p0["peak_gib"] * (1 + m)
+        self.assertTrue(MM.feasible(p0, m, MM.BUDGET_GIB)[0])
+        p2 = MM.predict(w, self.co, m, dali_gib=room + 0.5)
+        self.assertEqual(p2["peak_gib"], p0["peak_gib"])
+        self.assertAlmostEqual(p2["total_gib"], p2["peak_gib"] + room + 0.5)
+        self.assertFalse(MM.feasible(p2, m, MM.BUDGET_GIB)[0])
+        self.assertFalse(p2["feasible_44"])
+        p3 = MM.predict(w, self.co, m, dali_gib=max(room - 0.5, 0.0))
+        self.assertEqual(MM.feasible(p3, m, MM.BUDGET_GIB)[0], room > 0.5 and p0["feasible_44"])
+
+    def test_cli_dali_flag(self):
+        cli = _load_cli()
+        outs = {}
+        for dali in ("none", "tf"):
+            tmp = tempfile.mkdtemp(prefix="mm_dali_")
+            try:
+                path = os.path.join(tmp, "p.json")
+                buf = io.StringIO()
+                old = sys.stdout
+                sys.stdout = buf
+                try:
+                    rc = cli.main(["predict", "--level", "1", "--n", "4", "--checkpointing", "full", "--amp", "true",
+                                   "--lean-sampler", "true", "--split-group-conv", "true", "--cascade", "chain42",
+                                   "--dali", dali, "--out", path])
+                finally:
+                    sys.stdout = old
+                self.assertEqual(rc, 0)
+                with open(path) as f:
+                    outs[dali] = json.load(f)
+                if dali == "tf":
+                    self.assertIn("DALI 4.50 GiB (aug device tf", buf.getvalue())
+            finally:
+                shutil.rmtree(tmp, ignore_errors=True)
+        a, b = outs["none"], outs["tf"]
+        self.assertIsNone(a["dali"])
+        self.assertAlmostEqual(b["dali_gib"], 4.5, places=6)
+        diff = sorted(k for k in a if a[k] != b[k])
+        self.assertTrue(set(diff) <= {"dali", "dali_gib", "total_gib", "feasible_44", "feasible_36"}, diff)
+
+
 class TestPresets(unittest.TestCase):
     def test_uniform_and_counts(self):
         for name, m in WP.UNIFORM_FACTORS.items():

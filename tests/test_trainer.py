@@ -32,7 +32,7 @@ from runtime import metrics as M
 from runtime import optimizers as O
 from runtime.logging import RunLogger, make_run_dir
 from runtime.run import (DEFORM_BEST_METRIC, DEFORM_DIAG_KEYS, DEFORM_LOSS_KEYS, DEFORM_NCC_KEYS, DIAG_KEYS,
-                         ENC_GRAD_KEYS, PAIR_COUNT_KEY, TASK_GRAD_NORM_EPS, TASK_GRAD_NORM_KEYS,
+                         ENC_GRAD_KEYS, PAIR_COUNT_KEY, POSTPROCESS_SEED_OFFSET, TASK_GRAD_NORM_EPS, TASK_GRAD_NORM_KEYS,
                          TaskSchedule, Trainer, TrainConfig, collapse_diagnostics, scale_gradients,
                          task_grad_norm_scale)
 from runtime.schedulers import ScheduleConfig
@@ -905,6 +905,49 @@ class TestMinPairsTrainer(DeformCase):
             self.assertEqual(m1[k], mn[k], k)
         with self.assertRaises(ValueError):
             self.make_deform(config(task_ratio=ratio, min_pairs="x"))
+
+
+class TestTFIntensityAug(DeformCase):
+    """--intensity-aug-device tf: TrainConfig.intensity_aug_tf reaches every post-process, its
+    generators are checkpointed (only then) and resume continues their stream."""
+
+    def test_checkpoint_keys(self):
+        ratio = {"rigid": 1.0, "deform": 1.0}
+        tr = self.make_deform(config(task_ratio=ratio))
+        self.assertEqual(sorted(tr.checkpoint_variables()), ["postprocess_deform", "postprocess_rigid"])
+        free_memory()
+        tr = self.make_deform(config(task_ratio=ratio, intensity_aug_tf=P.IntensityAugConfig()))
+        self.assertEqual(sorted(tr.checkpoint_variables()),
+                         ["postprocess_deform", "postprocess_deform_aug", "postprocess_rigid",
+                          "postprocess_rigid_aug"])
+        for t, pp in tr.postprocess.items():
+            self.assertIsNotNone(pp.intensity_aug, t)
+
+    def test_steps_finite_and_resume_continues_aug_stream(self):
+        cfg = config(task_ratio={"rigid": 1.0, "deform": 1.0}, intensity_aug_tf=P.IntensityAugConfig())
+        paths = make_run_dir(self.tmp, "tfaug")
+
+        def with_ckpt(tr):
+            tr.checkpoint = C.RunCheckpoint(paths["ckpt_last"], paths["ckpt_best"], tr.model, tr.optimizer,
+                                            tr.step, extra=tr.checkpoint_variables())
+            return tr
+
+        tr = with_ckpt(self.make_deform(cfg))
+        for task, batch in (("rigid", self.groups["rigid"]["batch"]), ("deform", self.dgroup["batch"])):
+            res = tr.train_step(task, batch)
+            self.assertTrue(res["finite"], task)
+            self.assertTrue(np.isfinite(float(res["loss"])), task)
+        tr.fit(3)
+        states = {t: pp.aug_generator.state.numpy().copy() for t, pp in tr.postprocess.items()}
+        for t in states:                    # the stream advanced (2 + fit steps)
+            start = tf.random.Generator.from_seed(
+                cfg.seed + POSTPROCESS_SEED_OFFSET[t] + P.INTENSITY_AUG_SEED_OFFSET).state.numpy()
+            self.assertFalse(np.array_equal(states[t], start), t)
+        free_memory()
+        tr2 = with_ckpt(self.make_deform(cfg))
+        self.assertTrue(tr2.checkpoint.restore_last())
+        for t, pp in tr2.postprocess.items():
+            np.testing.assert_array_equal(pp.aug_generator.state.numpy(), states[t], t)
 
 
 class TestThreeTasks(DeformCase):

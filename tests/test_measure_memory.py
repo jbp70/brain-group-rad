@@ -276,6 +276,12 @@ class TestIsolate(unittest.TestCase):
         self.assertEqual(argv[argv.index("--min-pairs") + 1], "1")
         argv = mlm.child_argv(a, _m9_record(min_pairs="n"), False)
         self.assertEqual(argv[argv.index("--min-pairs") + 1], "n")
+        # --pair-recompute (tf-intensity-aug addendum): 'false' for records without it
+        self.assertEqual(argv[argv.index("--pair-recompute") + 1], "false")
+        argv = mlm.child_argv(a, _m9_record(pair_recompute=True), False)
+        self.assertEqual(argv[argv.index("--pair-recompute") + 1], "true")
+        self.assertIn("pair_recompute", mlm.KEY_FIELDS)
+        self.assertEqual(mlm.config_key(_m9_record()), mlm.config_key(_m9_record(pair_recompute=False)))
 
 
 def _m9_record(**kw):

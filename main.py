@@ -152,7 +152,10 @@ def _build_dali_data(args, level, tf_mods, start_step=0):
     start, so the first prefetched batches of a resumed run already use its ranges and G)."""
     fd, P, tfm, postprocess, dm = tf_mods
     ranges = A.ranges_from_args(args)
-    aug = P.IntensityAugConfig() if args.intensity_aug else P.IntensityAugConfig.off()
+    # --intensity-aug-device tf: DALI without intensity augmentation; the TF post-process runs it
+    # (TrainConfig.intensity_aug_tf, A.train_config_from_args).
+    aug_device = A.intensity_aug_device(args)
+    aug = P.IntensityAugConfig() if aug_device == "dali" else P.IntensityAugConfig.off()
     controls = A.task_controls_from_args(args)
     control_kw = {}
     if controls:
@@ -190,7 +193,7 @@ def _build_dali_data(args, level, tf_mods, start_step=0):
         val_sets[A.DEFORM_TASK] = fd.DeformValidationSet.build(val_images_d, val_labels, level, nvd,
                                                                n_groups, seed=args.val_seed)
     S = postprocess.brain_S_matrix(level, data.template_dir)
-    desc = "DALI %d train files, %d val images" % (len(data.files), n_val)
+    desc = "DALI %d train files, %d val images; intensity aug %s" % (len(data.files), n_val, aug_device)
     return sources, val_sets, S, desc, controls
 
 
@@ -361,6 +364,7 @@ def main(argv=None):
             print(_init_weights_lines(init_info))
     elif args.resume and trainer.checkpoint.latest_last:
         C.check_config_compatible(paths["config"], model_cfg)
+        _check_intensity_aug_device(paths["config"], args)
         resumed = trainer.checkpoint.restore_last()
     config_extra = {"param_counts": dict(counts), "data": data_desc, "init_weights": init_info}
     if cascade_on:
@@ -396,7 +400,7 @@ def main(argv=None):
     if cascade_on and not cascade_resume and args.bn_recal_batches > 0:
         # Once, at the start of a fresh cascade run (never on a resume: the recalibrated
         # statistics come back with the checkpoint); then config.json again with the record.
-        recal = trainer.recalibrate_bn(args.bn_recal_batches, args.bn_recal_freeze)
+        recal = trainer.recalibrate_bn(args.bn_recal_batches, args.bn_recal_freeze, val=args.bn_recal_validate)
         C.write_config(paths["config"], model_cfg, A.args_to_dict(args),
                        extra=dict(config_extra, bn_recalibration=recal))
         if not args.quiet:
@@ -572,6 +576,24 @@ def _saved_cascade_config(path):
     if not (saved or {}).get("cascade"):
         raise RuntimeError("resume of a cascade run without config.json cascade: %s" % path)
     return saved
+
+
+def _check_intensity_aug_device(config_path, args):
+    """Resume guard: SystemExit if --intensity-aug-device (or whether the TF augmentation runs,
+    which adds the postprocess_<task>_aug generators to the checkpoint) differs from the run's
+    saved config.json args. A missing key (runs before the option) means 'dali'."""
+    if not os.path.exists(config_path):
+        return
+    with open(config_path) as f:
+        saved = (json.load(f).get("args") or {})
+    saved_dev = saved.get("intensity_aug_device", "dali")
+    saved_tf = bool(saved.get("intensity_aug", True)) and saved_dev == "tf"
+    cur_tf = A.intensity_aug_device(args) == "tf"
+    if saved_dev != args.intensity_aug_device or saved_tf != cur_tf:
+        raise SystemExit("main.py: --intensity-aug-device %s (TF augmentation %s) differs from the run's "
+                         "saved %s (TF augmentation %s) in %s; resume with the saved setting or start a "
+                         "new --run-name" % (args.intensity_aug_device, "on" if cur_tf else "off", saved_dev,
+                                             "on" if saved_tf else "off", config_path))
 
 
 FINGERPRINT_RTOL = 1e-12

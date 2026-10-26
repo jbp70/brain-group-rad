@@ -1,5 +1,11 @@
 """Post-DALI processing in TF (design 3.3), run in the train step outside the GradientTape.
 
+0. Intensity augmentation (optional, --intensity-aug-device tf; both classes): with an enabled
+   `IntensityAugConfig` the images (never labels) get the DALI intensity chain in TF
+   (`data_loading.tf_intensity_aug`) right after the float32 cast, before the flips, from a
+   separate generator ``aug_generator`` (seed + `params.INTENSITY_AUG_SEED_OFFSET`), so the
+   flip / pair stream of ``generator`` is the same as without it. None (default) builds no op.
+
 Matrix flow for one linear batch (group of N images):
 1. DALI emits forward matrices T_dali (and Rt_dali for rigid): 3x4, DALI axis order, DALI
    voxel coordinates (`data_loading.dali_loader`).
@@ -37,6 +43,7 @@ import numpy as np
 import tensorflow as tf
 
 from data_loading import params as P
+from data_loading import tf_intensity_aug as tfa
 from models import transforms as tfm
 
 
@@ -99,6 +106,17 @@ def num_pairs(n, p_pair=0.1, min_pairs="1"):
     return tf.minimum(tf.maximum(k, floor), total)
 
 
+def num_pairs_static(n, p_pair=0.1, min_pairs="1"):
+    """`num_pairs` as a Python int for a static group size n (float32 product, half to even,
+    like tf.round), e.g. for the --pair-recompute loop."""
+    _check_min_pairs(min_pairs)
+    n = int(n)
+    total = n * (n - 1)
+    k = int(np.round(np.float32(total) * np.float32(p_pair)))
+    floor = 1 if min_pairs == "1" else n
+    return min(max(k, floor), total)
+
+
 def sample_pairs(generator, n, p_pair=0.1, min_pairs="1"):
     """Sample distinct ordered pairs (i, j), i != j, without replacement. Returns int32 (i, j).
 
@@ -132,6 +150,13 @@ def sample_pairs(generator, n, p_pair=0.1, min_pairs="1"):
         return tf.cond(tf.equal(k, n), cycle, topk)
 
 
+def _intensity_aug_setup(cfg, seed):
+    """(config or None, aug generator or None): only an enabled config builds the generator."""
+    if cfg is None or not cfg.enabled:
+        return None, None
+    return cfg, tf.random.Generator.from_seed(int(seed) + P.INTENSITY_AUG_SEED_OFFSET)
+
+
 class LinearPostprocess:
     """Post-DALI processing of one rigid/affine batch.
 
@@ -145,10 +170,12 @@ class LinearPostprocess:
       target_iters: barycenter iterations for the targets (run to convergence).
       target_dtype: dtype of the target computation (float64 default; results are float32).
       pixel_center: DALI pixel-center convention (`params.DALI_PIXEL_CENTER`).
+      intensity_aug: `params.IntensityAugConfig` to run the intensity augmentation in TF (step 0,
+        own generator ``aug_generator``), or None (default: no op, ``aug_generator`` None).
 
     Call with the DALI outputs ``(images, T_dali[, Rt_dali])``; the rigid task requires Rt_dali.
     ``flip_axes`` overrides the random flip state (bool [3]). Returns a dict:
-      images   float32 [N, X, Y, Z, C] (flipped)
+      images   float32 [N, X, Y, Z, C] (intensity-augmented if configured, flipped)
       T_render float32 [N, 4, 4] mm, the full T_i (flipped): I_i(y) = I(T_render_i^-1 y)
       T_target float32 [N, 4, 4] mm, Rt_i (rigid) or T_i (affine) (flipped)
       A_star   float32 [N, 4, 4] barycentric targets of T_target (stop_gradient)
@@ -158,7 +185,8 @@ class LinearPostprocess:
     """
 
     def __init__(self, task, level, flip_prob=0.5, p_pair=0.1, seed=0, target_iters=10,
-                 target_dtype=tf.float64, pixel_center=P.DALI_PIXEL_CENTER, min_pairs="1"):
+                 target_dtype=tf.float64, pixel_center=P.DALI_PIXEL_CENTER, min_pairs="1",
+                 intensity_aug=None):
         if task not in P.TASKS:
             raise ValueError("task must be one of {}, got {!r}".format(P.TASKS, task))
         self.task = task
@@ -170,11 +198,14 @@ class LinearPostprocess:
         self.target_dtype = target_dtype
         self.pixel_center = float(pixel_center)
         self.generator = tf.random.Generator.from_seed(int(seed))
+        self.intensity_aug, self.aug_generator = _intensity_aug_setup(intensity_aug, seed)
 
     def __call__(self, images, t_dali, rt_dali=None, flip_axes=None):
         images = tf.convert_to_tensor(images)
         if images.dtype != tf.float32:
             images = tf.cast(images, tf.float32)
+        if self.intensity_aug is not None:   # Python switch: the default builds no op
+            images = tfa.augment_group(images, self.intensity_aug, self.aug_generator)
         t_mm = dali_to_mm(t_dali, self.level, self.pixel_center)
         if self.task == "rigid":
             if rt_dali is None:
@@ -220,6 +251,8 @@ class DeformPostprocess:
       n_classes: one-hot depth (train18 + background = `params.N_TRAIN_LABELS`).
       residual_affine: the pipeline emits T_dali (third output); then ``t_dali`` is required.
       pixel_center: DALI pixel-center convention.
+      intensity_aug: `params.IntensityAugConfig` (TF intensity augmentation of the images only,
+        step 0, own generator ``aug_generator``) or None (default: no op).
 
     Call with ``(images, labels[, t_dali])``; ``flip_axes`` overrides the random flip state.
     Returns dict: images float32 [N, X, Y, Z, C], labels int32 [N, X, Y, Z], onehot float32
@@ -228,7 +261,8 @@ class DeformPostprocess:
     """
 
     def __init__(self, level, flip_prob=0.5, p_pdice=0.1, seed=0, n_classes=P.N_TRAIN_LABELS,
-                 residual_affine=False, pixel_center=P.DALI_PIXEL_CENTER, min_pairs="1"):
+                 residual_affine=False, pixel_center=P.DALI_PIXEL_CENTER, min_pairs="1",
+                 intensity_aug=None):
         self.task = P.DEFORM_TASK
         self.level = P.check_level(level)
         self.flip_prob = np.broadcast_to(np.asarray(flip_prob, np.float32), (3,)).copy()
@@ -238,6 +272,7 @@ class DeformPostprocess:
         self.residual_affine = bool(residual_affine)
         self.pixel_center = float(pixel_center)
         self.generator = tf.random.Generator.from_seed(int(seed))
+        self.intensity_aug, self.aug_generator = _intensity_aug_setup(intensity_aug, seed)
 
     def __call__(self, images, labels, t_dali=None, flip_axes=None):
         if self.residual_affine and t_dali is None:
@@ -247,6 +282,8 @@ class DeformPostprocess:
         images = tf.convert_to_tensor(images)
         if images.dtype != tf.float32:
             images = tf.cast(images, tf.float32)
+        if self.intensity_aug is not None:   # Python switch: images only, never labels
+            images = tfa.augment_group(images, self.intensity_aug, self.aug_generator)
         labels = tf.cast(tf.convert_to_tensor(labels), tf.int32)
         if labels.shape.rank == 5:
             labels = labels[..., 0]

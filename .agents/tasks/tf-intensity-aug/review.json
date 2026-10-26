@@ -1,0 +1,12 @@
+{
+  "verdict": "APPROVED",
+  "findings": [
+    {"severity": "MEDIUM", "blocking": false, "confidence": "confirmed", "label": "A100 rule vs TF limit", "detail": "slurm/m9_level1_cascade.sh still allows dgx-a100 if the smoke gpu_peak <= 36 GiB, but the A100 line sets TF_MEM_LIMIT_MB=34000 (~33.2 GiB); a 34-36 GiB peak passes the rule and OOMs. Align the rule with the A100 TF limit (~33 GiB) or justify a higher limit."},
+    {"severity": "LOW", "blocking": false, "confidence": "confirmed", "label": "RTX 8000 headroom below stated 1 GiB", "detail": "46080 - 500 - 4600 - 40000 = 980 MiB, but the comment claims >= 1024 and rounds 39956 up. Round down (e.g. 39900) or state that 40000 was validated empirically (job 10517503)."},
+    {"severity": "LOW", "blocking": false, "confidence": "confirmed", "label": "m8 comment overstates level-2 saving", "detail": "'~3.5 GB less DALI memory at level 2' is the total DALI estimate with aug; the model's saving is ~2.4 GiB (3.50 - 1.13)."},
+    {"severity": "LOW", "blocking": false, "confidence": "likely", "label": "Check m3 under-reports DALI memory", "detail": "DALI's device pool is retained after del pipe; m3 runs after m2 and measures aug_off after aug_on, so deltas will be ~0. Run m3 first in a fresh process (or one process per config) before using it for calibration."},
+    {"severity": "INFO", "blocking": false, "confidence": "confirmed", "label": "DALI equivalence not yet measured", "detail": "Check m (m1 ROI convention, m2 KS per op/full chain) is the only DALI-anchored evidence; run --checks m at levels 4 and 1 before the level-1 smoke and flip LOWRES_ROI if m1 selects another mode."},
+    {"severity": "NIT", "blocking": false, "confidence": "confirmed", "label": "Resume guard over-strict when aug is off", "detail": "With --intensity-aug false on both sides, a saved device 'tf' vs current 'dali' still raises SystemExit; compare only the effective device A.intensity_aug_device."}
+  ],
+  "reviewDoc": "d:\\Research\\Brain_Registration_Projects\\brain-group-rad\\.agents\\tasks\\tf-intensity-aug\\review.md"
+}

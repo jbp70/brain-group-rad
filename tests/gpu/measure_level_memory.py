@@ -69,6 +69,9 @@ written, tool-only convention: main.py's 0 means T = 0) is a grid axis.
 
 `--min-pairs` (comma list of 1 / n, default 1; milestone 9 phase 2) is a grid axis: the training
 pair-count floor (`TrainConfig.min_pairs`), also passed to the memory-model Workload.
+`--pair-recompute` (true / false, default false; tf-intensity-aug addendum) sets
+`TrainConfig.pair_recompute` for the deform configurations (record field pair_recompute; old
+records read as false). The memory model has no term for it (its prediction stays the default path).
 
 Predictions: `predicted_peak_mb`, `predicted_phase`, `pred_over_meas` (= predicted / measured
 peak), `largest_tensor_elems`, `largest_tensor_desc` from `models.memory_model.predict` (margin
@@ -299,6 +302,7 @@ def measure(base, warmup_steps, steps, val_pass, seed=0):
                       lambda_ncc_tmpl=float(base["lambda_ncc_tmpl"]),
                       lambda_ncc_pair=float(base["lambda_ncc_pair"]),
                       val_pair_chunk=int(base["val_pair_chunk"]), min_pairs=str(base.get("min_pairs", "1")),
+                      pair_recompute=bool(base.get("pair_recompute", False)),
                       lean_sampler=bool(base["lean_sampler"]), lean_losses=bool(base["lean_losses"]),
                       schedule=ScheduleConfig("constant", base_lr=3e-4, total_steps=total + 1,
                                               warmup_steps=0))
@@ -445,7 +449,7 @@ def predicted_fields(base, gpu, coeffs):
 # ----------------------------------------------------------------------------- merge + write
 KEY_FIELDS = ("level", "task", "n", "widths", "cascade", "gradient_checkpointing", "amp",
               "lambda_ncc_tmpl", "lambda_ncc_pair", "integration_steps", "lean_sampler", "lean_losses",
-              "split_group_conv", "val_pair_chunk", "cascade_kind", "min_pairs")
+              "split_group_conv", "val_pair_chunk", "cascade_kind", "min_pairs", "pair_recompute")
 
 
 def _resolved_t(r):
@@ -463,6 +467,8 @@ def _key_value(r, k):
         return r.get(k, False)
     if k == "val_pair_chunk":
         return r.get(k, 16)
+    if k == "pair_recompute":
+        return bool(r.get(k, False))
     if k == "min_pairs":
         return r.get(k, "1")
     if k == "cascade_kind":
@@ -548,6 +554,7 @@ def child_argv(a, base, val_pass):
                "--warmup-steps", str(a.warmup_steps), "--steps", str(a.steps),
                "--gpu-memory-limit-mb", str(a.gpu_memory_limit_mb), "--coefficients", str(a.coefficients),
                "--min-pairs", str(base.get("min_pairs", "1")),
+               "--pair-recompute", _b(base.get("pair_recompute", False)),
                "--seed", str(a.seed), "--out", a.out])
 
 
@@ -625,6 +632,9 @@ def main(argv=None):
     ap.add_argument("--val-pass", default="false",
                     help="true: also measure one deform validation pass (deform configs only)")
     ap.add_argument("--val-pair-chunk", type=int, default=16, help="pair chunk of the validation pass (>= 1)")
+    ap.add_argument("--pair-recompute", default="false",
+                    help="true: --pair-recompute in the deform training step (one pair at a time under "
+                    "tf.recompute_grad; recorded as pair_recompute, deform configs only)")
     ap.add_argument("--min-pairs", default="1",
                     help="comma-separated 1/n: training pair-count floor (main.py --min-pairs; default 1)")
     ap.add_argument("--integration-steps", default="0",
@@ -682,6 +692,10 @@ def main(argv=None):
         val_pass = str2bool(a.val_pass)
     except ValueError as e:
         ap.error("--val-pass: %s" % e)
+    try:
+        str2bool(a.pair_recompute)
+    except ValueError as e:
+        ap.error("--pair-recompute: %s" % e)
     try:
         t_list = [int(x) for x in csv_list(a.integration_steps)]
     except ValueError:
@@ -744,7 +758,8 @@ def _run_ns(a, env, coeffs, family, task, w, casc, c, amp, T, ls, ll, sp, ns, va
                 "lambda_ncc_pair": a.lambda_ncc_pair, "integration_steps": T, "lean_sampler": ls,
                 "lean_losses": ll, "split_group_conv": sp, "val_pair_chunk": a.val_pair_chunk,
                 "cascade_kind": CASCADE_KINDS.get((a.level, bool(casc)), "none"),
-                "build_n": min(n, a.build_n), "min_pairs": mp}
+                "build_n": min(n, a.build_n), "min_pairs": mp,
+                "pair_recompute": bool(task == "deform" and str2bool(a.pair_recompute))}
         pred = predicted_fields(base, family, coeffs)
         if stop_at is not None:
             r = _null_record(base, "skipped", "%s at N = %d" % (stop_at[0].upper(), stop_at[1]))

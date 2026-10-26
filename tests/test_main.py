@@ -458,6 +458,78 @@ class TestResumeControlsAndWarmStart(MainCase):
         self.assertEqual(s["group_size"], 4)
 
 
+class TestIntensityAugDevice(MainCase):
+    """--intensity-aug-device: DALI config vs TrainConfig.intensity_aug_tf, the overfit parse
+    error and the resume guard (`main._check_intensity_aug_device`)."""
+
+    def build(self, extra):
+        from data_loading import params as P
+        from runtime import args as A
+        seen = {}
+
+        class FakeDM:
+            def __init__(self, *a, **kw):
+                seen.update(kw)
+                self.control_writers = {}
+                self.files, self.template_dir = ["f"], "t"
+
+            def iterator(self, task):
+                return iter(())
+
+        fd = _Stub(load_level_images=lambda *a, **k: (np.zeros((8,) + P.LEVEL_SHAPE[4] + (1,)), []),
+                   build_validation_sets=lambda *a, **k: {})
+        pp = _Stub(brain_S_matrix=lambda *a, **k: np.eye(4))
+        args = A.parse_args(["--data", self.tmp, "--results", self.tmp, "--run-name", "r"] + extra)
+        desc = M._build_dali_data(args, 4, (fd, P, None, pp, _Stub(LinearDataModule=FakeDM)))[3]
+        return args, seen["intensity_aug"], A.train_config_from_args(args), desc
+
+    def test_device_routing(self):
+        args, dali_cfg, tc, desc = self.build([])
+        self.assertEqual(args.intensity_aug_device, "dali")
+        self.assertTrue(dali_cfg.enabled)
+        self.assertIsNone(tc.intensity_aug_tf)
+        self.assertIn("intensity aug dali", desc)
+        _, dali_cfg, tc, desc = self.build(["--intensity-aug-device", "tf"])
+        self.assertFalse(dali_cfg.enabled)
+        self.assertTrue(tc.intensity_aug_tf.enabled)
+        self.assertIn("intensity aug tf", desc)
+        _, dali_cfg, tc, desc = self.build(["--intensity-aug", "false", "--intensity-aug-device", "tf"])
+        self.assertFalse(dali_cfg.enabled)
+        self.assertIsNone(tc.intensity_aug_tf)
+        self.assertIn("intensity aug off", desc)
+
+    def test_overfit_parse_error(self):
+        from runtime import args as A
+        with self.assertRaises(SystemExit):
+            A.parse_args(["--overfit-one-group", "--overfit-synthetic", "--intensity-aug-device", "tf"])
+        with self.assertRaises(SystemExit):
+            A.parse_args(["--data", self.tmp, "--intensity-aug-device", "gpu"])
+
+    def test_resume_guard(self):
+        from runtime import args as A
+        path = os.path.join(self.tmp, "config.json")
+
+        def write(saved_args):
+            with open(path, "w") as f:
+                json.dump({"args": saved_args}, f)
+
+        dali = A.parse_args(["--data", self.tmp])
+        tf_args = A.parse_args(["--data", self.tmp, "--intensity-aug-device", "tf"])
+        M._check_intensity_aug_device(os.path.join(self.tmp, "missing.json"), tf_args)   # no file: ok
+        write({"level": 4})                       # runs before the option = 'dali'
+        M._check_intensity_aug_device(path, dali)
+        with self.assertRaises(SystemExit) as cm:
+            M._check_intensity_aug_device(path, tf_args)
+        self.assertIn("--intensity-aug-device tf", str(cm.exception))
+        write({"intensity_aug_device": "tf", "intensity_aug": True})
+        M._check_intensity_aug_device(path, tf_args)
+        with self.assertRaises(SystemExit):
+            M._check_intensity_aug_device(path, dali)
+        off = A.parse_args(["--data", self.tmp, "--intensity-aug-device", "tf", "--intensity-aug", "false"])
+        with self.assertRaises(SystemExit):        # same device, but the aug generators differ
+            M._check_intensity_aug_device(path, off)
+
+
 class TestCascadeMain(MainCase):
     """Milestone 8: --cascade-from through main.py (overfit-synthetic, TINY widths, rigid only with
     the deform decoder built so both levels share the ModelConfig). Resume: tests/test_cascade.py T8."""
@@ -614,7 +686,18 @@ class TestLevel1CascadeErrors(MainCase):
         # Phase-2 memory knobs: the level-1 build pass (deform decoder) exceeds the 6000 MB cap in float32.
         knobs = ["--amp", "true", "--gradient-checkpointing", "full", "--lean-sampler", "true",
                  "--split-group-conv", "true", "--task-ratio", "rigid:1,deform:1", "--deform-residual-affine", "false"]
-        with self.assertRaises(SystemExit) as cm:
+        # The level-1 build pass only creates the variables (they do not depend on N), and this
+        # test checks the error routing after it. In the full local suite the eager level-1 deform
+        # build at N 2 OOMed inside the fragmented 6000 MB region (twice, tf-intensity-aug report),
+        # so the build runs with N 1 here (half the activations).
+        from unittest import mock
+        from models.group_net import GroupRegLevelModel
+        orig_build = GroupRegLevelModel.build_model
+
+        def small_build(model, n=1):
+            return orig_build(model, 1)
+
+        with self.assertRaises(SystemExit) as cm, mock.patch.object(GroupRegLevelModel, "build_model", small_build):
             M.main(common + knobs + ["--level", "1", "--cascade-from", src, "--run-name", "bad2"])
         msg = str(cm.exception.code)
         print("\n[level-1 cascade-from] %s" % msg[:200], file=sys.stderr)

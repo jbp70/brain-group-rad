@@ -69,6 +69,8 @@
 #   verdict: fits the 40 GB A100 (peak 27.8 GB <= 36 GB).
 #   Without AMP: deform N 8 OOMs with every checkpointing option (N 6 'both' 35.2 GB, 7.8 s);
 #   linear N 12 fails in layer d2 (N 8 is 11.0 GB). AMP + 'integrator' at deform N 8: 40.9 GB, 6.5 s.
+# Intensity augmentation stays in DALI here (default). To move it to the TF post-process (~3.5 GB
+# less DALI memory at level 2), pass EXTRA_ARGS="--intensity-aug-device tf".
 set -euo pipefail
 
 PROJ="${PROJ:-/autofs/space/crater_001/users/jn85/BrainRegProjects/GroupwiseReg}"

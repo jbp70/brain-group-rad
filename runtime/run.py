@@ -165,7 +165,7 @@ import tensorflow as tf
 
 from data_loading import dali_loader
 from data_loading import params as P
-from data_loading.postprocess import MIN_PAIRS, DeformPostprocess, LinearPostprocess
+from data_loading.postprocess import MIN_PAIRS, DeformPostprocess, LinearPostprocess, num_pairs_static
 from models import cascade as CS
 from models import diffeo
 from models import layers as L
@@ -453,6 +453,9 @@ class TrainConfig:
     # (16 = the milestone-6 value).
     cascade_skip_prob: float = 0.0
     val_pair_chunk: int = 16
+    # --val-image-chunk (level-1 validation memory): > 0 = the deform validation metrics are computed
+    # k images (and val_pair_chunk pairs) at a time (`_deform_errors_chunked`); 0 = unchunked (today).
+    val_image_chunk: int = 0
     # Memory knobs of the deform TRAINING step (milestone 9 design 3.3 / 3.4; validation keeps
     # today's paths): lean_sampler must equal the model's `lean_sampler` (checked in Trainer);
     # it is passed to compose_cascade and deform_loss; lean_losses to deform_loss.
@@ -461,6 +464,12 @@ class TrainConfig:
     # Minimum sampled training pairs per step for the pairwise losses (p_pair / p_pdice; design-m9-phase2
     # section 5): '1' = today, 'n' = the group size (k == N: random N-cycle). Validation unaffected.
     min_pairs: str = "1"
+    # TF-side intensity augmentation (--intensity-aug-device tf): a `params.IntensityAugConfig`
+    # passed to every post-process (DALI then runs without it), or None (default: no op).
+    intensity_aug_tf: Optional[object] = None
+    # --pair-recompute: the deform TRAINING step's pairwise Dice / LNCC one pair at a time under
+    # tf.recompute_grad (`losses.pair_terms_recompute`); False = today's ops. Validation unaffected.
+    pair_recompute: bool = False
 
 
 def _peak_gpu_mb():
@@ -572,13 +581,15 @@ class Trainer:
                 self.postprocess[t] = DeformPostprocess(
                     self.level, flip_prob=cfg.flip_prob, p_pdice=cfg.p_pdice,
                     seed=cfg.seed + POSTPROCESS_SEED_OFFSET[t], n_classes=cfg.n_classes,
-                    residual_affine=cfg.deform_residual_affine, min_pairs=cfg.min_pairs)
+                    residual_affine=cfg.deform_residual_affine, min_pairs=cfg.min_pairs,
+                    intensity_aug=cfg.intensity_aug_tf)
             else:
                 self.postprocess[t] = LinearPostprocess(t, self.level, flip_prob=cfg.flip_prob,
                                                         p_pair=cfg.p_pair,
                                                         seed=cfg.seed + POSTPROCESS_SEED_OFFSET[t],
                                                         target_iters=cfg.target_iters,
-                                                        min_pairs=cfg.min_pairs)
+                                                        min_pairs=cfg.min_pairs,
+                                                        intensity_aug=cfg.intensity_aug_tf)
         self._identity_cache = {}
         self._frozen_cache = {}         # cascade: frozen-stage validation baselines
         self.trace_counts = {t: 0 for t in self.sources}
@@ -595,8 +606,13 @@ class Trainer:
 
     # ------------------------------------------------------------------ step functions
     def checkpoint_variables(self):
-        """Extra trackables for `RunCheckpoint`: the post-processing RNGs."""
-        return {"postprocess_%s" % t: pp.generator for t, pp in self.postprocess.items()}
+        """Extra trackables for `RunCheckpoint`: the post-processing RNGs (plus the TF intensity
+        augmentation generators ``postprocess_<task>_aug``, only when TF augmentation is on)."""
+        out = {"postprocess_%s" % t: pp.generator for t, pp in self.postprocess.items()}
+        for t, pp in self.postprocess.items():
+            if pp.aug_generator is not None:
+                out["postprocess_%s_aug" % t] = pp.aug_generator
+        return out
 
     def rebuild_steps(self):
         """Re-create every train / validation tf.function (re-trace on next use)."""
@@ -666,6 +682,9 @@ class Trainer:
             ncc_kw["lean_sampler"] = True
         if cfg.lean_losses:
             ncc_kw["lean_losses"] = True
+        if cfg.pair_recompute:                  # trace-time switch: off = today's ops
+            ncc_kw["pair_recompute"] = True
+            ncc_kw["n_pairs"] = num_pairs_static(self._group_size(task), cfg.p_pdice, cfg.min_pairs)
         cascade_kw = {"lean": True} if lean else {}
         w = self._task_weight(task)
         norm_on = self.task_grad_norm > 0      # trace-time switch: off adds no op
@@ -1122,6 +1141,8 @@ class Trainer:
         lab = np.asarray(labels).astype(np.int32)
         if lab.ndim == 5:
             lab = lab[..., 0]
+        if int(self.cfg.val_image_chunk) > 0:     # Python switch: 0 = the unchunked path below
+            return self._deform_errors_chunked(lab, u, u_inv, v, v_raw, seed, chunk, images)
         onehot = tf.one_hot(tf.constant(lab), n_cls, dtype=tf.float32)
         u, u_inv = tf.convert_to_tensor(u, tf.float32), tf.convert_to_tensor(u_inv, tf.float32)
         warped = diffeo.warp(onehot, u)
@@ -1148,6 +1169,77 @@ class Trainer:
         seg_pair_pred = np.concatenate(pred, axis=0)
         jac = diffeo.jacobian_determinant(u).numpy()
         inv = diffeo.compose(u, u_inv).numpy()
+        errs = M.deform_group_errors(seg_warped, seg_template, seg_pair_pred, lab[j], jac, inv,
+                                     np.asarray(v), np.asarray(v_raw), P.LEVEL_SPACING[self.level], n_cls)
+        if images is not None:
+            ncc["ncc_pair"] = np.concatenate(ncc_pair, axis=0)
+            errs.update(ncc)
+        return errs, {"seg_warped": seg_warped, "seg_template": seg_template, "jac": jac}
+
+    def _deform_errors_chunked(self, lab, u, u_inv, v, v_raw, seed, chunk, images=None):
+        """`_deform_errors` with --val-image-chunk k > 0 (level-1 validation memory): every GPU
+        tensor holds at most k images (warped one-hot, warped image, LNCC moments, Jacobian,
+        inverse-consistency field) or ``chunk`` pairs; the one-hot is built per chunk from the
+        labels, the label template from a running sum, the leave-one-out intensity template from
+        the host-side warped images. Warps use the lean sampler iff ``cfg.lean_sampler`` (same
+        forward values). Per-chunk results go to the host; the metrics are the same numpy
+        `M.deform_group_errors` as the unchunked path (equal up to float summation order)."""
+        k = int(self.cfg.val_image_chunk)
+        n_cls = int(self.cfg.n_classes)
+        lean = bool(self.cfg.lean_sampler)
+        n = lab.shape[0]
+        u, u_inv = tf.convert_to_tensor(u, tf.float32), tf.convert_to_tensor(u_inv, tf.float32)
+        spans = [(s, min(s + k, n)) for s in range(0, n, k)]
+
+        def onehot_of(idx):
+            return tf.one_hot(tf.constant(lab[np.asarray(idx)]), n_cls, dtype=tf.float32)
+
+        seg_warped, tmpl_sum, warped_img, jac, inv = [], None, [], [], []
+        for a, b in spans:
+            w = diffeo.warp(onehot_of(np.arange(a, b)), u[a:b], lean=lean)
+            seg_warped.append(tf.argmax(w, axis=-1).numpy())
+            s = tf.reduce_sum(w, axis=0)
+            tmpl_sum = s if tmpl_sum is None else tmpl_sum + s
+            del w
+            if images is not None:
+                warped_img.append(diffeo.warp(tf.constant(np.asarray(images[a:b], np.float32)), u[a:b],
+                                              lean=lean).numpy())
+            jac.append(diffeo.jacobian_determinant(u[a:b]).numpy())
+            inv.append(diffeo.compose(u[a:b], u_inv[a:b]).numpy())
+        tmpl = tmpl_sum / float(n)
+        del tmpl_sum
+        seg_warped = np.concatenate(seg_warped, axis=0)
+        seg_template = tf.argmax(tmpl, axis=-1).numpy()
+        ncc = {}
+        if images is not None:
+            fg_tmpl = losses.foreground(tmpl[None])
+            roi = losses.ncc_roi(fg_tmpl, self.ncc_window)
+            total = np.sum(np.concatenate(warped_img, axis=0), axis=0, keepdims=True, dtype=np.float32)
+            nt = []
+            for (a, b), wi in zip(spans, warped_img):
+                w = tf.constant(wi)
+                t = (tf.constant(total) - w) / max(n - 1.0, 1.0)
+                nt.append(losses.masked_mean(losses.local_ncc(w, t, self.ncc_window), roi).numpy())
+            ncc["ncc_template"] = np.concatenate(nt, axis=0)
+            imgs = np.asarray(images, np.float32)
+        del tmpl
+        i, j = self._val_pairs(n, seed)
+        pred, ncc_pair = [], []
+        for s in range(0, len(i), int(chunk)):
+            ii, jj = i[s:s + chunk], j[s:s + chunk]
+            disp = diffeo.pairwise_displacement(u, u_inv, ii, jj, lean=lean)
+            moved = diffeo.warp(onehot_of(ii), disp, lean=lean)
+            pred.append(tf.argmax(moved, axis=-1).numpy())
+            if images is not None:
+                mi = diffeo.warp(tf.constant(imgs[ii]), disp, lean=lean)
+                fg = tf.maximum(losses.foreground(moved), losses.foreground(onehot_of(jj)))
+                roi_p = losses.ncc_roi(fg, self.ncc_window)
+                ncc_pair.append(losses.masked_mean(losses.local_ncc(mi, tf.constant(imgs[jj]), self.ncc_window),
+                                                   roi_p).numpy())
+            del disp, moved
+        seg_pair_pred = np.concatenate(pred, axis=0)
+        jac = np.concatenate(jac, axis=0)
+        inv = np.concatenate(inv, axis=0)
         errs = M.deform_group_errors(seg_warped, seg_template, seg_pair_pred, lab[j], jac, inv,
                                      np.asarray(v), np.asarray(v_raw), P.LEVEL_SPACING[self.level], n_cls)
         if images is not None:

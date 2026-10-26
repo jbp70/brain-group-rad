@@ -48,6 +48,16 @@ class TestSourceScan(unittest.TestCase):
         self.assertIn('"template_mask%s.npy" % P.level_suffix(LEVEL)', text)
         self.assertIn("_set_level(args.level)", text)
 
+    def test_check_m_registered(self):
+        """tf-intensity-aug: check (m) is in the default --checks and dispatched."""
+        with open(_PATH) as f:
+            text = f.read()
+        self.assertIn('ap.add_argument("--checks", default="a,b,c,d,e,f,g,h,i,j,k,l,m")', text)
+        self.assertIn('guarded("m_tf_intensity_aug", check_m, files, tmp, args)', text)
+        self.assertIn("def check_m(files, tmp, args):", text)
+        if vdp is not None:
+            self.assertTrue(callable(vdp.check_m))
+
 
 @unittest.skipIf(vdp is None, "verify_dali_pipeline not importable: %s" % (_IMPORT_ERROR,))
 class TestSetLevel(unittest.TestCase):

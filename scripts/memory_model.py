@@ -13,6 +13,11 @@ fit 1 = an ok point outside +-15 %, an OOM point predicted feasible, a failed_d2
 limit flag or a range point above its upper end; recommend 3 = no configuration reaches
 --n-target (R3.7 verdict, stop for Jay), 4 = hold-out gate failed (stop for Jay).
 Local outputs go to .agents/tasks/milestone-9/ (the repo's scratch/ is not git-ignored).
+
+DALI term (predict / grid / recommend): --dali {none,dali,tf} (default tf, the level-1 recipe
+with --intensity-aug-device tf) and --dali-groups (default rigid:8,affine:8,deform:4) add the
+resident DALI device memory (`models.memory_model.dali_memory`, at the subcommand's --level, else
+1) and subtract it from the feasibility budgets. --dali none = the numbers before the DALI term.
 """
 import argparse
 import json
@@ -95,12 +100,30 @@ def _workload_from_args(a):
                        gpu=a.gpu, min_pairs=a.min_pairs)
 
 
+def _dali(a, quiet=False):
+    """(dali dict or None, GiB) for --dali / --dali-groups at the subcommand's level (else 1)."""
+    if a.dali == "none":
+        return None, 0.0
+    groups = {}
+    for item in a.dali_groups.split(","):
+        k, _, v = item.partition(":")
+        groups[k.strip()] = int(v)
+    d = MM.dali_memory(getattr(a, "level", 1), groups, a.dali)
+    d["aug_device"] = a.dali
+    if not quiet:
+        print("DALI %.2f GiB (aug device %s, groups %s)" % (d["total_gib"], a.dali, a.dali_groups))
+    return d, d["total_gib"]
+
+
 def cmd_predict(a):
     co = _coefficients(a.coefficients)
     calib = MM.load_calibration(_path(a.calibration))
     w = _workload_from_args(a)
+    dali, dali_gib = _dali(a, quiet=a.json)
     p = MM.predict(w, co, a.margin, skip_grad_bound=a.skip_grad_bound, fwd_transient_bound=a.fwd_transient_bound,
-                   tensor_limits=MM.load_tensor_limits(a.tensor_limits), time_model=_time_model(calib))
+                   tensor_limits=MM.load_tensor_limits(a.tensor_limits), time_model=_time_model(calib),
+                   dali_gib=dali_gib)
+    p["dali"] = dali
     if a.json:
         print(json.dumps(p, indent=1, default=str))
     else:
@@ -122,7 +145,9 @@ def cmd_predict(a):
 
 def cmd_grid(a):
     co = _coefficients(a.coefficients)
-    res = MM.grid(co, a.margin, MM.load_tensor_limits(a.tensor_limits), level=a.level)
+    dali, dali_gib = _dali(a)
+    res = MM.grid(co, a.margin, MM.load_tensor_limits(a.tensor_limits), level=a.level, dali_gib=dali_gib)
+    res["dali"] = dali
     if a.out:
         _write(a.out, res)
     return 0
@@ -133,7 +158,7 @@ def cmd_recommend(a):
     calib = MM.load_calibration(_path(a.calibration))
     rec, code = MM.recommend(co, calib, n_target=a.n_target, margin=a.margin, t6_verdict=a.t6_verdict,
                              limits=MM.load_tensor_limits(a.tensor_limits), time_model=_time_model(calib),
-                             coefficients_path=a.coefficients)
+                             coefficients_path=a.coefficients, dali_gib=_dali(a)[1])
     if code == 0 and a.print_env:
         MM.print_env(rec)
     if a.out:
@@ -149,6 +174,10 @@ def build_parser():
     common.add_argument("--coefficients", default=DEFAULT_COEFFICIENTS)
     common.add_argument("--tensor-limits", default=None, help="probe_tensor_limit.py JSON (verified_max_elements)")
     common.add_argument("--out", default=None)
+    common.add_argument("--dali", choices=("none", "dali", "tf"), default="tf",
+                        help="resident DALI memory term: intensity aug in DALI, in TF (default) or none")
+    common.add_argument("--dali-groups", default="rigid:8,affine:8,deform:4",
+                        help="DALI pipelines and group sizes for --dali (task:N,...)")
     f = sub.add_parser("fit", parents=[common], help="fit the coefficients, print the accuracy table")
     f.add_argument("--no-lomo", action="store_true", help="skip the leave-one-mode-out refits")
     p = sub.add_parser("predict", parents=[common], help="one workload")

@@ -12,6 +12,7 @@ import tensorflow as tf
 
 from data_loading import params as P
 from data_loading import postprocess as pp
+from data_loading import tf_intensity_aug as tfa
 from models import layers
 from models import transforms as tfm
 
@@ -380,6 +381,79 @@ class TestDeformPostprocess(unittest.TestCase):
             ref = tfm.flip_images(y, flags).numpy()[..., 0].astype(np.int32)
             np.testing.assert_array_equal(out["labels"].numpy(), ref)
         self.assertEqual(len(traces), 1)
+
+
+def _graph_op_names(fn, *args):
+    return [op.name for op in fn.get_concrete_function(*args).graph.get_operations()]
+
+
+class TestIntensityAugPostprocess(unittest.TestCase):
+    """--intensity-aug-device tf: TF intensity augmentation inside both post-processes."""
+
+    def setUp(self):
+        self.rng = np.random.default_rng(41)
+        self.n = 4
+        g = np.meshgrid(*[np.linspace(0, 1, s) for s in P.LEVEL_SHAPE[4]], indexing="ij")
+        vol = (0.2 + 0.6 * (g[0] * g[1] + 0.5 * g[2]) / 1.5).astype(np.float32)
+        self.images = np.stack([vol] * self.n)[..., None]
+        self.labels = self.rng.integers(0, P.N_TRAIN_LABELS, size=self.images.shape).astype(np.uint8)
+        # Every op applied, so the images change with certainty.
+        self.cfg = P.IntensityAugConfig(noise_prob=1.0, brightness_prob=1.0, contrast_prob=1.0,
+                                        low_res_prob=1.0, gamma_prob=1.0)
+
+    def test_default_builds_no_op(self):
+        t, rt = random_dali_batch(self.rng, "rigid", 4, self.n)
+        post = pp.LinearPostprocess("rigid", 4, seed=4)
+        self.assertIsNone(post.aug_generator)
+        self.assertIsNone(post.intensity_aug)
+        names = _graph_op_names(tf.function(lambda x, a, b: post(x, a, b)), self.images, t, rt)
+        self.assertFalse([s for s in names if "intensity_aug" in s])
+        dpost = pp.DeformPostprocess(4, seed=4, intensity_aug=P.IntensityAugConfig.off())
+        self.assertIsNone(dpost.aug_generator)
+        names = _graph_op_names(tf.function(lambda x, y: dpost(x, y)), self.images, self.labels)
+        self.assertFalse([s for s in names if "intensity_aug" in s])
+        on = pp.LinearPostprocess("rigid", 4, seed=4, intensity_aug=self.cfg)
+        names = _graph_op_names(tf.function(lambda x, a, b: on(x, a, b)), self.images, t, rt)
+        self.assertTrue([s for s in names if s.startswith("intensity_aug/")])
+
+    def test_linear_images_change_rest_unchanged(self):
+        for task in P.TASKS:
+            t, rt = random_dali_batch(self.rng, task, 4, self.n)
+            rt = rt if task == "rigid" else None
+            base = pp.LinearPostprocess(task, 4, seed=9)
+            aug = pp.LinearPostprocess(task, 4, seed=9, intensity_aug=self.cfg)
+            self.assertIsNotNone(aug.aug_generator)
+            self.assertIsNot(aug.aug_generator, aug.generator)
+            for _ in range(2):
+                a, b = base(self.images, t, rt), aug(self.images, t, rt)
+                self.assertFalse(np.allclose(a["images"].numpy(), b["images"].numpy(), atol=1e-3))
+                for k in ("T_render", "T_target", "A_star", "P_star", "pair_i", "pair_j", "flip_axes"):
+                    np.testing.assert_array_equal(a[k].numpy(), b[k].numpy(), k)
+                img = b["images"].numpy()
+                self.assertEqual(b["images"].dtype, tf.float32)
+                self.assertGreaterEqual(img.min(), 0.0)
+                self.assertLessEqual(img.max(), 1.0)
+                self.assertEqual(tuple(img.shape), self.images.shape)
+
+    def test_deform_labels_never_augmented(self):
+        base = pp.DeformPostprocess(4, seed=5)
+        aug = pp.DeformPostprocess(4, seed=5, intensity_aug=self.cfg)
+        for _ in range(2):
+            a, b = base(self.images, self.labels), aug(self.images, self.labels)
+            self.assertFalse(np.allclose(a["images"].numpy(), b["images"].numpy(), atol=1e-3))
+            for k in ("labels", "onehot", "pair_i", "pair_j", "flip_axes"):
+                np.testing.assert_array_equal(a[k].numpy(), b[k].numpy(), k)
+
+    def test_flip_commutes(self):
+        # Fixed flip state: augmenting then flipping == flipping the augmentation of the same draw.
+        cfg = self.cfg
+        x = tf.constant(self.images)
+        aug = pp.DeformPostprocess(4, seed=6, intensity_aug=cfg)
+        flags = [True, False, True]
+        out = aug(self.images, self.labels, flip_axes=flags)["images"].numpy()
+        g = tf.random.Generator.from_seed(6 + P.INTENSITY_AUG_SEED_OFFSET)
+        ref = tfm.flip_images(tfa.augment_group(x, cfg, g), flags).numpy()
+        np.testing.assert_array_equal(out, ref)
 
 
 class TestBrainS(unittest.TestCase):

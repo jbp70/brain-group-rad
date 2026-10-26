@@ -49,6 +49,13 @@ Deformable pipeline (milestone 6; real val cases of level `--level` with `labels
       T^-1) == DALI image (max |diff| < tol-direct) and transform_image(npy labels, T^-1,
       'nearest') agrees with the DALI labels on >= 99% of the voxels (ties at half-voxel
       boundaries); |T - I| within the residual ranges (params.DEFAULT_DEFORM_RESIDUAL_RANGES).
+(m) --intensity-aug-device tf: m1 the low-res resample of data_loading.tf_intensity_aug vs
+      DALI's NN-down / linear-up resize voxelwise for f in 0.5..0.9 (PASS: the active LOWRES_ROI
+      has mean |diff| <= 5e-3 and is the best mode; else flip the constant); m2 per-op (prob 1)
+      and full-chain statistics of DALI-augmented vs TF-augmented (on DALI's un-augmented output)
+      batches of one real image: KS p >= 1e-3 on per-image mean / std / p1 / p50 / p99 / fraction
+      at 0 and 1, all values in [0, 1]; m3 INFO DALI process memory of one LinearPipeline with /
+      without augmentation.
 Select checks with --checks (e.g. h,i,j,k). All temporary files go to a fresh folder under
 --scratch (never /tmp), removed at the end.
 --level {4,2,1} (default 4; milestone 8, level 1 milestone 9 design 5.4) runs the checks at that
@@ -921,16 +928,134 @@ def check_l(args):
            max_abs_linear_minus_I=dev, ranges=dict(rng), T_mm=t_mm)
 
 
+# ---------------------------------------------------------------------------- (m) TF intensity aug
+M_FACTORS = (0.5, 0.6, 0.75, 0.9)
+M_OPS = ("noise", "brightness", "contrast", "low_res", "gamma")
+
+
+def _only_op(op):
+    kw = {o: (o == op) for o in M_OPS}
+    kw[op + "_prob"] = 1.0
+    return P.IntensityAugConfig(**kw)
+
+
+def _image_feats(x):
+    a = np.asarray(x, np.float64).reshape(x.shape[0], -1)
+    return {"mean": a.mean(1), "std": a.std(1), "p1": np.percentile(a, 1, axis=1),
+            "p50": np.percentile(a, 50, axis=1), "p99": np.percentile(a, 99, axis=1),
+            "frac0": (a <= 0).mean(1), "frac1": (a >= 1).mean(1)}
+
+
+def check_m(files, tmp, args):
+    """--intensity-aug-device tf vs the DALI augmentation. m1: low-res voxelwise (the exact DALI
+    resize code with constant sizes vs `tf_intensity_aug.lowres_resample`, every ROI mode);
+    m2: per-op and full-chain statistics, DALI vs TF on DALI's un-augmented output (KS);
+    m3 (INFO): DALI device memory of one LinearPipeline with / without augmentation."""
+    import nvidia.dali.fn as fn
+    import nvidia.dali.types as types
+    from scipy import stats
+    from data_loading import tf_intensity_aug as tfa
+    ok = True
+    # m1 ------------------------------------------------------------------
+    vol = np.random.RandomState(args.seed + 5).uniform(size=SHAPE).astype(np.float32)
+    np.save(os.path.join(tmp, "noise_m.npy"), vol)
+    m1 = {}
+    for f in M_FACTORS:
+        def graph(f=f):
+            imgs = dl.read_images(["noise_m.npy"], SHAPE, file_root=tmp, shuffle=False)
+            full = types.Constant(np.asarray(SHAPE, np.float32), dtype=types.FLOAT)
+            size = types.Constant(np.asarray(SHAPE, np.float32) * np.float32(f), dtype=types.FLOAT)
+            low = fn.resize(imgs, size=size, interp_type=types.DALIInterpType.INTERP_NN)
+            return fn.resize(low, size=full, interp_type=types.DALIInterpType.INTERP_LINEAR, antialias=False)
+
+        out = run_once(FnPipeline(graph, 1, num_threads=args.num_threads))[0][0]
+        row = {}
+        for roi in tfa.LOWRES_ROIS:
+            t = tfa.lowres_resample(vol[..., None], float(np.float32(f)), roi).numpy()
+            d = np.abs(t.reshape(out.shape) - out)
+            row[roi] = {"max": float(d.max()), "mean": float(d.mean())}
+        m1[str(f)] = row
+        best = min(row, key=lambda r: row[r]["mean"])
+        good = row[tfa.LOWRES_ROI]["mean"] <= 5e-3 and row[tfa.LOWRES_ROI]["mean"] <= row[best]["mean"]
+        ok &= bool(good)
+    record("m1_lowres_voxelwise", ok, "active ROI %s: mean |TF - DALI| %s (best mode per f: %s)" % (
+        tfa.LOWRES_ROI, ", ".join("f %s %.2e" % (f, m1[f][tfa.LOWRES_ROI]["mean"]) for f in m1),
+        ", ".join("%s %s" % (f, min(m1[f], key=lambda r: m1[f][r]["mean"])) for f in m1)), per_factor=m1)
+    # m2 ------------------------------------------------------------------
+    n = args.n_real
+    rep = [files[0]] * n
+    zero = dict(rotation_deg=0.0, translation_mm=0.0, log_scale=0.0, shear=0.0)
+    configs = [("full", P.IntensityAugConfig())] + [(o, _only_op(o)) for o in M_OPS]
+    m2, ok2 = {}, True
+    gen = tf.random.Generator.from_seed(args.seed + 17)
+
+    def batches(cfg, seed):
+        pipe = dl.LinearPipeline("rigid", LEVEL, rep, n, seed=seed, file_root=args.data, shuffle=False,
+                                 intensity_aug=cfg, num_threads=args.num_threads, **zero)
+        pipe.build()
+        out = [np.array(run_next(pipe)[0]) for _ in range(args.m_batches)]
+        del pipe
+        gc.collect()
+        return np.concatenate(out, 0)
+
+    base = batches(P.IntensityAugConfig.off(), args.seed + 31)
+    f0 = {k: v[0] for k, v in _image_feats(base[:1]).items()}
+    for name, cfg in configs:
+        d_out = batches(cfg, args.seed + 41 + len(m2))
+        t_out = np.concatenate([tfa.augment_group(tf.constant(base[i:i + n]), cfg, gen).numpy()
+                                for i in range(0, len(base), n)], 0)
+        fd_, ft_ = _image_feats(d_out), _image_feats(t_out)
+        row = {"n": int(len(d_out)), "dali_min": float(d_out.min()), "dali_max": float(d_out.max()),
+               "tf_min": float(t_out.min()), "tf_max": float(t_out.max())}
+        good = row["dali_min"] >= 0 and row["tf_min"] >= 0 and row["dali_max"] <= 1 and row["tf_max"] <= 1
+        for k in fd_:
+            # Binned on 1e-4 steps centered on the un-augmented value (atoms of untouched images).
+            p = float(stats.ks_2samp(np.round((fd_[k] - f0[k]) / 1e-4), np.round((ft_[k] - f0[k]) / 1e-4)).pvalue)
+            row["ks_" + k] = p
+            row["dali_" + k + "_mean"] = float(fd_[k].mean())
+            row["tf_" + k + "_mean"] = float(ft_[k].mean())
+            good &= p >= 1e-3
+        if name == "gamma":
+            for side, fx in (("dali", fd_), ("tf", ft_)):
+                row[side + "_mean_shift"] = float(np.abs(fx["mean"] - f0["mean"]).max())
+                row[side + "_std_shift"] = float(np.abs(fx["std"] - f0["std"]).max())
+        row["pass"] = bool(good)
+        m2[name] = row
+        ok2 &= bool(good)
+    record("m2_statistics", ok2, "KS DALI vs TF per op and full chain (p >= 1e-3, range [0, 1]): %s" % (
+        ", ".join("%s %s (min p %.2g)" % (k, "ok" if v["pass"] else "FAIL",
+                                         min(v[x] for x in v if x.startswith("ks_"))) for k, v in m2.items())),
+        configs=m2)
+    # m3 ------------------------------------------------------------------
+    m3 = {}
+    for name, cfg in (("aug_on", P.IntensityAugConfig()), ("aug_off", P.IntensityAugConfig.off())):
+        gc.collect()
+        before = gpu_memory().get("smi_process_mb")
+        pipe = dl.LinearPipeline("rigid", LEVEL, rep, n, seed=args.seed, file_root=args.data, shuffle=False,
+                                 intensity_aug=cfg, num_threads=args.num_threads, **zero)
+        pipe.build()
+        run_next(pipe)
+        after = gpu_memory().get("smi_process_mb")
+        m3[name] = {"before_mb": before, "after_mb": after,
+                    "delta_mb": (after - before) if (before is not None and after is not None) else None}
+        del pipe
+        gc.collect()
+    record("m3_dali_memory", None, "one LinearPipeline N %d level %d: process +%s MB with aug, +%s MB without" % (
+        n, LEVEL, m3["aug_on"]["delta_mb"], m3["aug_off"]["delta_mb"]), **m3)
+    return ok and ok2
+
+
 # ---------------------------------------------------------------------------- main
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--data", required=True, help="npy_v2 export root (export_manifest.csv, template/)")
     ap.add_argument("--scratch", required=True, help="writable folder for temporary files")
     ap.add_argument("--out", required=True, help="JSON summary path")
-    ap.add_argument("--checks", default="a,b,c,d,e,f,g,h,i,j,k,l")
+    ap.add_argument("--checks", default="a,b,c,d,e,f,g,h,i,j,k,l,m")
     ap.add_argument("--num-threads", type=int, default=4)
     ap.add_argument("--n-real", type=int, default=8)
     ap.add_argument("--n-throughput", type=int, default=48)
+    ap.add_argument("--m-batches", type=int, default=16, help="batches per configuration in check (m2)")
     ap.add_argument("--batches", type=int, default=50)
     ap.add_argument("--warmup", type=int, default=5)
     ap.add_argument("--seed", type=int, default=0)
@@ -1018,6 +1143,9 @@ def main():
         # (l): deformable pipeline (images + train18 labels, val split).
         if "l" in checks:
             guarded("l_deform_alignment", check_l, args)
+        # (m): TF-side intensity augmentation (--intensity-aug-device tf) vs DALI.
+        if "m" in checks:
+            guarded("m_tf_intensity_aug", check_m, files, tmp, args)
     finally:
         if not args.keep_tmp:
             shutil.rmtree(tmp, ignore_errors=True)

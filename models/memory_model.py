@@ -34,6 +34,15 @@ Model-form decisions recorded in the milestone-9 FEAT-002 findings:
     over-predictions are conservative and only counted. Margin = max(0.15, worst under-prediction).
     21 of the 40 local GTX hold-out points are over-predicted by > 20 % (small level-4 AMP / split
     points); the symmetric verdict is kept in `holdout_gate()['symmetric_passed']` and the report.
+
+DALI term (`dali_memory`, tf-intensity-aug): the DALI pipelines hold device memory next to TF for
+the whole run, linear in images x voxels. Calibrated on job 10517362 (RTX 8000, level 1, rigid N 8
++ affine N 8 + deform N 4 = 20 images, prefetch 1, exec_async / pipelined on): ~14.0 GiB with the
+DALI intensity augmentation, ~4.5 GiB without (--intensity-aug-device tf or --intensity-aug false);
+labels and the fixed pool overhead are absorbed in the per-image-voxel coefficient (two points,
+prefetch 1 only; the scaling to other levels / group sizes is an assumption). `predict(...,
+dali_gib=...)` subtracts it from the budgets; the default 0 keeps the TF-only calibration
+records, the fit and the hold-out gate unchanged.
 """
 import collections
 import json
@@ -57,6 +66,14 @@ DEFAULT_LIMITS = {"fp32": {"fwd": INT32_MAX, "bwd": INT32_MAX},
                   "fp16": {"fwd": FP16_FWD_OBSERVED, "bwd": INT32_MAX}}
 BUDGET_GIB = 44.0          # 48 GB cards (RTX 8000 / RTX A6000), design A1
 BUDGET_A100_GIB = 36.0     # A100 40 GB
+# DALI device memory per image voxel by intensity-aug device (module docstring; 'off' = 'tf').
+_DALI_CAL_VOXELS = 20.0 * 160 * 224 * 192
+DALI_BYTES_PER_IMAGE_VOXEL = {"dali": 14.0 * GIB / _DALI_CAL_VOXELS, "tf": 4.5 * GIB / _DALI_CAL_VOXELS}
+DALI_BYTES_PER_IMAGE_VOXEL["off"] = DALI_BYTES_PER_IMAGE_VOXEL["tf"]
+DALI_DEVICES = ("dali", "tf", "off")
+DALI_CALIBRATION = ("job 10517362, RTX 8000, level 1, rigid N 8 + affine N 8 + deform N 4, prefetch 1: "
+                    "14.0 GiB with DALI intensity augmentation, 4.5 GiB without")
+DEFAULT_DALI_GROUPS = {"rigid": 8, "affine": 8, "deform": 4}
 DEFAULT_MARGIN = 0.15
 HOLDOUT_GATE = 0.20
 FIT_TOLERANCE = 0.15
@@ -693,10 +710,38 @@ def limit_flags(w, limits=None):
     return largest, flags
 
 
+# --------------------------------------------------------------------- DALI term
+def dali_memory(level, groups=None, aug_device="tf"):
+    """DALI device memory of the training pipelines (module docstring, `DALI_CALIBRATION`).
+
+    ``groups``: {task: group size} of the pipelines that run (default `DEFAULT_DALI_GROUPS`);
+    ``aug_device``: 'dali' (augmentation in DALI), 'tf' or 'off'. Returns dict total_gib,
+    per_pipeline {task: GiB}, bytes_per_image_voxel, calibration."""
+    level = DP.check_level(level)
+    if aug_device not in DALI_DEVICES:
+        raise ValueError("aug_device must be one of %s, got %r" % (DALI_DEVICES, aug_device))
+    groups = dict(DEFAULT_DALI_GROUPS if groups is None else groups)
+    vox = float(np.prod(DP.LEVEL_SHAPE[level]))
+    bpv = DALI_BYTES_PER_IMAGE_VOXEL[aug_device]
+    per = collections.OrderedDict()
+    for t, n in groups.items():
+        if t not in TASKS:
+            raise ValueError("unknown task %r (expected one of %s)" % (t, TASKS))
+        if int(n) < 0:
+            raise ValueError("group size of %s must be >= 0, got %r" % (t, n))
+        per[t] = int(n) * vox * bpv / GIB
+    return {"total_gib": float(sum(per.values())), "per_pipeline": per, "bytes_per_image_voxel": bpv,
+            "calibration": DALI_CALIBRATION}
+
+
 # --------------------------------------------------------------------- predict (4.1)
 def predict(workload, coeffs=None, margin=0.0, skip_grad_bound=False, fwd_transient_bound=False,
-            tensor_limits=None, time_model=None, fwd_sequenced=False, fp16_onehot=False):
+            tensor_limits=None, time_model=None, fwd_sequenced=False, fp16_onehot=False, dali_gib=0.0):
     """Predicted memory of one workload (design 4.1).
+
+    ``dali_gib``: DALI device memory resident next to TF for the whole run (`dali_memory`); the
+    feasibility flags use the effective budget ``budget - dali_gib`` for the peak and the
+    validation chunks. 0 (default) = the calibrated TF-only model, unchanged.
 
     ``skip_grad_bound`` and ``fwd_transient_bound`` default to False (the timed rules of 2.1);
     setting either to True selects its conservative variant: every skip gradient counted at every
@@ -742,6 +787,8 @@ def predict(workload, coeffs=None, margin=0.0, skip_grad_bound=False, fwd_transi
     m = float(margin)
     val = phases["V"]
     ok_val = (lambda b: val * (1 + m) <= b) if w.task == "deform" else (lambda b: True)
+    dali = float(dali_gib)
+    b44, b36 = BUDGET_GIB - dali, BUDGET_A100_GIB - dali
     out = collections.OrderedDict()
     out["peak_gib"] = peak
     out["peak_margin_gib"] = peak * (1.0 + m)
@@ -753,8 +800,10 @@ def predict(workload, coeffs=None, margin=0.0, skip_grad_bound=False, fwd_transi
     out["components"] = _components(inv, w)
     out["largest_tensor"] = largest
     out["limit_flags"] = flags
-    out["feasible_44"] = bool(peak * (1 + m) <= BUDGET_GIB and ok_val(BUDGET_GIB) and not flags)
-    out["feasible_36"] = bool(peak * (1 + m) <= BUDGET_A100_GIB and ok_val(BUDGET_A100_GIB) and not flags)
+    out["feasible_44"] = bool(peak * (1 + m) <= b44 and ok_val(b44) and not flags)
+    out["feasible_36"] = bool(peak * (1 + m) <= b36 and ok_val(b36) and not flags)
+    out["dali_gib"] = dali
+    out["total_gib"] = peak + dali
     out["val_peak_gib"] = val
     out["val_by_chunk"] = val_by_chunk
     st = time_model.predict(w) if time_model is not None else None
@@ -1187,7 +1236,9 @@ def level1_workload(widths, n, T, knobs, gpu="rtx8000", task="deform", amp=True,
 
 
 def feasible(p, margin, budget):
-    """Steps 2(a)-(d): peak (incl. Z), a validation chunk, no limit flag -> (bool, chunk)."""
+    """Steps 2(a)-(d): peak (incl. Z), a validation chunk, no limit flag -> (bool, chunk).
+    The budget is reduced by the prediction's resident DALI memory (``p['dali_gib']``, 0 if absent)."""
+    budget = float(budget) - float(p.get("dali_gib", 0.0))
     if p["limit_flags"] or p["peak_gib"] * (1 + margin) > budget:
         return False, None
     if p["phases"]["V"] == 0.0 and not p["val_by_chunk"]:
@@ -1228,10 +1279,10 @@ def _params(widths):
 
 
 def candidate_table(co, margin, t6_ok, limits=None, time_model=None, ns=range(2, 9), widths=None,
-                    rule="timed", budget=BUDGET_GIB):
+                    rule="timed", budget=BUDGET_GIB, dali_gib=0.0):
     """All level-1 candidates (AMP, full) -> list of dicts after the T rule, per (widths, knobs, N)."""
     widths = list(widths or WP.PRESETS)
-    kw = {"skip_grad_bound": rule == "skip", "fwd_transient_bound": rule == "fwd"}
+    kw = {"skip_grad_bound": rule == "skip", "fwd_transient_bound": rule == "fwd", "dali_gib": dali_gib}
     rows = []
     for wd in widths:
         params = _params(wd)
@@ -1294,7 +1345,7 @@ def print_per_n(table, out, title):
             r["params"] / 1e6, "yes" if r["feasible_a100"] else "no", "yes" if r["feasible_a100_no_margin"] else "no"))
 
 
-def grid(co, margin=DEFAULT_MARGIN, limits=None, out=None, level=1):
+def grid(co, margin=DEFAULT_MARGIN, limits=None, out=None, level=1, dali_gib=0.0):
     """The full R3.4 grid (design 4.4): widths x checkpointing x AMP x T x knobs -> largest feasible
     deform N (2..8) and its peak; linear N 4..16 per widths x task x AMP; frozen-chain cost per N."""
     out = out or sys.stdout
@@ -1313,7 +1364,7 @@ def grid(co, margin=DEFAULT_MARGIN, limits=None, out=None, level=1):
                         for n in range(2, 9):
                             wl = Workload(level, "deform", n, wd, ck, amp, T, lncc=True, cascade=cascade,
                                           tasks_run=TASKS, **k)
-                            p = predict(wl, co, margin, tensor_limits=limits)
+                            p = predict(wl, co, margin, tensor_limits=limits, dali_gib=dali_gib)
                             if feasible(p, margin, BUDGET_GIB)[0]:
                                 best = (n, p)
                         row = {"widths": wd, "checkpointing": ck, "amp": amp, "T": T, "knobs": k,
@@ -1333,7 +1384,7 @@ def grid(co, margin=DEFAULT_MARGIN, limits=None, out=None, level=1):
                     for n in range(4, 17):
                         wl = Workload(level, task, n, wd, "none", amp, cascade=cascade, tasks_run=TASKS,
                                       split_group_conv=sp)
-                        p = predict(wl, co, margin, tensor_limits=limits)
+                        p = predict(wl, co, margin, tensor_limits=limits, dali_gib=dali_gib)
                         if feasible(p, margin, BUDGET_GIB)[0]:
                             best = (n, p)
                     row = {"widths": wd, "task": task, "amp": amp, "split_group_conv": sp,
@@ -1352,7 +1403,7 @@ def grid(co, margin=DEFAULT_MARGIN, limits=None, out=None, level=1):
                 wl = level1_workload(wd, n, 7, {"lean_sampler": True, "lean_losses": False,
                                                 "split_group_conv": True}) if level == 1 else Workload(
                     level, "deform", n, wd, "full", True, cascade=cascade, tasks_run=TASKS)
-                p = predict(wl, co, 0.0, tensor_limits=limits)
+                p = predict(wl, co, 0.0, tensor_limits=limits, dali_gib=dali_gib)
                 fw = N_FROZEN[cascade] * 4.0 * _params(wd) / GIB
                 uu = n * vox * CASCADE_FIELDS / GIB
                 cells.append({"n": n, "z_gib": p["phases"]["Z"], "frozen_weights_gib": fw, "fields_gib": uu})
@@ -1388,7 +1439,7 @@ def _recipe(level, widths, T, task, n, co, limits, time_model, knobs=None, check
 
 
 def recommend(co, calibration, n_target=4, margin=None, t6_verdict=None, limits=None, time_model=None,
-              out=None, coefficients_path="models/memory_coefficients.json"):
+              out=None, coefficients_path="models/memory_coefficients.json", dali_gib=0.0):
     """Level-1 recommendation (design 4.4 steps 1-6). Returns (recommendation dict, exit code)."""
     out = out or sys.stdout
     recs = calibration["records"]
@@ -1410,7 +1461,7 @@ def recommend(co, calibration, n_target=4, margin=None, t6_verdict=None, limits=
     tables = {}
     rows_by_rule = {}
     for rule in ("timed", "skip", "fwd"):
-        rows = candidate_table(co, m, t6_ok, limits, time_model, rule=rule)
+        rows = candidate_table(co, m, t6_ok, limits, time_model, rule=rule, dali_gib=dali_gib)
         rows_by_rule[rule] = rows
         tables[rule] = per_n_table(rows)
     # Grid summary (AMP, full): largest feasible N per widths (any knobs, timed rule).
@@ -1439,16 +1490,16 @@ def recommend(co, calibration, n_target=4, margin=None, t6_verdict=None, limits=
     star = [r for r in cfg_rows if r["n"] == n_star][0]
     def P(n, mg=None, **kw):
         return predict(level1_workload(wd, n, T, k), co, m if mg is None else mg, tensor_limits=limits,
-                       time_model=time_model, **kw)
+                       time_model=time_model, dali_gib=dali_gib, **kw)
     p_star = P(n_star)
     p_fwd = P(n_star, fwd_transient_bound=True)
     # Linear at level 1 (rigid and affine have the same inventory).
     lin = lambda n, mg, budget: feasible(predict(level1_workload(wd, n, T, k, task="rigid"), co, mg,  # noqa: E731
-                                                 tensor_limits=limits), mg, budget)[0]
+                                                 tensor_limits=limits, dali_gib=dali_gib), mg, budget)[0]
     linear_n = _largest_n(lambda n: lin(n, m, BUDGET_GIB), range(4, 17))
     linear_n_a100 = _largest_n(lambda n: lin(n, m, BUDGET_A100_GIB), range(4, 17))
     p_lin = predict(level1_workload(wd, linear_n or 4, T, k, task="rigid"), co, m, tensor_limits=limits,
-                    time_model=time_model)
+                    time_model=time_model, dali_gib=dali_gib)
     a100_margin = _largest_n(lambda n: feasible(P(n), m, BUDGET_A100_GIB)[0], range(2, 9))
     a100_nomargin = _largest_n(lambda n: feasible(P(n, mg=0.0), 0.0, BUDGET_A100_GIB)[0], range(2, 9))
     a100_nomargin_fwd = _largest_n(lambda n: feasible(P(n, mg=0.0, fwd_transient_bound=True), 0.0,
@@ -1551,6 +1602,7 @@ def recommend(co, calibration, n_target=4, margin=None, t6_verdict=None, limits=
     rec["holdout_gate"] = {"evaluated": gate["evaluated"], "passed": gate["passed"], "one_sided": True,
                            "max_under_err": gate["max_under_err"], "max_abs_err": gate["max_abs_err"],
                            "n_over": gate["n_over"], "symmetric_passed": gate["symmetric_passed"]}
+    rec["dali_gib"] = float(dali_gib)
     rec["t6_allowed"] = t6_ok
     rec["warnings"] = warnings
     _print_recommendation(rec, out)
@@ -1560,6 +1612,8 @@ def recommend(co, calibration, n_target=4, margin=None, t6_verdict=None, limits=
 def _print_recommendation(rec, out):
     l1 = rec["level1"]
     k = rec["knobs"]
+    if rec.get("dali_gib", 0.0) > 0:
+        out.write("  (level-1 feasibility includes %.2f GiB of resident DALI memory)\n" % rec["dali_gib"])
     out.write("Recommendation: widths %s (filters %s, decoder %s), AMP, full, lean sampler %s, lean losses %s, "
               "split %s, T %d\n" % (rec["widths"], rec["filters"], rec["decoder_widths"], k["lean_sampler"],
                                     k["lean_losses"], k["split_group_conv"], rec["integration_steps"]))

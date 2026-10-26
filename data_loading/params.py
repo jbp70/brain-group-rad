@@ -209,6 +209,27 @@ class IntensityAugConfig:
         return cls(enabled=False)
 
 
+# Where the intensity augmentation runs (--intensity-aug-device): 'dali' (default, in the DALI
+# pipelines, `dali_loader.intensity_augment`) or 'tf' (DALI gets IntensityAugConfig.off() and the
+# same chain runs in the TF post-process, `data_loading.tf_intensity_aug`; frees ~9.5 GB of DALI
+# device memory at level 1). The TF chain has its own generator seeded with
+# post-process seed + INTENSITY_AUG_SEED_OFFSET, so the flip / pair stream is unchanged.
+INTENSITY_AUG_DEVICES = ("dali", "tf")
+INTENSITY_AUG_SEED_OFFSET = 7919
+# Per image and call the TF chain draws N_AUG_UNIFORMS uniforms U[0, 1) (fixed pattern, drawn
+# whatever the probabilities / enable flags) plus one stateless noise seed. Column meaning
+# (DALI `_multiplex` / `_intensity_factor` semantics; "apply" = u < prob, "low" = u < 0.5 picks
+# the low side U(low, 1), else the high side U(1, high)):
+AUG_COLUMNS = {
+    "noise_apply": 0, "noise_std": 1,
+    "brightness_apply": 2, "brightness_low": 3, "brightness_lo_val": 4, "brightness_hi_val": 5,
+    "contrast_apply": 6, "contrast_low": 7, "contrast_lo_val": 8, "contrast_hi_val": 9,
+    "low_res_apply": 10, "low_res_factor": 11,
+    "gamma_apply": 12, "gamma_low": 13, "gamma_lo_val": 14, "gamma_hi_val": 15,
+}
+N_AUG_UNIFORMS = 16
+
+
 # ---------------------------------------------------------------------------- DALI formulas
 def dali_center(shape_xyz, pixel_center=DALI_PIXEL_CENTER):
     """Image center in DALI coordinates (DALI axis order W, H, D = reversed array axes)."""
