@@ -7,7 +7,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=3
 #SBATCH --mem=64G
-#SBATCH --time=01:00:00
+#SBATCH --time=01:45:00
 #SBATCH --output=/autofs/space/crater_001/users/jn85/BrainRegProjects/GroupwiseReg/logs/%x-%j.out
 #SBATCH --error=/autofs/space/crater_001/users/jn85/BrainRegProjects/GroupwiseReg/logs/%x-%j.err
 #
@@ -22,8 +22,9 @@
 #      max/min of every conv / BN / v_raw) and PROBE_NUMERICS=1 (first op with inf/NaN output raises).
 #   C  'bd5000' (ckpt/best_deform, step 5000, before the onset): same, PROBE_ACT=1 only -> the
 #      float16 headroom (max |activation| vs 65504) per block before the failure.
-# Overrides vs the run (forward-identical): --task-ratio deform:1 (TASK_RATIO), --min-pairs 1,
-# --lean-losses true, --val-every 0, --ckpt-every 0, --val-png false, --log-every 1, --steps S+3.
+# Overrides vs the run (forward-identical): --min-pairs 1, --lean-losses true, --val-every 0,
+# --ckpt-every 0, --val-png false, --log-every 1, --steps S+PROBE_STEPS (default 8, ratio 1:1:2).
+# (Job 10524578: B/C failed because deform:1 is rejected with --global-transform true.)
 # Submit (after Jay's approval; <= 2 active jobs; commit + push + git pull first):
 #   sbatch .agents/tasks/m9-level1-nan/m9_nan_probe.sh
 # If B/C stop at a resume guard about the task ratio, resubmit with TASK_RATIO=rigid:1,affine:1,deform:2.
@@ -37,7 +38,11 @@ RUN="${RUN:-$RESULTS/m9_level1_cascade}"
 SRC_CKPT_L2="${SRC_CKPT_L2:-$RESULTS/m8_level2_gradnorm/ckpt/best}"
 SIF="${SIF:-/autofs/space/crater_001/users/jn85/Singularity_Files/tf10_nv.sif}"
 RUN_COMMIT="${RUN_COMMIT:-e6815d9}"
-TASK_RATIO="${TASK_RATIO:-deform:1}"
+# deform:1 is rejected together with --global-transform true (linear-only flag), so use the run's
+# mixed ratio; PROBE_STEPS resumed steps so that several deform steps actually execute.
+TASK_RATIO="${TASK_RATIO:-rigid:1,affine:1,deform:2}"
+PROBE_STEPS="${PROBE_STEPS:-8}"
+PROBE_TIMEOUT="${PROBE_TIMEOUT:-2400}"
 JOB_ID="${SLURM_JOB_ID:-manual}"
 OUT="$PROJ/scratch/m9_nan/$JOB_ID"
 SRC="$PROJ/scratch/m9_nan/src_$RUN_COMMIT"
@@ -84,9 +89,9 @@ probe() {   # probe <name> <prefix> <PROBE_NUMERICS 0|1>
     local name="$1" prefix="$2" num="$3"
     local root; root="$(make_copy "$name" "$prefix")"
     local s; s="${prefix##*-}"
-    local steps=$((s + 3))
+    local steps=$((s + PROBE_STEPS))
     echo "=== $name start (resume step $s -> $steps, numerics $num) $(date -Is)"
-    (cd "$SRC" && SINGULARITYENV_PROBE_ACT=1 SINGULARITYENV_PROBE_NUMERICS="$num" timeout 1500 "${RUNC[@]}" \
+    (cd "$SRC" && SINGULARITYENV_PROBE_ACT=1 SINGULARITYENV_PROBE_NUMERICS="$num" timeout "$PROBE_TIMEOUT" "${RUNC[@]}" \
         python "$TOOLS/probe_activations.py" --data "$DATA" --results "$root" --run-name m9_level1_cascade \
         --level 1 --cascade-from "$SRC_CKPT_L2" --group-size 8 --deform-group-size 4 \
         --task-ratio "$TASK_RATIO" --steps "$steps" --val-every 0 --ckpt-every 0 --warmup-steps 500 \
