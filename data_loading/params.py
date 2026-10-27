@@ -203,6 +203,10 @@ class IntensityAugConfig:
     gamma: bool = True
     gamma_prob: float = 0.3
     gamma_range: tuple = (0.7, 1.5)
+    # Low-res method of the TF chain (retrain-prereqs design section 3; LOWRES_METHODS): 'nn'
+    # (NN down + linear up, as DALI) or 'tent' (shift-free triangle-filtered down + linear up,
+    # TF device only). DALI never reads it.
+    low_res_method: str = "nn"
 
     @classmethod
     def off(cls):
@@ -216,6 +220,10 @@ class IntensityAugConfig:
 # post-process seed + INTENSITY_AUG_SEED_OFFSET, so the flip / pair stream is unchanged.
 INTENSITY_AUG_DEVICES = ("dali", "tf")
 INTENSITY_AUG_SEED_OFFSET = 7919
+# Low-res methods of the TF chain (--lowres-method, IntensityAugConfig.low_res_method; design
+# retrain-prereqs section 3): 'nn' = NN down + linear up (default, DALI's op), 'tent' =
+# triangle-filtered down (row-normalised adjoint of the linear up) + linear up, shift-free.
+LOWRES_METHODS = ("nn", "tent")
 # Per image and call the TF chain draws N_AUG_UNIFORMS uniforms U[0, 1) (fixed pattern, drawn
 # whatever the probabilities / enable flags) plus one stateless noise seed. Column meaning
 # (DALI `_multiplex` / `_intensity_factor` semantics; "apply" = u < prob, "low" = u < 0.5 picks

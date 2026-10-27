@@ -72,6 +72,14 @@ pair-count floor (`TrainConfig.min_pairs`), also passed to the memory-model Work
 `--pair-recompute` (true / false, default false; tf-intensity-aug addendum) sets
 `TrainConfig.pair_recompute` for the deform configurations (record field pair_recompute; old
 records read as false). The memory model has no term for it (its prediction stays the default path).
+`--max-pairs` (comma list of integers >= 0, default 0 = no cap; retrain-prereqs design 16.6) is a
+grid axis: `TrainConfig.max_pairs`; each record stores max_pairs and the resulting training pair
+count n_pairs (`models.memory_model.num_pairs` with p 0.1, the TrainConfig default of p_pair and
+p_pdice); old records read max_pairs 0. The memory-model prediction ignores the cap.
+`--int32-check true` (default false): before running a configuration, its largest per-group tensor
+at N (`int32_violation`: training step + frozen / validation forwards of the memory model's tensor
+inventory, build excluded) is compared with 2^31 - 1 elements; a violation is written as a 'limit' record
+("int32 element check: ...", not run) and the larger N of that configuration are skipped.
 
 Predictions: `predicted_peak_mb`, `predicted_phase`, `pred_over_meas` (= predicted / measured
 peak), `largest_tensor_elems`, `largest_tensor_desc` from `models.memory_model.predict` (margin
@@ -80,7 +88,8 @@ with a stderr warning if the file is missing.
 
 JSON (``--out``): {"environment": {...}, "results": [{level, task, n, widths, cascade,
 gradient_checkpointing, amp, lambda_ncc_tmpl, lambda_ncc_pair, integration_steps, lean_sampler,
-lean_losses, split_group_conv, val_pair_chunk, cascade_kind, build_n, min_pairs, params, frozen_params,
+lean_losses, split_group_conv, val_pair_chunk, cascade_kind, build_n, min_pairs, max_pairs, n_pairs,
+pair_recompute, params, frozen_params,
 status, peak_mb (measured steps), warmup_peak_mb, resident_mb (allocated after the warm-up:
 weights of all stages, optimizer slots, batch), step_ms (median), step_ms_mean, step_ms_all,
 frozen_ms, frozen_peak_mb, frozen_status, trace_counts, finite, loss, val_peak_mb, val_status,
@@ -302,6 +311,7 @@ def measure(base, warmup_steps, steps, val_pass, seed=0):
                       lambda_ncc_tmpl=float(base["lambda_ncc_tmpl"]),
                       lambda_ncc_pair=float(base["lambda_ncc_pair"]),
                       val_pair_chunk=int(base["val_pair_chunk"]), min_pairs=str(base.get("min_pairs", "1")),
+                      max_pairs=int(base.get("max_pairs", 0)),
                       pair_recompute=bool(base.get("pair_recompute", False)),
                       lean_sampler=bool(base["lean_sampler"]), lean_losses=bool(base["lean_losses"]),
                       schedule=ScheduleConfig("constant", base_lr=3e-4, total_steps=total + 1,
@@ -417,6 +427,35 @@ def load_coefficients(path):
     return MM.load_coefficients(path)
 
 
+def _workload(base, gpu):
+    """`models.memory_model.Workload` of a configuration record."""
+    from models import memory_model as MM
+    return MM.Workload(base["level"], base["task"], base["n"],
+                       model_config=model_config(base["widths"], base["integration_steps"]),
+                       checkpointing=base["gradient_checkpointing"], amp=bool(base["amp"]),
+                       integration_steps=int(base["integration_steps"]),
+                       lncc=bool(float(base["lambda_ncc_tmpl"]) > 0 or float(base["lambda_ncc_pair"]) > 0),
+                       lean_sampler=bool(base["lean_sampler"]), lean_losses=bool(base["lean_losses"]),
+                       split_group_conv=bool(base["split_group_conv"]),
+                       cascade=MODEL_CASCADE[base["cascade_kind"]],
+                       val_pair_chunk=int(base["val_pair_chunk"]), build_n=int(base["build_n"]), gpu=gpu,
+                       min_pairs=str(base.get("min_pairs", "1")))
+
+
+def int32_violation(base, gpu):
+    """--int32-check: the largest per-group tensor of the configuration at its N (training step and
+    frozen / validation forwards of `models.memory_model.tensor_inventory`: every block tensor incl.
+    the full-resolution stem) -> (elements, description); the configuration violates the int32
+    per-tensor element limit iff elements > 2^31 - 1 (the level-1 job 10517266 failure). The build
+    tensors are excluded: the build runs at min(N, --build-n), not at N, and the model's level-1
+    build list (full-resolution decoder concat at N 2) is above the limit although level-1 builds
+    run fine on the cluster."""
+    from models import memory_model as MM
+    train, fwd, _build = MM.tensor_inventory(_workload(base, gpu))
+    t = max(train + fwd, key=lambda x: x["elements"])
+    return int(t["elements"]), "%s %s" % (t["desc"], "x".join(str(s) for s in t["shape"]))
+
+
 def predicted_fields(base, gpu, coeffs):
     """predicted_peak_mb, predicted_phase, largest_tensor_elems, largest_tensor_desc (null without
     coefficients or if the model cannot predict the configuration)."""
@@ -426,16 +465,7 @@ def predicted_fields(base, gpu, coeffs):
         return out
     try:
         from models import memory_model as MM
-        w = MM.Workload(base["level"], base["task"], base["n"],
-                        model_config=model_config(base["widths"], base["integration_steps"]),
-                        checkpointing=base["gradient_checkpointing"], amp=bool(base["amp"]),
-                        integration_steps=int(base["integration_steps"]),
-                        lncc=bool(float(base["lambda_ncc_tmpl"]) > 0 or float(base["lambda_ncc_pair"]) > 0),
-                        lean_sampler=bool(base["lean_sampler"]), lean_losses=bool(base["lean_losses"]),
-                        split_group_conv=bool(base["split_group_conv"]),
-                        cascade=MODEL_CASCADE[base["cascade_kind"]],
-                        val_pair_chunk=int(base["val_pair_chunk"]), build_n=int(base["build_n"]), gpu=gpu,
-                        min_pairs=str(base.get("min_pairs", "1")))
+        w = _workload(base, gpu)
         p = MM.predict(w, coeffs, margin=0.0)
         out["predicted_peak_mb"] = float(p["peak_gib"] * 1024.0)
         out["predicted_phase"] = p["peak_phase"]
@@ -449,7 +479,8 @@ def predicted_fields(base, gpu, coeffs):
 # ----------------------------------------------------------------------------- merge + write
 KEY_FIELDS = ("level", "task", "n", "widths", "cascade", "gradient_checkpointing", "amp",
               "lambda_ncc_tmpl", "lambda_ncc_pair", "integration_steps", "lean_sampler", "lean_losses",
-              "split_group_conv", "val_pair_chunk", "cascade_kind", "min_pairs", "pair_recompute")
+              "split_group_conv", "val_pair_chunk", "cascade_kind", "min_pairs", "pair_recompute",
+              "max_pairs")
 
 
 def _resolved_t(r):
@@ -471,6 +502,8 @@ def _key_value(r, k):
         return bool(r.get(k, False))
     if k == "min_pairs":
         return r.get(k, "1")
+    if k == "max_pairs":
+        return int(r.get(k, 0) or 0)
     if k == "cascade_kind":
         return r.get(k, "frozen4" if r.get("cascade") else "none")
     if k == "integration_steps":
@@ -554,6 +587,7 @@ def child_argv(a, base, val_pass):
                "--warmup-steps", str(a.warmup_steps), "--steps", str(a.steps),
                "--gpu-memory-limit-mb", str(a.gpu_memory_limit_mb), "--coefficients", str(a.coefficients),
                "--min-pairs", str(base.get("min_pairs", "1")),
+               "--max-pairs", str(int(base.get("max_pairs", 0))),
                "--pair-recompute", _b(base.get("pair_recompute", False)),
                "--seed", str(a.seed), "--out", a.out])
 
@@ -637,6 +671,9 @@ def main(argv=None):
                     "tf.recompute_grad; recorded as pair_recompute, deform configs only)")
     ap.add_argument("--min-pairs", default="1",
                     help="comma-separated 1/n: training pair-count floor (main.py --min-pairs; default 1)")
+    ap.add_argument("--max-pairs", default="0",
+                    help="comma-separated integers >= 0: training pair cap (main.py --max-pairs; "
+                    "0 = no cap, default); recorded as max_pairs with the resulting n_pairs")
     ap.add_argument("--integration-steps", default="0",
                     help="comma-separated scaling-and-squaring steps T (0 = the ModelConfig default, "
                          "tool-only convention; resolved before the record is written)")
@@ -649,6 +686,11 @@ def main(argv=None):
     ap.add_argument("--coefficients", default=COEFFICIENTS, help="memory-model coefficients JSON")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", required=True, help="JSON output (merged with an existing file)")
+    ap.add_argument("--int32-check", default="false",
+                    help="true: before each configuration, compute its largest per-group tensor at N "
+                    "(models.memory_model.tensor_inventory: training step, frozen / validation "
+                    "forwards; build excluded); above 2^31 - 1 elements write a 'limit' record "
+                    "without running it (larger N skipped)")
     ap.add_argument("--isolate", default="false",
                     help="true: every configuration (one N) in its own child process (no memory carried "
                          "over between configurations; slurm/m9_memory.sh)")
@@ -657,6 +699,10 @@ def main(argv=None):
         a.isolate = str2bool(a.isolate)
     except ValueError as e:
         ap.error("--isolate: %s" % e)
+    try:
+        a.int32_check = str2bool(a.int32_check)
+    except ValueError as e:
+        ap.error("--int32-check: %s" % e)
     if not a.isolate:
         configure_gpu(a.gpu_memory_limit_mb)
     from models.group_net import GRADIENT_CHECKPOINTING
@@ -688,6 +734,12 @@ def main(argv=None):
     min_pairs = csv_list(a.min_pairs)
     if not min_pairs or any(m not in ("1", "n") for m in min_pairs):
         ap.error("--min-pairs needs a comma list of 1 / n, got %r" % a.min_pairs)
+    try:
+        max_pairs = [int(x) for x in csv_list(a.max_pairs)]
+    except ValueError:
+        ap.error("--max-pairs needs a comma list of integers >= 0, got %r" % a.max_pairs)
+    if not max_pairs or min(max_pairs) < 0:
+        ap.error("--max-pairs needs a comma list of integers >= 0, got %r" % a.max_pairs)
     try:
         val_pass = str2bool(a.val_pass)
     except ValueError as e:
@@ -743,14 +795,17 @@ def main(argv=None):
                                 for ll in sorted(set(task_ll), key=task_ll.index):
                                     for sp in sorted(set(splits), key=splits.index):
                                         for mp in sorted(set(min_pairs), key=min_pairs.index):
-                                            _run_ns(a, env, coeffs, family, task, w, casc, c, amp, T, ls, ll,
-                                                    sp, ns, val_pass, mp)
+                                            for k in sorted(set(max_pairs), key=max_pairs.index):
+                                                _run_ns(a, env, coeffs, family, task, w, casc, c, amp, T,
+                                                        ls, ll, sp, ns, val_pass, mp, k)
     print("written %s" % a.out)
     return 0
 
 
-def _run_ns(a, env, coeffs, family, task, w, casc, c, amp, T, ls, ll, sp, ns, val_pass, mp="1"):
+def _run_ns(a, env, coeffs, family, task, w, casc, c, amp, T, ls, ll, sp, ns, val_pass, mp="1",
+            max_pairs=0):
     """All N of one configuration (larger N skipped after 'oom' / 'limit'); writes after each."""
+    from models import memory_model as MM
     stop_at = None
     for n in ns:
         base = {"level": a.level, "task": task, "n": n, "widths": w, "cascade": casc,
@@ -759,10 +814,18 @@ def _run_ns(a, env, coeffs, family, task, w, casc, c, amp, T, ls, ll, sp, ns, va
                 "lean_losses": ll, "split_group_conv": sp, "val_pair_chunk": a.val_pair_chunk,
                 "cascade_kind": CASCADE_KINDS.get((a.level, bool(casc)), "none"),
                 "build_n": min(n, a.build_n), "min_pairs": mp,
-                "pair_recompute": bool(task == "deform" and str2bool(a.pair_recompute))}
+                "pair_recompute": bool(task == "deform" and str2bool(a.pair_recompute)),
+                # --max-pairs (retrain-prereqs design 16.6); TrainConfig p_pair = p_pdice = 0.1
+                "max_pairs": int(max_pairs), "n_pairs": MM.num_pairs(n, 0.1, mp, int(max_pairs))}
         pred = predicted_fields(base, family, coeffs)
+        big = int32_violation(base, family) if a.int32_check else None
         if stop_at is not None:
             r = _null_record(base, "skipped", "%s at N = %d" % (stop_at[0].upper(), stop_at[1]))
+        elif big is not None and big[0] > MM.INT32_MAX:
+            r = _null_record(base, "limit", "int32 element check: %s has %d elements > 2^31 - 1 "
+                             "(not run)" % (big[1], big[0]))
+            r["wall_s"] = 0.0
+            stop_at = ("limit", n)
         elif a.isolate:
             r, by_child = measure_isolated(a, base, val_pass)
             if r["status"] in ("oom", "limit"):

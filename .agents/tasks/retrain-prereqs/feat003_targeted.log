@@ -1,0 +1,39 @@
+test_errors (tests.test_main.TestStageSkipArgs) ... ok
+test_refresh_skip_record (tests.test_main.TestStageSkipArgs) ... ok
+test_skip_consistency (tests.test_main.TestStageSkipArgs) ... ok
+test_valid_specs (tests.test_main.TestStageSkipArgs) ... ok
+test_draws (tests.test_cascade.TestStageSkipDraw) ... 
+[11.3 b] stage skip rates over 20000 steps: deform l4 0.1510, deform l2 0.2980, rigid l4 0.1486, deform l4 & l2 0.0445, deform l4 & rigid l4 0.0214
+ok
+test_matches_legacy (tests.test_cascade.TestStageSkipLevel2)
+11.3 d: stage mode with 4:p and skip True / False gives the legacy step results (same ... 
+[11.3 d] level-2 stage vs legacy skip: max |diff| 0 over 6 losses and 94 variable sums
+ok
+test_trainer_stage_mode (tests.test_cascade.TestStageSkipLevel2)
+11.3 e: [n_stages] bool signature, one trace per task, no skip op for p 0 tasks, ... ok
+test_chain_methods (tests.test_cascade.TestStageSkipChain)
+11.3 c: skip4=None equals linear_stages / deform_stages + skip_to (max |diff| 0); skip4 ... 
+[11.3 c] level-1 skip4: A vs compose(model2 on prewarp(x2, I), I) max |diff| 0 (vs unskipped 0.00191); |prewarp_linear(x2, I) - x2| 1.1e-38; U4 = 0: |U - up(u2)| 0, |prewarp_deform(x2, 0) - x2| 1.17e-38
+ok
+test_trainer_stage_mode (tests.test_cascade.TestStageSkipChain)
+11.3 e (level 1): [2] bool signature, no skip op for a p 0 task, one trace over mixed ... WARNING:tensorflow:Mixed precision compatibility check (mixed_float16): WARNING
+Your GPUs may run slowly with dtype policy mixed_float16 because they do not have compute capability of at least 7.0. Your GPUs:
+  NVIDIA GeForce GTX 1080, compute capability 6.1 (x2)
+See https://developer.nvidia.com/cuda-gpus for a list of GPUs and their compute capabilities.
+If you will use compatible GPU(s) not attached to this host, e.g. by running a multi-worker model, you can ignore this warning. This message will only be logged once
+WARNING:tensorflow:5 out of the last 11 calls to <function Trainer._make_train_step.<locals>.<lambda> at 0x7efe46c344c0> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:5 out of the last 11 calls to <function Trainer._make_train_step.<locals>.<lambda> at 0x7efe46c34c10> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+
+[11.3 e] level-1 rigid: skip l2 loss 2098.3481 vs level-4-only chain 2098.3481; skip both 2101.7175 vs identity chain 2101.7175
+ok
+test_stage_skip_record_and_resume (tests.test_main.TestCascadeMain)
+Retrain-prereqs 11.3 a (resume part): the cascade record's skip_mode / skip_probs / ... ok
+
+----------------------------------------------------------------------
+Ran 10 tests in 935.846s
+
+OK
+overfit: reached=False best 10-step mean center RMS (worst task) nan mm after 2 steps; final val center RMS: rigid eval 22.1609 mm, train mode 22.1608 mm
+overfit: reached=False best 10-step mean center RMS (worst task) nan mm after 2 steps; final val center RMS: rigid eval 22.1664 mm, train mode 22.1663 mm
+overfit: reached=False best 10-step mean center RMS (worst task) nan mm after 2 steps; final val center RMS: rigid eval 22.1664 mm, train mode 22.1661 mm
+EXIT 0

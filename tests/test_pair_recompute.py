@@ -153,6 +153,7 @@ class TestPairRecomputeTrainer(unittest.TestCase):
 
 
 @unittest.skipUnless(tf.config.list_physical_devices("GPU"), "needs a GPU")
+@unittest.skipIf(tf_setup.DEFER_MEMORY_TESTS, tf_setup.DEFER_MEMORY_REASON)
 class TestPairRecomputeMemory(unittest.TestCase):
     """Gradient peak at 64x80x64 (19 classes, N 4) with 1 vs 4 pairs, pair LNCC on (template
     LNCC off to stay inside the 6 GB local test limit)."""

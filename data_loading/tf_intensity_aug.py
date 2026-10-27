@@ -35,6 +35,18 @@ uses is measured by GPU check (m1); possible differences from DALI otherwise: th
 spans the full extent n although its true footprint m/f differs by < 1 voxel (DALI's own
 behaviour, mirrored), and float32 vs DALI rounding of the index arithmetic.
 
+`cfg.low_res_method` (`params.LOWRES_METHODS`, --lowres-method; retrain-prereqs design section 3)
+selects the low-res method: 'nn' (default) is the NN-down + linear-up above (bit-identical to the
+code before the flag existed, compared with DALI by check m). 'tent' (TF device only) replaces the
+NN downsample with a triangle-filtered one: per axis, U [n, n] is the same linear upsample from m
+cells (U[o, l0c] = 1 - w, U[o, l1c] = w, columns l >= m zero), the downsample is D = U^T with rows
+normalised by a[l] = sum_o U[o, l], and the axis operator is the static [n, n] matrix P = U @ D
+(float64 built, applied in float32 by tensordot; f = 1 gives P = I exactly). It preserves mass
+(columns of P sum to 1), reproduces constants (rows sum to 1) and moves interior objects by
+< 0.02 voxel (NN: up to ~1.4 voxel); ``roi`` is ignored. Paper: "low resolution simulated by a
+triangle-filtered downsample to round(f n) voxels per axis and linear upsampling with the
+transposed weights' grid (pixel centers at 0.5), which preserves mass and position".
+
 dtype: always float32 (explicit dtypes; the mixed_float16 Keras policy does not affect raw ops).
 Memory: `augment_group` maps over the images with ``parallel_iterations=1``, so only one
 image's temporaries (~4 volumes) are alive, plus the map's output (~2 group tensors).
@@ -95,13 +107,55 @@ def _lowres_axis(x, axis, f, roi):
     return (1.0 - w) * a + w * b
 
 
-def lowres_resample(x, f, roi=None):
+def _tent_matrix(n, f):
+    """[n, n] float32 operator P = U @ D of the 'tent' low-res for one axis of static length n
+    (retrain-prereqs design 3.2): U [n, n] = the linear upsample from m = round(f n) cells
+    (columns l >= m zero), D = row-normalised U^T (the triangle-filtered downsample)."""
+    f64 = tf.cast(f, tf.float64) if tf.is_tensor(f) else tf.constant(float(f), tf.float64)
+    m = tf.maximum(tf.floor(f64 * n + 0.5), 1.0)          # float64 holding an integer
+    o = tf.range(n, dtype=tf.float64)
+    c = (o + 0.5) * m / float(n) - 0.5
+    l0 = tf.floor(c)
+    w = c - l0
+    l0c = tf.cast(tf.clip_by_value(l0, 0.0, m - 1.0), tf.int32)
+    l1c = tf.cast(tf.clip_by_value(l0 + 1.0, 0.0, m - 1.0), tf.int32)
+    u = ((1.0 - w)[:, None] * tf.one_hot(l0c, n, dtype=tf.float64)
+         + w[:, None] * tf.one_hot(l1c, n, dtype=tf.float64))
+    a = tf.reduce_sum(u, axis=0)
+    d = tf.transpose(u) * tf.math.divide_no_nan(tf.constant(1.0, tf.float64), a)[:, None]
+    return tf.cast(tf.matmul(u, d), tf.float32)
+
+
+def _apply_axis_matrix(x, p, axis):
+    """out = p applied along `axis` of x (p [n, n], n = x.shape[axis]); same axis order."""
+    out = tf.tensordot(p, x, axes=[[1], [axis]])           # [n, other axes in order]
+    if axis == 0:
+        return out
+    rank = x.shape.rank
+    return tf.transpose(out, list(range(1, axis + 1)) + [0] + list(range(axis + 1, rank)))
+
+
+def _lowres_axis_tent(x, axis, f):
+    """One spatial axis of the 'tent' low-res (triangle-filtered down + linear up)."""
+    return _apply_axis_matrix(x, _tent_matrix(int(x.shape[axis]), f), axis)
+
+
+def lowres_resample(x, f, roi=None, method="nn"):
     """Simulated low resolution of one image x [X, Y, Z(, C)] with isotropic factor f (scalar):
-    NN down to round(f n) per axis, linear back to n (module docstring). Output shape == input."""
+    down to round(f n) per axis, linear back to n (module docstring). Output shape == input.
+
+    ``method`` (`params.LOWRES_METHODS`): 'nn' = NN down (``roi`` honoured), 'tent' =
+    triangle-filtered down (``roi`` ignored)."""
+    if method not in P.LOWRES_METHODS:
+        raise ValueError("method must be one of {}, got {!r}".format(P.LOWRES_METHODS, method))
+    x = tf.convert_to_tensor(x, tf.float32)
+    if method == "tent":
+        for axis in range(3):
+            x = _lowres_axis_tent(x, axis, f)
+        return x
     roi = LOWRES_ROI if roi is None else roi
     if roi not in LOWRES_ROIS:
         raise ValueError("roi must be one of {}, got {!r}".format(LOWRES_ROIS, roi))
-    x = tf.convert_to_tensor(x, tf.float32)
     for axis in range(3):
         x = _lowres_axis(x, axis, f, roi)
     return x
@@ -148,7 +202,8 @@ def augment_image(x, u, seed, cfg, roi=None):
         # float64 factor: the index arithmetic is float64 (identical to the numpy reference).
         f = float(cfg.low_res_min_factor) + tf.cast(u[_C["low_res_factor"]], tf.float64) * (
             1.0 - float(cfg.low_res_min_factor))
-        x = tf.cond(on, lambda x=x: lowres_resample(x, f, roi), lambda x=x: x)
+        method = getattr(cfg, "low_res_method", "nn")
+        x = tf.cond(on, lambda x=x: lowres_resample(x, f, roi, method), lambda x=x: x)
     if cfg.gamma:
         _, g = _factor(u, "gamma", cfg.gamma_prob, *cfg.gamma_range)
         x = gamma(x, g)

@@ -1,0 +1,308 @@
+test_exact_average_and_nonfinite_slots (tests.test_cascade.TestBNRecal)
+MANDATORY: Keras 2.10 re-reads ``momentum`` per eager call, so K batches give the exact ... 
+[T7] exact average: max rel. error 1.76e-07
+WARNING bn recalibration: non-finite input images in rigid batch 1 (slot skipped)
+WARNING bn recalibration: non-finite input images in rigid batch 0 (slot skipped)
+WARNING bn recalibration: non-finite input images in rigid batch 1 (slot skipped)
+ok
+test_forward_only_and_momentum_restore (tests.test_cascade.TestBNRecal) ... ok
+test_freeze_retraces (tests.test_cascade.TestBNRecal) ... ok
+test_gap_shrinks_with_mismatched_intensity (tests.test_cascade.TestBNRecal)
+Statistics recalibrated on the level-2 inputs x 1, then validation and recalibration ... 
+[T7] eval/trainmode gap pre -> post (stats of x 1 inputs, data x 3): center_rms_mm 0.3543 -> 0.0004699; pair_rms_mm 0.4937 -> 0.00073
+ok
+test_gradient_checkpointing_both (tests.test_cascade.TestBNRecal)
+No double updates with a recompute_grad decoder: one BN update per layer and batch. ... ok
+test_plan (tests.test_cascade.TestBNRecal) ... ok
+test_validation_records (tests.test_cascade.TestBNRecal)
+val=True: bnrecal_pre/post records at step 0 (PNGs off), the gap table of every set and ... WARNING:tensorflow:5 out of the last 7 calls to <function Trainer._cascade_val_fn.<locals>.fwd at 0x7f94a05f4a60> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:6 out of the last 8 calls to <function Trainer._cascade_val_fn.<locals>.fwd at 0x7f94b4077280> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+
+[T7] three-task eval/trainmode gap pre -> post: rigid/center_rms_mm 0.1316 -> 0.1964; rigid/pair_rms_mm 0.1956 -> 0.3277; affine/center_rms_mm 0.05593 -> 0.06857; affine/pair_rms_mm 0.07626 -> 0.1062; deform/template_dice 0.0003337 -> 6.447e-05; deform/pair_dice 6.172e-05 -> 0.000305
+ok
+test_mixed_precision_steps (tests.test_cascade.TestCascadeAMP) ... WARNING:tensorflow:Mixed precision compatibility check (mixed_float16): WARNING
+Your GPUs may run slowly with dtype policy mixed_float16 because they do not have compute capability of at least 7.0. Your GPUs:
+  NVIDIA GeForce GTX 1080, compute capability 6.1 (x2)
+See https://developer.nvidia.com/cuda-gpus for a list of GPUs and their compute capabilities.
+If you will use compatible GPU(s) not attached to this host, e.g. by running a multi-worker model, you can ignore this warning. This message will only be logged once
+ok
+test_composed_beats_frozen (tests.test_cascade.TestCascadeBeatsFrozen) ... 
+[T16b] rigid center RMS composed (trainmode) 6.941 mm vs frozen 12.401 mm (margin 5.460; step 0 composed 14.172); deform template Dice composed 0.9724 vs frozen 0.9420 (margin 0.0304; identity 0.9297, step 0 composed 0.9574)
+ok
+test_checkpoint_roundtrip (tests.test_cascade.TestCascadeResume) ... ok
+test_main_fresh_and_resume (tests.test_cascade.TestCascadeResume) ... /mnt/d/Research/Brain_Registration_Projects/brain-group-rad/tests/runtime_helpers.py:43: ResourceWarning: unclosed file <_io.TextIOWrapper name='/tmp/bgr_m8_1ookxfxq/results/c/logs/metrics.jsonl' mode='a' encoding='UTF-8'>
+  gc.collect()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+ok
+test_baselines_and_cache (tests.test_cascade.TestCascadeValidation) ... WARNING:tensorflow:5 out of the last 9 calls to <function Trainer._cascade_val_deform_fn.<locals>.fwd at 0x7f94a0667820> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:6 out of the last 10 calls to <function Trainer._cascade_val_deform_fn.<locals>.fwd at 0x7f94648565e0> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:5 out of the last 105 calls to <function Trainer._make_train_step.<locals>.<lambda> at 0x7f9465773f70> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+ok
+test_val_pair_chunk (tests.test_cascade.TestCascadeValidation) ... ok
+test_dispatch (tests.test_cascade.TestChainTrainer)
+T-C9: _n_stages from getattr(cascade, 'n_stages', 1); a chain needs a level-1 trainer. ... ok
+test_residual_centering (tests.test_cascade.TestChainTrainer)
+T-C4 (centering): the trainable level-1 residual SVF has group mean ~0 and the composed ... 
+[T-C4] level-1 residual: max |mean_i v_i| 5.96e-08 (raw 1.25e+00, max |v| 0.247); re-centering the composed A changes it by 1.40e-08
+ok
+test_skip_and_frozen_unchanged (tests.test_cascade.TestChainTrainer)
+T-C6 (p 0: no skip ops; forced skip = the level-4 stage alone) and T-C7 (the frozen chain ... WARNING:tensorflow:6 out of the last 106 calls to <function Trainer._make_train_step.<locals>.<lambda> at 0x7f944c1e3940> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+
+[T-C6] rigid forced skip loss 2098.3481 vs level-4-only chain 2098.3481
+ok
+test_validation (tests.test_cascade.TestChainTrainer)
+T-V1: level-1 chain validation has the _frozen (4 + 2) and _frozen4 baselines and logs ... 
+[T-V1] level-1 rigid validation wall time 2.0 s; frozen center rms 21.401 (4 + 2) / 21.174 (4)
+
+[T-V1] level-1 deform frozen template Dice 0.9614 (4 + 2) / 0.9614 (4)
+ok
+test_residual_centered_and_loss_on_composed_field (tests.test_cascade.TestDeformCascade) ... 
+[T4] residual group mean max |mean_i v_i| 1.19e-07 (raw 2.35e+00)
+ok
+test_two_level_round_trip (tests.test_cascade.TestDeformCascade) ... 
+[T4] round trip (level-2 voxels, 3-voxel margin): u o u_inv max 0.0763 mean 0.01095; u_inv o u max 0.2059 mean 0.01519; U o U_inv max 0.0656 mean 0.00738; U_inv o U max 0.0705 mean 0.00739; u2 o u2_inv max 0.0305 mean 0.00694; u2_inv o u2 max 0.0358 mean 0.00694
+
+[T4] round trip (level-2 voxels, 8-voxel margin): u o u_inv max 0.0604 mean 0.01083; u_inv o u max 0.0677 mean 0.01502; U o U_inv max 0.0376 mean 0.00719; U_inv o U max 0.0416 mean 0.00707; u2 o u2_inv max 0.0305 mean 0.00694; u2_inv o u2 max 0.0358 mean 0.00694
+ok
+test_zero_residual_and_frozen_fields (tests.test_cascade.TestDeformCascade) ... ok
+test_constants (tests.test_cascade.TestFrozenChain) ... ok
+test_from_checkpoint (tests.test_cascade.TestFrozenChain)
+T-C5: an m8-style checkpoint (model = level 2, frozen_stage = level 4) restores both; ... 
+[T-C5] missing prefix -> FrozenChain.from_checkpoint(/tmp/bgr_m8_fe87xgm3/missing/ck-1): NotFoundError: Error when restoring from checkpoint or SavedModel at /tmp/bgr_m8_fe87xgm3/missin
+ok
+test_matches_standin (tests.test_cascade.TestFrozenChain)
+T-C2: FrozenChain and the phase-1 stand-in with the same weights -> max |diff| 0. ... 
+[T-C2] FrozenChain vs stand-in max |diff|: deform/U 0, deform/U_inv 0, deform/V 0, deform_stages/U 0, deform_stages/U4 0, deform_stages/U4_inv 0, deform_stages/U_inv 0, deform_stages/V 0, deform_stages/V4 0, linear/A 0, linear_stages/A 0, linear_stages/A4 0
+ok
+test_three_level_linear_composition (tests.test_cascade.TestFrozenChain)
+T-C3: A4 = FrozenStage.linear(pool(x)); A2 = Center2(R2_raw A4); A1 = Center1(R1_raw A2). ... 
+[T-C3] linear chain vs numpy float64: A2 max |diff| 9.50e-08, A1 (float32) 9.52e-08
+ok
+test_float32_under_mixed_policy (tests.test_cascade.TestFrozenStageFactories) ... ok
+test_three_task_steps (tests.test_cascade.TestFrozenStageTraining) ... ok
+test_level2_keys (tests.test_cascade.TestLevel2Unchanged) ... ok
+test_compose_matches_numpy_reference (tests.test_cascade.TestLinearCascade) ... 
+[T3] barycenter of the composed group: rotation 1.21e-06 deg, translation 3.15e-09 mm, scale 1.09e-10
+ok
+test_prewarp_consistency (tests.test_cascade.TestLinearCascade) ... 
+[T3] pre-warp NCC (two warps vs one): 0.99997, 0.99997
+ok
+test_pooled_render_matches_level4_render (tests.test_cascade.TestRenderConsistency) ... 
+[T2] interior NCC pooled level-2 render vs level-4 render: 0.99982, 0.99979, 0.99982
+ok
+test_draw_reproducible (tests.test_cascade.TestSkip) ... ok
+test_graph_and_forced_skip (tests.test_cascade.TestSkip) ... ok
+test_logging_and_validation (tests.test_cascade.TestSkip) ... WARNING:tensorflow:5 out of the last 110 calls to <function Trainer._make_deform_step.<locals>.<lambda> at 0x7f93fd451dc0> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+ok
+test_off_path_is_identity (tests.test_cascade.TestSkip)
+p = 0 vs p = 0.5 fed skip=False: bitwise equal losses and variables over 3 three-task ... WARNING:tensorflow:5 out of the last 16 calls to <function Trainer._make_train_step.<locals>.<lambda> at 0x7f93fd451310> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:5 out of the last 13 calls to <function Trainer._make_deform_step.<locals>.<lambda> at 0x7f93fd451790> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+
+[T6] skip off-path identity: max |diff| 0 over 9 losses and 94 variable sums
+ok
+test_chain_methods (tests.test_cascade.TestStageSkipChain)
+11.3 c: skip4=None equals linear_stages / deform_stages + skip_to (max |diff| 0); skip4 ... 
+[11.3 c] level-1 skip4: A vs compose(model2 on prewarp(x2, I), I) max |diff| 0 (vs unskipped 0.00191); |prewarp_linear(x2, I) - x2| 1.1e-38; U4 = 0: |U - up(u2)| 0, |prewarp_deform(x2, 0) - x2| 1.17e-38
+ok
+test_trainer_stage_mode (tests.test_cascade.TestStageSkipChain)
+11.3 e (level 1): [2] bool signature, no skip op for a p 0 task, one trace over mixed ... 
+[11.3 e] level-1 rigid: skip l2 loss 2098.3481 vs level-4-only chain 2098.3481; skip both 2101.7175 vs identity chain 2101.7175
+ok
+test_draws (tests.test_cascade.TestStageSkipDraw) ... 
+[11.3 b] stage skip rates over 20000 steps: deform l4 0.1510, deform l2 0.2980, rigid l4 0.1486, deform l4 & l2 0.0445, deform l4 & rigid l4 0.0214
+ok
+test_matches_legacy (tests.test_cascade.TestStageSkipLevel2)
+11.3 d: stage mode with 4:p and skip True / False gives the legacy step results (same ... WARNING:tensorflow:6 out of the last 21 calls to <function Trainer._make_train_step.<locals>.<lambda> at 0x7f93e7c58700> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+
+[11.3 d] level-2 stage vs legacy skip: max |diff| 0 over 6 losses and 94 variable sums
+ok
+test_trainer_stage_mode (tests.test_cascade.TestStageSkipLevel2)
+11.3 e: [n_stages] bool signature, one trace per task, no skip op for p 0 tasks, ... ok
+test_three_level_round_trip (tests.test_cascade.TestThreeLevelRoundTrip) ... 
+[T-C4] three-level round trip (level-1 voxels, 13-voxel margin): u o u_inv max 0.1029 mean 0.02096; u_inv o u max 0.0997 mean 0.02515; U4 o U4_inv max 0.0724 mean 0.01267; U4_inv o U4 max 0.0519 mean 0.01239; U2 o U2_inv max 0.0309 mean 0.00542; U2_inv o U2 max 0.0346 mean 0.00545; u1 o u1_inv max 0.0311 mean 0.00636; u1_inv o u1 max 0.0302 mean 0.00636
+ok
+test_a_checkpoint_to_frozen_and_level2 (tests.test_cascade.TestWeightTransfer) ... ok
+test_b_source_checks (tests.test_cascade.TestWeightTransfer) ... ok
+test_c_units (tests.test_cascade.TestWeightTransfer) ... ok
+test_d_second_moment (tests.test_cascade.TestWeightTransfer) ... 
+[T1d] S rel. Frobenius diff level 2 vs mode-pooled level 4: 0.00682
+ok
+test_bn_recal_empty_gap_passes (tests.test_check_mixed_run.TestCascade) ... ok
+test_bn_recal_event_missing_fails (tests.test_check_mixed_run.TestCascade) ... ok
+test_cascade_pass (tests.test_check_mixed_run.TestCascade) ... ok
+test_cascade_wrong_provenance_fails (tests.test_check_mixed_run.TestCascade) ... ok
+test_g_gap_lines (tests.test_check_mixed_run.TestCascade) ... ok
+test_grad_balance_deform64_label (tests.test_check_mixed_run.TestCascade) ... ok
+test_grad_balance_function (tests.test_check_mixed_run.TestCascade) ... ok
+test_grad_balance_keep_fallback_undecided (tests.test_check_mixed_run.TestCascade) ... ok
+test_grad_balance_step_cut (tests.test_check_mixed_run.TestCascade) ... ok
+test_missing_val_rigid_frozen_fails (tests.test_check_mixed_run.TestCascade) ... ok
+test_skip (tests.test_check_mixed_run.TestCascade) ... ok
+test_stage_skip (tests.test_check_mixed_run.TestCascade)
+Retrain-prereqs 4.5: stage mode needs every train_<task>/cascade_skip_l<lv> with p > 0 ... ok
+test_deform_nonfinite_val_and_missing_png_fail (tests.test_check_mixed_run.TestDeform) ... ok
+test_deform_only_pass (tests.test_check_mixed_run.TestDeform) ... ok
+test_init_weights_and_enc_grad (tests.test_check_mixed_run.TestDeform) ... ok
+test_mixed3_missing_best_deform_fails (tests.test_check_mixed_run.TestDeform) ... ok
+test_mixed3_pass (tests.test_check_mixed_run.TestDeform) ... ok
+test_retrace_fails (tests.test_check_mixed_run.TestDeform) ... ok
+test_rigid_deform_skips_mean (tests.test_check_mixed_run.TestDeform) ... ok
+test_chain_pass_and_info_lines (tests.test_check_mixed_run.TestLevel1Chain) ... overfit: reached=False best 10-step mean center RMS (worst task) nan mm after 3 steps; final val center RMS: rigid eval 22.1458 mm, train mode 21.9143 mm
+overfit: reached=False best 10-step mean center RMS (worst task) nan mm after 2 steps; final val center RMS: rigid eval 21.8048 mm, train mode 21.8048 mm
+overfit: reached=False best 10-step mean center RMS (worst task) nan mm after 1 steps; final val center RMS: rigid eval 21.6105 mm, train mode 21.6105 mm
+overfit: reached=False best 10-step mean center RMS (worst task) nan mm after 1 steps; final val center RMS: rigid eval 21.5412 mm, train mode 21.5412 mm
+PASS final_step             last logged step 20 (expected >= 20)
+PASS train_rigid            4 logged train_rigid/loss values, all finite
+PASS train_affine           4 logged train_affine/loss values, all finite
+PASS train_deform           4 logged train_deform/loss values, all finite
+PASS val_rigid              final-step validation complete
+PASS val_affine             final-step validation complete
+PASS val_deform             final-step validation complete
+PASS val_mean_pair_rms_mm   val/mean_pair_rms_mm = 6.5, linear task pair RMS [6.0, 7.0]
+PASS trace_once             trace counts {'rigid': 1, 'affine': 1, 'deform': 1} (1 per task)
+PASS finite_steps           non-finite steps: 0
+PASS val_png                PNGs ['rigid_step0000020.png', 'affine_step0000020.png', 'deform_step0000020.png'] present: [True, True, True]
+PASS best_checkpoint        ckpt/best has a checkpoint: True
+PASS best_deform_checkpoint ckpt/best_deform has a checkpoint: True
+PASS init_weights           mode full (expected full)
+PASS enc_grad_rigid         4/4 logged values, median raw 10, eff 1, task grad_norm 5
+PASS enc_grad_affine        4/4 logged values, median raw 10, eff 1, task grad_norm 5
+PASS enc_grad_deform        4/4 logged values, median raw 10, eff 2, task grad_norm 5
+INFO enc_grad_ratio         INFO median eff ratio linear/deform rigid 0.5, affine 0.5 (target [0.1, 10])
+PASS cascade_config         source /x/ckpt/best/best-11000, level 4, step 11000, fingerprint n_vars 120, S rel diff None
+PASS val_rigid_frozen       final-step frozen-stage baseline complete
+PASS val_affine_frozen      final-step frozen-stage baseline complete
+PASS val_deform_frozen      final-step frozen-stage baseline complete
+INFO cascade_gain_affine    INFO cascade_gain affine: center_rms_mm composed 1 vs frozen 2 (better), pair_rms_mm composed 7 vs frozen 5 (worse)
+INFO cascade_gain_deform    INFO cascade_gain deform: template_dice composed 0.8 vs frozen 0.75 (better), pair_dice composed 0.7 vs frozen 0.72 (worse)
+INFO cascade_gain_rigid     INFO cascade_gain rigid: center_rms_mm composed 1 vs frozen 2 (better), pair_rms_mm composed 6 vs frozen 5 (worse)
+INFO data_wait_rigid        INFO data wait rigid: mean data 10.0 ms, compute 90.0 ms, fraction 0.100
+INFO data_wait_affine       INFO data wait affine: mean data 10.0 ms, compute 90.0 ms, fraction 0.100
+INFO data_wait_deform       INFO data wait deform: mean data 10.0 ms, compute 90.0 ms, fraction 0.100
+INFO g_gap_rigid            INFO g_gap rigid composed: no rigid_g validation set
+INFO g_gap_rigid_frozen     INFO g_gap rigid frozen: no rigid_g validation set
+INFO g_gap_affine           INFO g_gap affine composed: no affine_g validation set
+INFO g_gap_affine_frozen    INFO g_gap affine frozen: no affine_g validation set
+PASS bn_recalibration       1 event(s); batches {'rigid': 2, 'affine': 2, 'deform': 4}, skipped non-finite {'rigid': 0, 'affine': 0, 'deform': 0}, n_layers_updated 20, layers_without_updates [], freeze True, 3.0 s
+INFO bn_gap_deform          INFO bn_gap deform (|eval - trainmode|): template_dice pre 0.01 post 0.002
+INFO bn_gap_rigid           INFO bn_gap rigid (|eval - trainmode|): center_rms_mm pre 0.35 post 0.001
+INFO grad_balance           INFO grad_balance KEEP task-grad-norm: median eff ratio linear/deform over records with step >= 5: rigid 0.5, affine 0.5 (target [0.1, 10])
+check_mixed_run: PASS
+PASS final_step             last logged step 20 (expected >= 20)
+PASS train_rigid            4 logged train_rigid/loss values, all finite
+PASS train_affine           4 logged train_affine/loss values, all finite
+PASS train_deform           4 logged train_deform/loss values, all finite
+PASS val_rigid              final-step validation complete
+PASS val_affine             final-step validation complete
+PASS val_deform             final-step validation complete
+PASS val_mean_pair_rms_mm   val/mean_pair_rms_mm = 6.5, linear task pair RMS [6.0, 7.0]
+PASS trace_once             trace counts {'rigid': 1, 'affine': 1, 'deform': 1} (1 per task)
+PASS finite_steps           non-finite steps: 0
+PASS val_png                PNGs ['rigid_step0000020.png', 'affine_step0000020.png', 'deform_step0000020.png'] present: [True, True, True]
+PASS best_checkpoint        ckpt/best has a checkpoint: True
+PASS best_deform_checkpoint ckpt/best_deform has a checkpoint: True
+PASS init_weights           mode partial (expected partial), restored ['centering', 'encoder', 'linear_decoder'], fresh ['deform_decoder'] (expected ['deform_decoder']), config diff {'deform_decoder': [False, True]}
+PASS enc_grad_rigid         4/4 logged values, median raw 10, eff 1, task grad_norm 5
+PASS enc_grad_affine        4/4 logged values, median raw 10, eff 1, task grad_norm 5
+PASS enc_grad_deform        4/4 logged values, median raw 10, eff 2, task grad_norm 5
+INFO enc_grad_ratio         INFO median eff ratio linear/deform rigid 0.5, affine 0.5 (target [0.1, 10])
+check_mixed_run: PASS
+PASS final_step             last logged step 20 (expected >= 20)
+PASS train_rigid            4 logged train_rigid/loss values, all finite
+PASS train_affine           4 logged train_affine/loss values, all finite
+PASS train_deform           4 logged train_deform/loss values, all finite
+PASS val_rigid              final-step validation complete
+PASS val_affine             final-step validation complete
+PASS val_deform             final-step validation complete
+PASS val_mean_pair_rms_mm   val/mean_pair_rms_mm = 6.5, linear task pair RMS [6.0, 7.0]
+PASS trace_once             trace counts {'rigid': 1, 'affine': 1, 'deform': 1} (1 per task)
+PASS finite_steps           non-finite steps: 0
+PASS val_png                PNGs ['rigid_step0000020.png', 'affine_step0000020.png', 'deform_step0000020.png'] present: [True, True, True]
+PASS best_checkpoint        ckpt/best has a checkpoint: True
+PASS best_deform_checkpoint ckpt/best_deform has a checkpoint: True
+FAIL init_weights           mode partial (expected full)
+check_mixed_run: FAIL
+PASS final_step             last logged step 20 (expected >= 20)
+PASS train_rigid            4 logged train_rigid/loss values, all finite
+PASS train_affine           4 logged train_affine/loss values, all finite
+PASS train_deform           4 logged train_deform/loss values, all finite
+PASS val_rigid              final-step validation complete
+PASS val_affine             final-step validation complete
+PASS val_deform             final-step validation complete
+PASS val_mean_pair_rms_mm   val/mean_pair_rms_mm = 6.5, linear task pair RMS [6.0, 7.0]
+PASS trace_once             trace counts {'rigid': 1, 'affine': 1, 'deform': 1} (1 per task)
+PASS finite_steps           non-finite steps: 0
+PASS val_png                PNGs ['rigid_step0000020.png', 'affine_step0000020.png', 'deform_step0000020.png'] present: [True, True, True]
+PASS best_checkpoint        ckpt/best has a checkpoint: True
+PASS best_deform_checkpoint ckpt/best_deform has a checkpoint: True
+check_mixed_run: PASS
+PASS final_step             last logged step 20 (expected >= 20)
+PASS train_rigid            4 logged train_rigid/loss values, all finite
+PASS train_deform           4 logged train_deform/loss values, all finite
+PASS val_rigid              final-step validation complete
+PASS val_deform             final-step validation complete
+PASS val_mean_pair_rms_mm   skipped (1 linear task(s))
+PASS trace_once             trace counts {'rigid': 1, 'deform': 1} (1 per task)
+PASS finite_steps           non-finite steps: 0
+ok
+test_expected_pairs (tests.test_check_mixed_run.TestLevel1Chain) ... ok
+test_info_lines_missing_keys (tests.test_check_mixed_run.TestLevel1Chain) ... ok
+test_min_pairs (tests.test_check_mixed_run.TestLevel1Chain) ... ok
+test_missing_frozen4_fails (tests.test_check_mixed_run.TestLevel1Chain) ... ok
+test_project_val_every (tests.test_check_mixed_run.TestLevel1Chain) ... ok
+test_wrong_stages_fails (tests.test_check_mixed_run.TestLevel1Chain) ... ok
+test_main_exit_code (tests.test_check_mixed_run.TestLinear) ... ok
+test_missing_affine_metric_fails (tests.test_check_mixed_run.TestLinear) ... ok
+test_rigid_affine_pass (tests.test_check_mixed_run.TestLinear) ... ok
+test_rigid_affine_wrong_mean_fails (tests.test_check_mixed_run.TestLinear) ... ok
+
+----------------------------------------------------------------------
+Ran 74 tests in 3669.510s
+
+OK
+PASS val_png                PNGs ['rigid_step0000020.png', 'deform_step0000020.png'] present: [True, True]
+PASS best_checkpoint        ckpt/best has a checkpoint: True
+PASS best_deform_checkpoint ckpt/best_deform has a checkpoint: True
+PASS cascade_config         source /x/ckpt/best/best-11000, level 2, step 6000, fingerprint n_vars 120, S rel diff vs level 4 None, vs level 2 0.01
+PASS cascade_stages         stages level 4 key frozen_stage origin step 11000, level 2 key model origin step 6000
+PASS val_rigid_frozen       final-step frozen-stage baseline complete
+PASS val_deform_frozen      final-step frozen-stage baseline complete
+PASS val_rigid_frozen4      final-step frozen level-4 baseline complete
+PASS val_deform_frozen4     final-step frozen level-4 baseline complete
+INFO cascade_gain_deform    INFO cascade_gain deform: template_dice composed 0.8 vs frozen 0.75 (better) vs frozen4 0.7 (better), pair_dice composed 0.7 vs frozen 0.72 (worse) vs frozen4 0.6 (better)
+INFO cascade_gain_rigid     INFO cascade_gain rigid: center_rms_mm composed 1 vs frozen 2 (better) vs frozen4 3 (better), pair_rms_mm composed 6 vs frozen 5 (worse) vs frozen4 4 (worse)
+INFO deform_extra           INFO deform_extra (composed / frozen / frozen4 / identity): neg_jac_pct 0 / n/a / n/a / n/a, inv_consistency_mm 0.05 / n/a / n/a / n/a, ncc_template 0.5 / n/a / n/a / 0.3, ncc_pair n/a / n/a / n/a / n/a
+INFO data_wait_rigid        INFO data wait rigid: mean data 10.0 ms, compute 90.0 ms, fraction 0.100
+INFO data_wait_deform       INFO data wait deform: mean data 10.0 ms, compute 90.0 ms, fraction 0.100
+INFO g_gap_rigid            INFO g_gap rigid composed: no rigid_g validation set
+INFO g_gap_rigid_frozen     INFO g_gap rigid frozen: no rigid_g validation set
+INFO g_gap_rigid_frozen4    INFO g_gap rigid frozen4: no rigid_g validation set
+PASS min_pairs_config       config.json args.min_pairs 'n' (expected 'n')
+PASS n_pairs_rigid          4 logged train_rigid/n_pairs values, expected 4 (N 4, p 0.1)
+PASS n_pairs_deform         4 logged train_deform/n_pairs values, expected 2 (N 2, p 0.1)
+INFO gpu_peak               INFO gpu_peak 30000 MiB (29.30 GiB) vs A100 budget 36 GiB: fits
+INFO step_time              INFO step_time: per task rigid 0.1 s, deform 0.1 s; ratio-weighted mean step 0.1 s; val/wall_s median 30 (first 30, 1 passes); recal 3.0 s; projected 8000 steps = 1.3 x (S x step + 800 val x median val/wall_s + recal) = 32244 s (8.96 h)
+check_mixed_run: PASS
+PASS final_step             last logged step 20 (expected >= 20)
+PASS train_rigid            4 logged train_rigid/loss values, all finite
+PASS train_affine           4 logged train_affine/loss values, all finite
+PASS val_rigid              final-step validation complete
+PASS val_affine             final-step validation complete
+PASS val_mean_pair_rms_mm   val/mean_pair_rms_mm = 6.5, linear task pair RMS [6.0, 7.0]
+PASS trace_once             trace counts {'rigid': 1, 'affine': 1} (1 per task)
+PASS finite_steps           non-finite steps: 0
+PASS val_png                PNGs ['rigid_step0000020.png', 'affine_step0000020.png'] present: [True, True]
+PASS best_checkpoint        ckpt/best has a checkpoint: True
+check_mixed_run: PASS
+FAIL final_step             last logged step 20 (expected >= 30)
+PASS train_rigid            4 logged train_rigid/loss values, all finite
+PASS train_affine           4 logged train_affine/loss values, all finite
+PASS val_rigid              final-step validation complete
+PASS val_affine             final-step validation complete
+PASS val_mean_pair_rms_mm   val/mean_pair_rms_mm = 6.5, linear task pair RMS [6.0, 7.0]
+PASS trace_once             trace counts {'rigid': 1, 'affine': 1} (1 per task)
+PASS finite_steps           non-finite steps: 0
+PASS val_png                PNGs ['rigid_step0000020.png', 'affine_step0000020.png'] present: [True, True]
+PASS best_checkpoint        ckpt/best has a checkpoint: True
+check_mixed_run: FAIL
+EXIT 0

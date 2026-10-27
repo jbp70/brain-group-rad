@@ -34,7 +34,8 @@ from runtime import losses as LS
 from runtime import metrics as M
 from runtime import optimizers as O
 from runtime.logging import RunLogger, make_run_dir
-from runtime.run import CASCADE_SKIP_KEY, Trainer, TrainConfig, bn_recal_plan, cascade_skip_draw
+from runtime.run import (CASCADE_SKIP_KEY, Trainer, TrainConfig, bn_recal_plan, cascade_skip_draw,
+                         cascade_stage_skip_draw)
 from runtime.schedulers import ScheduleConfig
 
 SHAPE2, SHAPE4 = tuple(P.LEVEL_SHAPE[2]), tuple(P.LEVEL_SHAPE[4])
@@ -1691,6 +1692,238 @@ class TestLevel2Unchanged(CascadeTrainerCase):
         self.assertNotIn(VAL_WALL_KEY, val)
         for name in ("rigid", "affine", "deform"):
             self.assertTrue(any(k.startswith("val_%s_frozen/" % name) for k in val), name)
+
+
+# ============================================================ per-stage skip (retrain-prereqs 4, 11.3)
+def _skip_op_names(fn):
+    g = fn.get_concrete_function().graph
+    return [op.name for op in g.get_operations()
+            if any(p.startswith(cascade.SKIP_SCOPE) for p in op.name.split("/"))]
+
+
+class TestStageSkipDraw(unittest.TestCase):
+    """11.3 b: `cascade_stage_skip_draw` is deterministic per (seed, step, task, level), independent
+    across levels and tasks, and never skips at p 0."""
+
+    def test_draws(self):
+        n, p4, p2 = 20000, 0.15, 0.3
+        d4 = [cascade_stage_skip_draw(0, s, "deform", 4, p4) for s in range(n)]
+        d2 = [cascade_stage_skip_draw(0, s, "deform", 2, p2) for s in range(n)]
+        r4 = [cascade_stage_skip_draw(0, s, "rigid", 4, p4) for s in range(n)]
+        self.assertEqual(d4[:500], [cascade_stage_skip_draw(0, s, "deform", 4, p4) for s in range(500)])
+        self.assertEqual(cascade_stage_skip_draw(5, 17, "affine", 2, 0.5),
+                         random.Random("cascade-skip-affine-l2-5-17").random() < 0.5)
+        self.assertNotEqual(d4[:500], [cascade_stage_skip_draw(1, s, "deform", 4, p4) for s in range(500)])
+        rates = {"deform l4": np.mean(d4), "deform l2": np.mean(d2), "rigid l4": np.mean(r4),
+                 "deform l4 & l2": np.mean(np.logical_and(d4, d2)),
+                 "deform l4 & rigid l4": np.mean(np.logical_and(d4, r4))}
+        print("\n[11.3 b] stage skip rates over %d steps: %s" % (n, ", ".join(
+            "%s %.4f" % kv for kv in rates.items())), file=sys.stderr)
+        self.assertAlmostEqual(rates["deform l4"], p4, delta=0.01)
+        self.assertAlmostEqual(rates["deform l2"], p2, delta=0.01)
+        self.assertAlmostEqual(rates["rigid l4"], p4, delta=0.01)
+        self.assertAlmostEqual(rates["deform l4 & l2"], p4 * p2, delta=0.01)
+        self.assertAlmostEqual(rates["deform l4 & rigid l4"], p4 * p4, delta=0.01)
+        self.assertNotEqual(d4, r4)
+        self.assertFalse(any(cascade_stage_skip_draw(0, s, "deform", 4, 0.0) for s in range(n)))
+        # The legacy draw is untouched (its own seed string).
+        self.assertEqual(cascade_skip_draw(5, 17, 0.5), random.Random("cascade-skip-5-17").random() < 0.5)
+
+
+class TestStageSkipLevel2(CascadeTrainerCase):
+    """11.3 d / e (level 2): stage mode with a single frozen stage."""
+
+    STAGE = {"rigid": {4: 0.5}, "affine": {4: 0.5}, "deform": {4: 0.5}}
+
+    def test_matches_legacy(self):
+        """11.3 d: stage mode with 4:p and skip True / False gives the legacy step results (same
+        seeds and weights, max |diff| 0), for all three tasks."""
+        with _OpDeterminism(), _GrapplerOff():
+            a = self.make(cascade_config(cascade_skip_prob=0.5))
+            b = self.make(cascade_config(cascade_skip_stage=self.STAGE))
+            self.assertEqual((a._skip_mode, b._skip_mode), ("legacy", "stage"))
+            la, lb = [], []
+            for sk in (True, False):
+                for t in ("rigid", "affine", "deform"):
+                    la.append(a.train_step(t, self.batches[t], skip=sk)["loss"])
+                    lb.append(b.train_step(t, self.batches[t], skip=(sk,))["loss"])
+            sa, sb = _var_sums(a.model), _var_sums(b.model)
+        diffs = [abs(x - y) for x, y in zip(la, lb)] + [abs(x - y) for x, y in zip(sa, sb)]
+        print("\n[11.3 d] level-2 stage vs legacy skip: max |diff| %.3g over %d losses and %d variable sums"
+              % (max(diffs), len(la), len(sa)), file=sys.stderr)
+        self.assertEqual(la, lb)
+        self.assertEqual(sa, sb)
+
+    def test_trainer_stage_mode(self):
+        """11.3 e: [n_stages] bool signature, one trace per task, no skip op for p 0 tasks,
+        logged keys only for p > 0, validation without skip ops; constructor checks."""
+        stage = {"rigid": {}, "affine": {4: 0.0}, "deform": {4: 0.5}}
+        tr = self.make(cascade_config(cascade_skip_stage=stage, log_every=3), val_sets=self.val_sets(),
+                       logger=self.logger("stage"))
+        self.assertEqual((tr._skip_mode, tr._frozen_levels), ("stage", [4]))
+        for t in ("rigid", "affine", "deform"):
+            spec = tr._steps[t].input_signature[-1]
+            self.assertEqual((spec.dtype, tuple(spec.shape)), (tf.bool, (1,)), t)
+        self.assertEqual(_skip_op_names(tr._steps["rigid"]), [])
+        self.assertEqual(_skip_op_names(tr._steps["affine"]), [])
+        self.assertTrue(_skip_op_names(tr._steps["deform"]))
+        self.assertEqual(_skip_op_names(tr._val_fn("rigid", N2, False)), [])
+        self.assertEqual(_skip_op_names(tr._val_deform_fn(ND2, False)), [])
+        tr.rebuild_steps()
+        tr.trace_counts = {t: 0 for t in tr.trace_counts}
+        with self.assertRaises(TypeError):
+            tr.train_step("rigid", self.batches["rigid"], skip=True)
+        for sk in ((True,), (False,), [True]):
+            for t in ("rigid", "deform"):
+                self.assertTrue(np.isfinite(tr.train_step(t, self.batches[t], skip=sk)["loss"]), t)
+        tr.fit(6)
+        self.assertEqual(tr.trace_counts, {"rigid": 1, "affine": 1, "deform": 1})
+        recs = [r["data"] for r in self.records(tr.logger)]
+        keys = set().union(*recs)
+        self.assertIn("train_deform/cascade_skip_l4", keys)
+        self.assertFalse([k for k in keys if "cascade_skip" in k and k != "train_deform/cascade_skip_l4"])
+        start = tr.history[0]["step"] - 1
+        for h in tr.history:
+            if h["task"] == "deform":
+                self.assertEqual(h["cascade_skip_l4"], cascade_stage_skip_draw(0, h["step"] - 1, "deform", 4, 0.5))
+            else:
+                self.assertNotIn("cascade_skip_l4", h)
+            self.assertNotIn("cascade_skip", h)
+        self.assertEqual(start, 6)
+        # Constructor checks (Trainer.__init__ re-validation).
+        for bad in ({"deform": {2: 0.1}}, {"deform": {4: 1.0}}, {"deform": {4: float("nan")}}):
+            with self.assertRaises(ValueError):
+                self.make(cascade_config(cascade_skip_stage=bad))
+        with self.assertRaises(ValueError) as cm:
+            self.make(cascade_config(cascade_skip_prob=0.1, cascade_skip_stage={"deform": {4: 0.1}}))
+        self.assertIn("mutually exclusive", str(cm.exception))
+        with self.assertRaises(ValueError):
+            self.make(cascade_config(cascade_skip_stage={"deform": {4: 0.1}}), cascade_on=False)
+        off = self.make(cascade_config(cascade_skip_stage={"rigid": {}, "deform": {4: 0.0}}))
+        self.assertEqual(off._skip_mode, "off")
+        self.assertEqual(tuple(off._steps["deform"].input_signature[-1].shape), ())
+        self.assertEqual(_skip_op_names(off._steps["deform"]), [])
+
+
+class _IdentityChain:
+    """Chain wrapper whose linear returns the identity (skip-both reference, 11.3 c / e)."""
+
+    level = 2
+    n_stages = 2
+
+    def __init__(self, chain):
+        self.chain = chain
+
+    @property
+    def models(self):
+        return self.chain.models
+
+    def linear(self, x, task):
+        return tf.eye(4, batch_shape=[int(x.shape[0])], dtype=tf.float32)
+
+
+class TestStageSkipChain(ChainCase):
+    """11.3 c / e (level 1): `FrozenChain.linear_skip` / `deform_skip` and the level-1 Trainer in
+    stage mode (deform steps traced, not executed: see the chain section comment)."""
+
+    def test_chain_methods(self):
+        """11.3 c: skip4=None equals linear_stages / deform_stages + skip_to (max |diff| 0); skip4
+        True = level 2 on the identity-pre-warped x2; both True = identity."""
+        chain = self.chain()
+        x = tf.constant(self.lgroup["images"])
+        dx = tf.constant(self.dgroup1["images"])
+        T, F = tf.constant(True), tf.constant(False)
+        with _OpDeterminism():
+            st = chain.linear_stages(x, "rigid")
+            np.testing.assert_array_equal(chain.linear_skip(x, "rigid").numpy(), st["A"].numpy())
+            for s2 in (T, F):
+                np.testing.assert_array_equal(chain.linear_skip(x, "rigid", skip2=s2).numpy(),
+                                              cascade.skip_to(s2, st["A4"], st["A"]).numpy())
+            a4s = chain.linear_skip(x, "rigid", skip4=T).numpy()
+            x2 = cascade.pool_to_coarser(x)
+            eye = tf.eye(4, batch_shape=[int(x.shape[0])], dtype=tf.float32)
+            x2i = cascade.prewarp_linear(x2, eye, SP2)
+            out = chain.model2(x2i, task="rigid", training=False)
+            ref = cascade.compose_linear(out["A_raw"], eye, chain.model2.centering).numpy()
+            d_ref = float(np.max(np.abs(a4s - ref)))
+            d_unskipped = float(np.max(np.abs(a4s - st["A"].numpy())))
+            d_pre = float(np.max(np.abs(x2i.numpy() - x2.numpy())))
+            both = chain.linear_skip(x, "rigid", skip4=T, skip2=T).numpy()
+            np.testing.assert_array_equal(chain.linear_skip(x, "rigid", skip4=F, skip2=F).numpy(), st["A"].numpy())
+            ds = chain.deform_stages(dx)
+            d0 = chain.deform_skip(dx)
+            for k in ("U", "U_inv"):
+                np.testing.assert_array_equal(d0[k].numpy(), ds[k].numpy(), err_msg=k)
+            del d0
+            for s2 in (T, F):
+                d = chain.deform_skip(dx, skip2=s2)
+                for k, k4 in (("U", "U4"), ("U_inv", "U4_inv")):
+                    np.testing.assert_array_equal(d[k].numpy(), cascade.skip_to(s2, ds[k4], ds[k]).numpy(),
+                                                  err_msg=k)
+                del d
+            del ds
+            d4 = chain.deform_skip(dx, skip4=T)
+            dx2 = cascade.pool_to_coarser(dx)
+            zero = tf.zeros(tuple(dx2.shape[:4]) + (3,), tf.float32)
+            dx2i = cascade.prewarp_deform(dx2, zero)
+            o2 = chain.model2(dx2i, task="deform", training=False)
+            up = diffeo.upsample_displacement
+            d_u = max(float(np.max(np.abs(d4[k].numpy() - up(o2[s]).numpy()))) for k, s in (("U", "u"), ("U_inv", "u_inv")))
+            d_pre_d = float(np.max(np.abs(dx2i.numpy() - dx2.numpy())))
+            self.assertGreater(float(np.abs(d4["U"].numpy()).max()), 1e-4)
+            del d4, o2
+            dboth = chain.deform_skip(dx, skip4=T, skip2=T)
+            for k in ("U", "U_inv"):
+                self.assertEqual(float(np.max(np.abs(dboth[k].numpy()))), 0.0, k)
+            del dboth
+        print("\n[11.3 c] level-1 skip4: A vs compose(model2 on prewarp(x2, I), I) max |diff| %.3g (vs unskipped "
+              "%.3g); |prewarp_linear(x2, I) - x2| %.3g; U4 = 0: |U - up(u2)| %.3g, |prewarp_deform(x2, 0) - x2| %.3g"
+              % (d_ref, d_unskipped, d_pre, d_u, d_pre_d), file=sys.stderr)
+        self.assertEqual(d_ref, 0.0)
+        self.assertGreater(d_unskipped, 1e-4)
+        self.assertLess(d_pre, 1e-4)
+        self.assertLess(d_u, 1e-5)
+        self.assertLess(d_pre_d, 1e-4)
+        np.testing.assert_array_equal(both, np.broadcast_to(np.eye(4, dtype=np.float32), both.shape))
+
+    def test_trainer_stage_mode(self):
+        """11.3 e (level 1): [2] bool signature, no skip op for a p 0 task, one trace over mixed
+        values, skip semantics of the rigid step (skip 2 = level 4 alone, skip both = identity),
+        validation without skip ops."""
+        chain = self.chain()
+        a = self.make1(chain_config(cascade_skip_stage={"rigid": {}, "deform": {4: 0.15, 2: 0.15}}), chain=chain)
+        self.assertEqual((a._skip_mode, a._frozen_levels), ("stage", [4, 2]))
+        for t in ("rigid", "deform"):
+            spec = a._steps[t].input_signature[-1]
+            self.assertEqual((spec.dtype, tuple(spec.shape)), (tf.bool, (2,)), t)
+        self.assertEqual(_skip_op_names(a._steps["rigid"]), [])
+        self.assertTrue(_skip_op_names(a._steps["deform"]))
+        self.assertEqual(_skip_op_names(a._val_fn("rigid", 2, False)), [])
+        self.assertEqual(_skip_op_names(a._val_deform_fn(2, False)), [])
+        del a
+        free_memory()
+        cfg = chain_config(task_ratio={"rigid": 1.0}, cascade_skip_stage={"rigid": {4: 0.1, 2: 0.1}})
+        b = self.make1(cfg, chain=chain)
+        self.assertTrue(_skip_op_names(b._steps["rigid"]))
+        with self.assertRaises(TypeError):
+            b.train_step("rigid", self.batches1["rigid"], skip=True)
+        with self.assertRaises(TypeError):
+            b.train_step("rigid", self.batches1["rigid"], skip=(True,))
+        r_l4 = self.make1(chain_config(task_ratio={"rigid": 1.0}), chain=_Level4Chain(chain))
+        r_id = self.make1(chain_config(task_ratio={"rigid": 1.0}), chain=_IdentityChain(chain))
+        rs2 = b.train_step("rigid", self.batches1["rigid"], skip=(False, True))
+        rn2 = r_l4.train_step("rigid", self.batches1["rigid"])
+        del r_l4
+        b2 = self.make1(cfg, chain=chain)
+        rsb = b2.train_step("rigid", self.batches1["rigid"], skip=(True, True))
+        rnb = r_id.train_step("rigid", self.batches1["rigid"])
+        print("\n[11.3 e] level-1 rigid: skip l2 loss %.8g vs level-4-only chain %.8g; skip both %.8g vs identity "
+              "chain %.8g" % (rs2["loss"], rn2["loss"], rsb["loss"], rnb["loss"]), file=sys.stderr)
+        np.testing.assert_allclose(rs2["loss"], rn2["loss"], rtol=1e-4)
+        np.testing.assert_allclose(rsb["loss"], rnb["loss"], rtol=1e-4)
+        for sk in ((True, False), (False, False), (True, True)):
+            self.assertTrue(np.isfinite(b.train_step("rigid", self.batches1["rigid"], skip=sk)["loss"]))
+        self.assertEqual(b.trace_counts["rigid"], 1)
 
 
 if __name__ == "__main__":

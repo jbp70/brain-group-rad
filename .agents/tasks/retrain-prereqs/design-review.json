@@ -1,0 +1,13 @@
+{
+  "verdict": "CHANGES_REQUESTED",
+  "findings": [
+    {"id": 1, "severity": "MEDIUM", "where": "section 6 memory knobs / placeholders / r_level4 header; 14.4", "summary": "'largest fitting N' undefined for the default DK records; the only threshold (peak <= 46000 MB, unit unstated) is the full RTX 8000 TF budget with no margin for the trainer-vs-measure_level_memory gap (validation fragmentation, DALI) seen in milestone 9, while L4/L2 run under memory growth", "fix": "define fits(record) := peak <= BUDGET[partition][level] (rtx8000 L4 42000 / L2 41000 in the json's unit, dgx-a100 34000), pick N by it for every record type, GRAD_CKPT=none only if the no-ckpt record fits; smoke gpu_peak must meet the same budget; document TF_MEM_LIMIT_MB=<budget> as first fallback after a post-validation OOM"},
+    {"id": 2, "severity": "NIT", "where": "2.1", "summary": "wd shrink percentages misquoted", "fix": "0.4-4 % (wd 1e-2) and 4-33 % (wd 1e-1) for lr 1e-4..1e-3"},
+    {"id": 3, "severity": "NIT", "where": "5.2, 6, 11.5 h", "summary": "TASK_RATIO=deform:1 with default DEFORM_START 3000 emits --task-start-step deform:3000, which main.py rejects (no task at 0); dry-run test hides it", "fix": "task-start flags only when HAS_DEFORM && HAS_LINEAR && DEFORM_START > 0; assert absence in the deform-only dry run"},
+    {"id": 4, "severity": "NIT", "where": "7.2", "summary": "a job dying before creating its run dir is 'not started' and is resubmitted on every submit", "fix": "submitted (jsonl record) + not in squeue + no run dir => failed ('died before start'), never auto-resubmitted; add test"},
+    {"id": 5, "severity": "NIT", "where": "6, 7.1", "summary": "24 h limits for level 2 (N 32/16 on RTX 8000) and phase C 16000 rest on unverified step times; helper never resumes", "fix": "headers: set --time from smoke INFO step_time x 1.3, resubmit same RUN_NAME if exceeded; --c-time derived from phase-A step_time"},
+    {"id": 6, "severity": "NIT", "where": "7.1", "summary": "VAL_GROUP_SIZE 16 rationale assumes DEFORM_N_max = 32", "fix": "VAL_GROUP_SIZE = min(16, DEFORM_N_small) fixed for the sweep, or state validation fits at 16 regardless"},
+    {"id": 7, "severity": "NIT", "where": "1, 2.3", "summary": "non-finite steps are skipped by the Trainer's tf.cond(finite, ...), not (only) the LSO", "fix": "reword; conclusion (decay skipped) unchanged"}
+  ],
+  "reviewDoc": "d:\\Research\\Brain_Registration_Projects\\brain-group-rad\\.agents\\tasks\\retrain-prereqs\\design-review.md"
+}

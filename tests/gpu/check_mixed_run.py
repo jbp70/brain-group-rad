@@ -38,7 +38,10 @@ Tasks: rigid, affine (linear) and deform. Passes (exit 0) when:
   - ``--expect-bn-recal true``: a ``bn_recalibration`` event with ``n_layers_updated > 0`` and
     ``layers_without_updates == []``; INFO lines ``bn_gap <set>`` (pre / post |eval - trainmode|)
     when its gap table is non-empty (an empty table is not a failure).
-  - ``--expect-skip true``: ``train/cascade_skip_frac`` logged and finite.
+  - ``--expect-skip true``: ``train/cascade_skip_frac`` logged and finite. Per-stage skip
+    (retrain-prereqs design 4.5, config.json ``cascade.skip_mode == 'stage'``): instead, every
+    ``train_<task>/cascade_skip_l<lv>`` with p > 0 in ``cascade.skip_probs`` logged and finite at
+    least once, and INFO ``skip <task> l<lv>: observed <mean> vs p <p>`` (never a failure).
   - ``--grad-balance-rule true`` (implies --expect-enc-grad): per linear task the ratio of the
     medians of ``train_<task>/diag_enc_grad_norm_eff`` and ``train_deform/..._eff`` over the log
     records whose ``step`` field (the window end) is >= --grad-balance-from-step; prints
@@ -62,7 +65,7 @@ Tasks: rigid, affine (linear) and deform. Passes (exit 0) when:
   - ``--expect-min-pairs none|1|n`` (default none): config.json ``args.min_pairs`` equals the
     value; with n every logged ``train_deform/n_pairs`` equals expected_pairs(N_deform, N_deform,
     p_pdice) and ``train_<lin>/n_pairs`` equals expected_pairs(N, N, p_pair) (the stdlib mirror
-    of ``data_loading.postprocess.num_pairs``).
+    of ``data_loading.postprocess.num_pairs``), capped at config.json ``args.max_pairs`` when > 0.
   - ``--memory-budget-mb M`` (INFO ``gpu_peak`` line: max logged ``gpu_peak_mb`` vs M) and
     ``--project-steps S`` (INFO ``step_time`` line: per-task mean compute + data ms, the
     ratio-weighted mean step, median / first ``val/wall_s`` and the projected wall time
@@ -113,13 +116,15 @@ def _f32(x):
     return struct.unpack("f", struct.pack("f", float(x)))[0]
 
 
-def expected_pairs(m_floor, n, p):
+def expected_pairs(m_floor, n, p, max_pairs=0):
     """Sampled ordered pairs per training step: min(max(m_floor, round(p n (n - 1))), n (n - 1)),
     with the product in float32 and round half-to-even (Python 3 round = tf.round), exactly as
-    ``data_loading.postprocess.num_pairs`` (m_floor 1 for --min-pairs 1, n for --min-pairs n)."""
+    ``data_loading.postprocess.num_pairs`` (m_floor 1 for --min-pairs 1, n for --min-pairs n),
+    then capped at ``max_pairs`` K when K > 0 (--max-pairs, retrain-prereqs design 16.3)."""
     total = n * (n - 1)
     k = int(round(_f32(_f32(total) * _f32(p))))
-    return min(max(m_floor, k), total)
+    k = min(max(m_floor, k), total)
+    return min(k, int(max_pairs)) if max_pairs and int(max_pairs) > 0 else k
 
 
 def _finite(v):
@@ -396,7 +401,29 @@ def _check_bn_recal(recs):
     return res
 
 
-def _check_skip(recs):
+def _check_skip(recs, cfg=None):
+    """--expect-skip: stage mode (config.json ``cascade.skip_mode == 'stage'``, retrain-prereqs
+    design 4.5): every ``train_<task>/cascade_skip_l<lv>`` with p > 0 in ``cascade.skip_probs``
+    logged and finite at least once, plus an INFO line observed mean vs p per key; else the
+    milestone-8 legacy check of ``train/cascade_skip_frac``."""
+    casc = (cfg or {}).get("cascade") or {}
+    if casc.get("skip_mode") == "stage":
+        res = []
+        for task, probs in sorted((casc.get("skip_probs") or {}).items()):
+            for lv, p in sorted((probs or {}).items(), key=lambda kv: -int(kv[0])):
+                if not float(p) > 0:
+                    continue
+                key = "train_%s/cascade_skip_l%s" % (task, lv)
+                vals = [r["data"][key] for r in recs if key in r["data"]]
+                ok = bool(vals) and all(_finite(v) for v in vals)
+                res.append(("cascade_skip_%s_l%s" % (task, lv), ok,
+                            "%d logged %s values, all finite" % (len(vals), key)))
+                res.append(("cascade_skip_rate_%s_l%s" % (task, lv), True,
+                            "INFO skip %s l%s: observed %s vs p %g" % (task, lv, _fmt(_mean(vals)), float(p))))
+        if not res:
+            res.append(("cascade_skip", False, "config.json cascade.skip_mode is 'stage' but skip_probs "
+                        "has no p > 0"))
+        return res
     vals = [r["data"][SKIP_KEY] for r in recs if SKIP_KEY in r["data"]]
     ok = bool(vals) and all(_finite(v) for v in vals)
     return [("cascade_skip", ok, "%d logged %s values, all finite, mean %s" % (len(vals), SKIP_KEY, _fmt(_mean(vals))))]
@@ -446,6 +473,8 @@ def _check_min_pairs(recs, tasks, args, expect):
     # config.json stores the resolved value (= --group-size when unset); the or fallback is kept
     # for robustness.
     n_deform = args.get("deform_group_size") or n
+    max_pairs = args.get("max_pairs") or 0   # --max-pairs (missing in older runs -> no cap)
+    max_pairs = int(max_pairs) if _is_int(max_pairs) else 0
     for t in tasks:
         if t == DEFORM_TASK:
             size, p = n_deform, args.get("p_pdice")
@@ -457,10 +486,12 @@ def _check_min_pairs(recs, tasks, args, expect):
             res.append(("n_pairs_%s" % t, False, "config.json args lack the group size / pair probability "
                         "(size %r, p %r)" % (size, p)))
             continue
-        want = expected_pairs(size, size, p)
+        want = expected_pairs(size, size, p, max_pairs)
         bad = [v for v in vals if not (_finite(v) and abs(float(v) - want) < 1e-6)]
-        res.append(("n_pairs_%s" % t, bool(vals) and not bad, "%d logged %s values, expected %d (N %d, p %g)%s" % (
-            len(vals), key, want, size, float(p), "" if not bad else "; mismatching %s" % bad[:5])))
+        res.append(("n_pairs_%s" % t, bool(vals) and not bad,
+                    "%d logged %s values, expected %d (N %d, p %g, max pairs %d)%s" % (
+                        len(vals), key, want, size, float(p), max_pairs,
+                        "" if not bad else "; mismatching %s" % bad[:5])))
     return res
 
 
@@ -601,7 +632,7 @@ def check(run_dir, tasks, steps, expect_best=True, expect_init_weights=None, exp
     if expect_bn_recal:
         res += _check_bn_recal(recs)
     if expect_skip:
-        res += _check_skip(recs)
+        res += _check_skip(recs, _load_config(run_dir))
     if grad_balance_rule:
         res += _check_grad_balance(recs, tasks, grad_balance_from_step, args)
     if expect_min_pairs not in (None, "none"):

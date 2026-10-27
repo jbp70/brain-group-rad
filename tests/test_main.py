@@ -17,6 +17,8 @@ model (default dense_norm 'layer'), Adam 3e-4 constant LR, no flips, no dropout.
 eval-mode validation of the same group must be below 1.0 mm and within 0.5 mm of the
 training-mode (no update) value. The RMS curve is printed every 50 steps.
 """
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -505,6 +507,28 @@ class TestIntensityAugDevice(MainCase):
         with self.assertRaises(SystemExit):
             A.parse_args(["--data", self.tmp, "--intensity-aug-device", "gpu"])
 
+    def test_lowres_method(self):
+        """retrain-prereqs 11.2 f: --lowres-method tent needs the TF device; default nn."""
+        from data_loading import params as P
+        from runtime import args as A
+        self.assertEqual(P.IntensityAugConfig().low_res_method, "nn")
+        with self.assertRaises(SystemExit):
+            A.parse_args(["--data", self.tmp, "--lowres-method", "tent", "--intensity-aug-device", "dali"])
+        with self.assertRaises(SystemExit):          # dali is the default device
+            A.parse_args(["--data", self.tmp, "--lowres-method", "tent"])
+        with self.assertRaises(SystemExit):
+            A.parse_args(["--data", self.tmp, "--lowres-method", "area", "--intensity-aug-device", "tf"])
+        args, _, tc, desc = self.build(["--intensity-aug-device", "tf"])
+        self.assertEqual(args.lowres_method, "nn")
+        self.assertEqual(tc.intensity_aug_tf.low_res_method, "nn")
+        self.assertNotIn("low-res tent", desc)
+        args, _, tc, desc = self.build(["--intensity-aug-device", "tf", "--lowres-method", "tent"])
+        self.assertEqual(tc.intensity_aug_tf.low_res_method, "tent")
+        self.assertIn("intensity aug tf | low-res tent", desc)
+        # --intensity-aug false: accepted, no effect.
+        args = A.parse_args(["--data", self.tmp, "--intensity-aug", "false", "--lowres-method", "tent"])
+        self.assertIsNone(A.train_config_from_args(args).intensity_aug_tf)
+
     def test_resume_guard(self):
         from runtime import args as A
         path = os.path.join(self.tmp, "config.json")
@@ -528,6 +552,85 @@ class TestIntensityAugDevice(MainCase):
         off = A.parse_args(["--data", self.tmp, "--intensity-aug-device", "tf", "--intensity-aug", "false"])
         with self.assertRaises(SystemExit):        # same device, but the aug generators differ
             M._check_intensity_aug_device(path, off)
+
+
+class TestOptimizerMain(MainCase):
+    """Retrain-prereqs design 2.2 / test 11.1 f: the startup optimizer line and NOTE, the
+    config.json ``optimizer`` record (sgdw / adamw only) and the resume guard ``_check_optimizer``."""
+
+    BASE = ["--overfit-one-group", "--overfit-synthetic", "--level", "4", "--group-size", "4",
+            "--task-ratio", "rigid:1", "--log-every", "1", "--val-every", "0", "--val-png", "false",
+            "--schedule", "constant", "--warmup-steps", "0"] + TINY_ARGS + COMMON + ["--quiet", "false"]
+
+    def run_main(self, name, extra, steps=2):
+        argv = self.BASE + ["--results", os.path.join(self.tmp, "results"), "--run-name", name,
+                            "--overfit-max-steps", str(steps)] + extra
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = M.main(argv)
+        free_memory()
+        self.assertIn(rc, (0, 1))
+        with open(os.path.join(self.run_dir(name), "config.json")) as f:
+            return buf.getvalue(), json.load(f)
+
+    def test_adam_note_and_no_record(self):
+        out, cfg = self.run_main("adam", ["--optimizer", "adam", "--weight-decay", "1e-4"])
+        self.assertIn("NOTE: --weight-decay is ignored by --optimizer adam", out)
+        self.assertNotIn("optimizer", cfg)
+        out, cfg = self.run_main("adam0", ["--optimizer", "adam", "--weight-decay", "0"])
+        self.assertNotIn("NOTE: --weight-decay", out)
+        self.assertNotIn("optimizer", cfg)
+
+    def test_adamw_record_and_resume(self):
+        from models.group_net import GroupRegLevelModel
+        from runtime import args as A
+        out, cfg = self.run_main("w", ["--optimizer", "adamw", "--lr", "3e-4", "--weight-decay", "0.01"])
+        rec = cfg["optimizer"]
+        n = len(GroupRegLevelModel(4, A.model_config_from_args(A.parse_args(self.BASE)))
+                .build_model(4).trainable_variables)
+        free_memory()
+        self.assertEqual((rec["name"], rec["lr"], rec["weight_decay"]), ("adamw", 3e-4, 0.01))
+        self.assertEqual(rec["decayed_variables"] + rec["excluded_variables"], n)
+        self.assertGreater(rec["decayed_variables"], 0)
+        self.assertGreater(rec["excluded_variables"], 0)
+        self.assertIn("optimizer adamw | lr 0.0003 | weight decay 0.01 (decoupled, lr-scaled; excluded "
+                      "gamma/beta/bias: %d of %d variables)" % (rec["excluded_variables"], n), out)
+        self.assertNotIn("NOTE: --weight-decay", out)
+        # Resume with another optimizer: SystemExit before any restore.
+        with self.assertRaises(SystemExit) as cm:
+            self.run_main("w", ["--optimizer", "adam", "--lr", "3e-4"], steps=3)
+        free_memory()
+        msg = str(cm.exception.code)
+        self.assertIn("--optimizer adam differs from the run's saved adamw", msg)
+        # Resume with a changed --lr: allowed, logged as an event, record refreshed.
+        out, cfg = self.run_main("w", ["--optimizer", "adamw", "--lr", "1e-4", "--weight-decay", "0.01"], steps=3)
+        self.assertEqual(cfg["optimizer"]["lr"], 1e-4)
+        self.assertEqual(cfg["optimizer"]["weight_decay"], 0.01)
+        with open(os.path.join(self.run_dir("w"), "logs", "metrics.jsonl")) as f:
+            events = [r for r in (json.loads(line) for line in f)
+                      if isinstance(r.get("data"), dict)
+                      and r["data"].get("event") == "optimizer_hparam_changed_on_resume"]
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["step"], 2)
+        self.assertEqual(events[0]["data"]["old"], {"lr": 3e-4, "weight_decay": 0.01})
+        self.assertEqual(events[0]["data"]["new"], {"lr": 1e-4, "weight_decay": 0.01})
+
+    def test_check_optimizer_unit(self):
+        from runtime import args as A
+        path = os.path.join(self.tmp, "config.json")
+        with open(path, "w") as f:
+            json.dump({"args": {"lr": 3e-4, "weight_decay": 3e-5}}, f)      # no key = 'adam'
+        self.assertIsNone(M._check_optimizer(os.path.join(self.tmp, "missing.json"),
+                                             A.parse_args(["--data", self.tmp, "--optimizer", "sgdw"])))
+        self.assertIsNone(M._check_optimizer(path, A.parse_args(["--data", self.tmp])))
+        with self.assertRaises(SystemExit):
+            M._check_optimizer(path, A.parse_args(["--data", self.tmp, "--optimizer", "adamw"]))
+        changed = M._check_optimizer(path, A.parse_args(["--data", self.tmp, "--weight-decay", "0"]))
+        self.assertEqual(changed, {"old": {"lr": 3e-4, "weight_decay": 3e-5},
+                                   "new": {"lr": 3e-4, "weight_decay": 0.0}})
+        for bad in ("-1", "nan", "inf"):
+            with self.assertRaises(SystemExit):
+                A.parse_args(["--data", self.tmp, "--weight-decay", bad])
 
 
 class TestCascadeMain(MainCase):
@@ -573,6 +676,244 @@ class TestCascadeMain(MainCase):
         with self.assertRaises(SystemExit) as cm:
             M.main(common + ["--level", "2", "--cascade-from", src, "--run-name", "bad2", "--dropout", "0.1"])
         self.assertIn("dropout", str(cm.exception.code))
+
+    def test_stage_skip_record_and_resume(self):
+        """Retrain-prereqs 11.3 a (resume part): the cascade record's skip_mode / skip_probs /
+        skip_consistency_warnings, the logged per-stage key, and a resume with a changed spec
+        refreshing them and writing the cascade_skip_changed_on_resume event."""
+        res = os.path.join(self.tmp, "results")
+        common = ["--overfit-one-group", "--overfit-synthetic", "--group-size", "4", "--task-ratio", "rigid:1",
+                  "--deform-decoder", "true", "--log-every", "1", "--val-every", "0", "--val-png", "false",
+                  "--results", res] + TINY_ARGS + COMMON
+        self.assertIn(M.main(common + ["--level", "4", "--run-name", "src4", "--overfit-max-steps", "2"]), (0, 1))
+        free_memory()
+        run = common + ["--level", "2", "--cascade-from", os.path.join(self.run_dir("src4"), "ckpt", "last"),
+                        "--run-name", "c2"]
+        self.assertIn(M.main(run + ["--overfit-max-steps", "2", "--cascade-skip-linear", "4:0.5"]), (0, 1))
+        free_memory()
+        with open(os.path.join(self.run_dir("c2"), "config.json")) as f:
+            cas = json.load(f)["cascade"]
+        self.assertEqual((cas["skip_mode"], cas["skip_probs"], cas["skip_consistency_warnings"], cas["skip_prob"]),
+                         ("stage", {"rigid": {"4": 0.5}}, [], 0.0))
+        self.assertIn(M.main(run + ["--overfit-max-steps", "4", "--cascade-skip-linear", "4:0.2"]), (0, 1))
+        free_memory()
+        d = self.run_dir("c2")
+        with open(os.path.join(d, "config.json")) as f:
+            cas2 = json.load(f)["cascade"]
+        self.assertEqual(cas2["skip_probs"], {"rigid": {"4": 0.2}})
+        self.assertEqual({k: v for k, v in cas2.items() if k != "skip_probs"},
+                         {k: v for k, v in cas.items() if k != "skip_probs"})            # everything else carried
+        with open(os.path.join(d, "logs", "metrics.jsonl")) as f:
+            recs = [json.loads(line) for line in f if line.strip()]
+        self.assertTrue(any("train_rigid/cascade_skip_l4" in r["data"] for r in recs))
+        self.assertFalse(any("train/cascade_skip_frac" in r["data"] for r in recs))
+        ev = [r for r in recs if r["data"].get("event") == "cascade_skip_changed_on_resume"]
+        self.assertEqual(len(ev), 1)
+        self.assertEqual(ev[0]["data"]["old"]["skip_probs"], {"rigid": {"4": 0.5}})
+        self.assertEqual(ev[0]["data"]["new"]["skip_probs"], {"rigid": {"4": 0.2}})
+        self.assertEqual(ev[0]["step"], 2)
+
+
+class TestStageSkipArgs(unittest.TestCase):
+    """Retrain-prereqs 11.3 a (parser) and g (`main._skip_consistency`), `_refresh_skip_record`."""
+
+    BASE = ["--data", "x"]
+
+    def parse(self, extra):
+        from runtime import args as A
+        return A.parse_args(self.BASE + extra)
+
+    def parse_error(self, extra):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), self.assertRaises(SystemExit):
+            self.parse(extra)
+        return err.getvalue()
+
+    def test_valid_specs(self):
+        from runtime import args as A
+        three = ["--task-ratio", "rigid:1,affine:1,deform:2"]
+        a = self.parse(three + ["--level", "1", "--cascade-from", "y", "--cascade-skip-linear", "4:0,2:0.15",
+                                "--cascade-skip-deform", " 4:0.15 , 2:0.15 "])
+        want = {"rigid": {4: 0.0, 2: 0.15}, "affine": {4: 0.0, 2: 0.15}, "deform": {4: 0.15, 2: 0.15}}
+        self.assertEqual(a.cascade_skip_stage_parsed, want)
+        self.assertEqual(A.train_config_from_args(a).cascade_skip_stage, want)
+        self.assertEqual(M._skip_record(a), {"skip_mode": "stage", "skip_probs": {
+            "rigid": {"4": 0.0, "2": 0.15}, "affine": {"4": 0.0, "2": 0.15}, "deform": {"4": 0.15, "2": 0.15}}})
+        b = self.parse(["--level", "2", "--cascade-from", "y", "--cascade-skip-linear", ""])
+        self.assertEqual(b.cascade_skip_stage_parsed, {"rigid": {}})
+        self.assertEqual(M._skip_record(b), {"skip_mode": "off"})
+        c = self.parse(["--level", "2", "--cascade-from", "y", "--cascade-skip-prob", "0.1",
+                        "--cascade-skip-linear", "4:0"])                       # p 0 with legacy: allowed
+        self.assertEqual(M._skip_record(c), {"skip_mode": "legacy"})
+        d = self.parse([])
+        self.assertEqual(d.cascade_skip_stage_parsed, {"rigid": {}})
+        self.assertEqual(A.train_config_from_args(d).cascade_skip_stage, {"rigid": {}})
+        self.assertEqual(A.parse_skip_spec("2:0.5,4:0.25", "--x", [4, 2]), {2: 0.5, 4: 0.25})
+
+    def test_errors(self):
+        c2 = ["--level", "2", "--cascade-from", "y"]
+        cases = [
+            (c2 + ["--cascade-skip-linear", "2:0.1"], ["--cascade-skip-linear", "level 2", "2:0.1"]),
+            (c2 + ["--cascade-skip-deform", "4:1"], ["--cascade-skip-deform", "4:1", "[0, 1)"]),
+            (c2 + ["--cascade-skip-deform", "4:nan"], ["--cascade-skip-deform", "4:nan"]),
+            (c2 + ["--cascade-skip-linear", "4:0.1,4:0.2"], ["--cascade-skip-linear", "duplicate level 4"]),
+            (c2 + ["--cascade-skip-linear", "4"], ["--cascade-skip-linear", "malformed", "'4'"]),
+            (c2 + ["--cascade-skip-linear", "4:abc"], ["--cascade-skip-linear", "malformed", "'4:abc'"]),
+            (c2 + ["--cascade-skip-linear", "x:0.1"], ["--cascade-skip-linear", "malformed"]),
+            (c2 + ["--cascade-skip-prob", "0.1", "--cascade-skip-deform", "4:0.2"],
+             ["--cascade-skip-prob and --cascade-skip-linear / --cascade-skip-deform are mutually exclusive"]),
+        ]
+        for flag in ("--cascade-skip-linear", "--cascade-skip-deform"):
+            for spec in ("4:0", "", "4:0.2"):
+                for lv in ("2", "4"):
+                    cases.append((["--level", lv, flag, spec], ["%s needs --cascade-from" % flag]))
+        for extra, needles in cases:
+            msg = self.parse_error(extra)
+            for n in needles:
+                self.assertIn(n, msg, (extra, msg))
+
+    def test_skip_consistency(self):
+        lin = {"rigid": {4: 0.1}, "affine": {4: 0.1}, "deform": {}}
+        dfm = {"rigid": {}, "affine": {}, "deform": {4: 0.15, 2: 0.15}}
+        src = {"skip_prob": 0.0, "skip_mode": "stage",
+               "skip_probs": {"rigid": {"4": 0.0}, "affine": {"4": 0.0}, "deform": {"4": 0.15}}}
+        self.assertEqual(M._skip_consistency(src, dfm), [])
+        self.assertEqual(M._skip_consistency(src, lin), ["rigid", "affine"])
+        self.assertEqual(M._skip_consistency({"skip_prob": 0.1}, dict(lin, **dfm)), [])
+        self.assertEqual(M._skip_consistency({"skip_prob": 0.0}, {"rigid": {4: 0.1}, "affine": {}, "deform": {4: 0.15}}),
+                         ["rigid", "deform"])
+        self.assertEqual(M._skip_consistency(None, lin), [])
+        self.assertEqual(M._skip_consistency(src, {"rigid": {2: 0.2}, "deform": {4: 0.0, 2: 0.3}}), [])
+        lines = M._skip_consistency_lines(src, ["rigid"]) + M._skip_consistency_lines({"skip_prob": 0.0}, ["deform"])
+        self.assertEqual(lines, [
+            "WARNING: --cascade-skip-linear skips level 4 for rigid but the level-2 source was trained with level-4 "
+            "skip p = 0 for it; the frozen level-2 stage will see out-of-distribution inputs",
+            "WARNING: --cascade-skip-deform skips level 4 for deform but the level-2 source was trained with level-4 "
+            "skip p = none for it; the frozen level-2 stage will see out-of-distribution inputs"])
+
+    def test_refresh_skip_record(self):
+        old = {"source_level": 4, "skip_prob": 0.0, "fingerprint": {"n_vars": 1}}
+        a = self.parse(["--level", "2", "--cascade-from", "y"])
+        rec, changed = M._refresh_skip_record(old, a)
+        self.assertIsNone(changed)                         # pre-feature record, flags off: no event
+        self.assertEqual(rec, dict(old, skip_mode="off", skip_consistency_warnings=[]))
+        b = self.parse(["--level", "2", "--cascade-from", "y", "--cascade-skip-linear", "4:0.3"])
+        rec2, changed2 = M._refresh_skip_record(rec, b)
+        self.assertEqual(rec2["skip_probs"], {"rigid": {"4": 0.3}})
+        self.assertEqual(changed2["old"]["skip_mode"], "off")
+        self.assertEqual(changed2["new"], {"skip_mode": "stage", "skip_probs": {"rigid": {"4": 0.3}},
+                                           "skip_consistency_warnings": []})
+        self.assertIsNone(M._refresh_skip_record(rec2, b)[1])
+        # Level 1: the warnings come from the level-2 source's config.json (JSON only).
+        tmp = tempfile.mkdtemp(prefix="bgr_skip_")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        src_path = os.path.join(tmp, "config.json")
+        with open(src_path, "w") as f:
+            json.dump({"cascade": {"skip_prob": 0.0, "skip_probs": {"deform": {"4": 0.0}}}}, f)
+        c = self.parse(["--level", "1", "--cascade-from", "y", "--task-ratio", "rigid:1,deform:1",
+                        "--cascade-skip-deform", "4:0.15"])
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            rec3, changed3 = M._refresh_skip_record({"source_config": src_path, "skip_prob": 0.0}, c)
+        self.assertEqual(rec3["skip_consistency_warnings"], ["deform"])
+        self.assertIn("WARNING: --cascade-skip-deform skips level 4 for deform", out.getvalue())
+        self.assertIsNotNone(changed3)
+        rec4, _ = M._refresh_skip_record(dict(rec3, source_config=os.path.join(tmp, "missing.json")), c)
+        self.assertEqual(rec4["skip_consistency_warnings"], ["deform"])    # unreadable source: carried
+
+
+class TestTaskStartArgs(unittest.TestCase):
+    """Retrain-prereqs 11.4 d: --task-start-step / --task-start-ramp-steps parsing and errors."""
+
+    BASE = ["--data", "x", "--steps", "100", "--task-ratio", "rigid:1,affine:1,deform:2"]
+
+    def parse(self, extra, base=None):
+        from runtime import args as A
+        return A.parse_args((self.BASE if base is None else base) + extra)
+
+    def parse_error(self, extra, base=None):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), self.assertRaises(SystemExit):
+            self.parse(extra, base)
+        return err.getvalue()
+
+    def test_valid(self):
+        from runtime import args as A
+        a = self.parse([])
+        self.assertEqual(a.task_start_steps_parsed, {})
+        self.assertEqual(a.task_start_ramp_steps, 0)
+        tc = A.train_config_from_args(a)
+        self.assertEqual((tc.task_start_steps, tc.task_start_ramp_steps), ({}, 0))
+        b = self.parse(["--task-start-step", " deform:30 , affine:0 ", "--task-start-ramp-steps", "5"])
+        self.assertEqual(b.task_start_steps_parsed, {"deform": 30, "affine": 0})
+        tc = A.train_config_from_args(b)
+        self.assertEqual((tc.task_start_steps, tc.task_start_ramp_steps), ({"deform": 30, "affine": 0}, 5))
+        c = self.parse(["--task-start-step", "deform:0"])                 # all at 0: no ramp, allowed
+        self.assertEqual(c.task_start_steps_parsed, {"deform": 0})
+        # The start < steps check uses the overfit step count.
+        o = self.parse(["--task-start-step", "deform:6"],
+                       base=["--overfit-one-group", "--overfit-synthetic", "--overfit-max-steps", "20",
+                             "--task-ratio", "rigid:1,affine:1,deform:2"])
+        self.assertEqual((o.steps, o.task_start_steps_parsed), (20, {"deform": 6}))
+
+    def test_errors(self):
+        cases = [
+            (["--task-start-step", "foo:10"], ["unknown task 'foo'"]),
+            (["--task-start-step", "deform:10"], ["task 'deform' is not in --task-ratio"], ["--data", "x"]),
+            (["--task-start-step", "deform:100"], ["deform:100 >= --steps 100", "never train"]),
+            (["--task-start-step", "rigid:5,affine:5,deform:5"], ["at least one task of --task-ratio must start at step 0"]),
+            (["--task-start-step", "deform:-1"], ["integer >= 0", "'deform:-1'"]),
+            (["--task-start-step", "deform:1.5"], ["integer >= 0", "'deform:1.5'"]),
+            (["--task-start-step", "deform"], ["needs task:step"]),
+            (["--task-start-step", "deform:3,deform:4"], ["duplicate task 'deform'"]),
+            (["--task-start-step", "deform:3", "--task-start-ramp-steps", "-1"], ["--task-start-ramp-steps must be >= 0"]),
+            (["--task-start-ramp-steps", "4"], ["--task-start-ramp-steps needs a --task-start-step entry > 0"]),
+            (["--task-start-step", "deform:0", "--task-start-ramp-steps", "4"],
+             ["--task-start-ramp-steps needs a --task-start-step entry > 0"]),
+        ]
+        for case in cases:
+            extra, needles = case[0], case[1]
+            base = case[2] if len(case) > 2 else None
+            msg = self.parse_error(extra, base)
+            for n in needles:
+                self.assertIn(n, msg, (extra, msg))
+
+
+class TestMaxPairsArgs(unittest.TestCase):
+    """Retrain-prereqs design 16.3 / 16.4: --max-pairs parsing, TrainConfig, startup NOTE lines."""
+
+    BASE = ["--data", "x", "--task-ratio", "rigid:1,affine:1,deform:2", "--group-size", "32",
+            "--deform-group-size", "16"]
+
+    def parse(self, extra):
+        from runtime import args as A
+        return A.parse_args(self.BASE + extra)
+
+    def test_default_and_value(self):
+        from runtime import args as A
+        a = self.parse([])
+        self.assertEqual(a.max_pairs, 0)
+        self.assertEqual(A.train_config_from_args(a).max_pairs, 0)
+        b = self.parse(["--max-pairs", "64"])
+        self.assertEqual(A.train_config_from_args(b).max_pairs, 64)
+        self.assertEqual(A.args_to_dict(b)["max_pairs"], 64)
+
+    def test_errors(self):
+        for bad in ("-1", "1.5", "x"):
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err), self.assertRaises(SystemExit, msg=bad):
+                self.parse(["--max-pairs", bad])
+            self.assertIn("--max-pairs", err.getvalue(), bad)
+
+    def test_notes(self):
+        self.assertEqual(M._pair_notes(self.parse([])), [])
+        self.assertEqual(M._pair_notes(self.parse(["--max-pairs", "64"])), [])
+        self.assertEqual(M._pair_notes(self.parse(["--max-pairs", "64", "--min-pairs", "n"])), [])
+        notes = M._pair_notes(self.parse(["--max-pairs", "20", "--min-pairs", "n"]))
+        self.assertEqual(notes, ["NOTE: max-pairs 20 < N (32): the min-pairs n floor is capped"])
+        notes = M._pair_notes(self.parse(["--max-pairs", "8", "--min-pairs", "n", "--pair-recompute", "true"]))
+        self.assertEqual(len(notes), 2)
+        self.assertIn("(16, 32)", notes[0])
+        self.assertIn("--pair-recompute is a level-1 option", notes[1])
 
 
 class TestLevel1CascadeMain(MainCase):

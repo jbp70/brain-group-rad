@@ -149,6 +149,14 @@ losses) is unchanged. Skip (p > 0) drops the LAST frozen stage: A_prev = A4, U =
 ``linear_stages`` / ``deform_stages`` and `CS.skip_to`. Eval-mode validation adds the level-4
 alone baselines ``val_<set>_frozen4/...`` next to ``val_<set>_frozen/...`` (levels 4 + 2), and
 level-1 runs log the validation wall time ``val/wall_s``.
+
+Per-task, per-stage skip (retrain-prereqs design 4, ``cfg.cascade_skip_stage`` {task: {level: p}}):
+``self._skip_mode`` 'legacy' (cascade_skip_prob > 0, the code above verbatim) | 'stage' | 'off'.
+In stage mode the cascade steps take skip bool[n_stages] (index i = ``self._frozen_levels[i]``,
+[4] or [4, 2]); a stage with p == 0 for the task builds no op. A skipped stage contributes the
+identity and later stages still run: level 2 skip 4 -> A_prev = I, U = U_inv = 0; level 1 via
+`FrozenChain.linear_skip` / `deform_skip`. `fit` draws `cascade_stage_skip_draw` per (task,
+level, seed, step) and logs ``train_<task>/cascade_skip_l<lv>`` for p > 0. Validation never skips.
 """
 import collections
 import dataclasses
@@ -220,7 +228,8 @@ DEFORM_DIAG_KEYS = ("diag_feat_spread", "diag_feat_rel_spread", "diag_dead_frac"
 TASK_GRAD_NORM_EPS = 1e-12
 TASK_GRAD_NORM_KEYS = ("grad_norm_scale", "grad_norm_gated_frac", "grad_norm_normed")
 # Minimum pair count (milestone 9 phase 2, design-m9-phase2 section 5): number of sampled training
-# pairs of a step, in its results (and logged as train_<task>/n_pairs) only with min_pairs 'n'.
+# pairs of a step, in its results (and logged as train_<task>/n_pairs) only with min_pairs 'n' or
+# a --max-pairs cap > 0 (retrain-prereqs design 16.3).
 PAIR_COUNT_KEY = "n_pairs"
 # Level cascade (milestone 8): extra deform-step diagnostics (max |u_res| of the level-2 residual,
 # cascade steps only), the per-step skip flag key and the BN recalibration gap metrics
@@ -238,6 +247,14 @@ BN_GAP_METRICS = {"linear": ("center_rms_mm", "pair_rms_mm"), DEFORM: ("template
 def cascade_skip_draw(seed, step, p):
     """Stateless per-step skip draw of the cascade (design section 6): True with probability `p`."""
     return random.Random("cascade-skip-%d-%d" % (int(seed), int(step))).random() < float(p)
+
+
+def cascade_stage_skip_draw(seed, step, task, level, p):
+    """Stateless per-stage skip draw (retrain-prereqs design 4.3): True with probability `p`,
+    independent per (task, frozen level, seed, step); False without a draw when p == 0."""
+    if float(p) == 0.0:
+        return False
+    return random.Random("cascade-skip-%s-l%d-%d-%d" % (task, int(level), int(seed), int(step))).random() < float(p)
 
 
 def bn_recal_plan(num_batches, ratio):
@@ -349,9 +366,15 @@ def collapse_diagnostics(pre_head, params):
 
 
 class TaskSchedule:
-    """Stateless seeded task draw: task(step) depends only on (seed, step) and the ratio."""
+    """Stateless seeded task draw: task(step) depends only on (seed, step) and the ratio.
 
-    def __init__(self, ratio, seed=0):
+    Delayed start (retrain-prereqs design 5.3): ``start_steps`` {task: step} (None / {} = every task
+    from step 0, today's draws exactly). At a step where some task has not started, ``u`` is drawn
+    exactly as today and mapped onto a cumulative table over the active tasks (ratio order,
+    renormalised, cached per active set); a single active task is returned without a draw.
+    """
+
+    def __init__(self, ratio, seed=0, start_steps=None):
         if isinstance(ratio, str):
             ratio = parse_task_ratio(ratio)
         self.ratio = collections.OrderedDict((k, float(v)) for k, v in ratio.items() if float(v) > 0)
@@ -364,19 +387,54 @@ class TaskSchedule:
         for k, v in self.ratio.items():
             acc += v / total
             self._cum.append((acc, k))
+        self.start_steps = {}
+        for k, v in dict(start_steps or {}).items():
+            if k not in self.ratio:
+                raise ValueError("start_steps: task %r is not in the ratio %s" % (k, list(self.ratio)))
+            if int(v) != v or int(v) < 0:
+                raise ValueError("start_steps[%r] must be an integer >= 0, got %r" % (k, v))
+            if int(v) > 0:
+                self.start_steps[k] = int(v)
+        if self.start_steps and all(k in self.start_steps for k in self.ratio):
+            raise ValueError("start_steps: at least one task must start at step 0, got %r" % (start_steps,))
+        self._cum_active = {}
 
     @property
     def tasks(self):
         return list(self.ratio.keys())
 
+    def active_tasks(self, step):
+        """The tasks drawn at `step` (start <= step), in ratio order."""
+        return [k for k in self.ratio if self.start_steps.get(k, 0) <= int(step)]
+
+    def _active_table(self, active):
+        key = tuple(active)
+        cum = self._cum_active.get(key)
+        if cum is None:
+            total = sum(self.ratio[k] for k in active)
+            acc = 0.0
+            cum = []
+            for k in active:
+                acc += self.ratio[k] / total
+                cum.append((acc, k))
+            self._cum_active[key] = cum
+        return cum
+
     def draw(self, step):
-        if len(self._cum) == 1:
-            return self._cum[0][1]
+        cum = self._cum
+        if self.start_steps:
+            active = self.active_tasks(step)
+            if len(active) < len(self.ratio):
+                if len(active) == 1:
+                    return active[0]
+                cum = self._active_table(active)
+        if len(cum) == 1:
+            return cum[0][1]
         u = random.Random(self.seed * 1000003 + int(step)).random()
-        for c, k in self._cum:
+        for c, k in cum:
             if u < c:
                 return k
-        return self._cum[-1][1]
+        return cum[-1][1]
 
 
 @dataclasses.dataclass
@@ -452,6 +510,9 @@ class TrainConfig:
     # stage in training (0 = off, no skip ops built) and the deform validation pair chunk size
     # (16 = the milestone-6 value).
     cascade_skip_prob: float = 0.0
+    # Per-task, per-stage skip (retrain-prereqs design 4): {task: {frozen level: p}}; empty / all
+    # p == 0 = off (no skip ops built). Excludes cascade_skip_prob > 0.
+    cascade_skip_stage: Dict[str, Dict[int, float]] = dataclasses.field(default_factory=dict)
     val_pair_chunk: int = 16
     # --val-image-chunk (level-1 validation memory): > 0 = the deform validation metrics are computed
     # k images (and val_pair_chunk pairs) at a time (`_deform_errors_chunked`); 0 = unchunked (today).
@@ -464,12 +525,19 @@ class TrainConfig:
     # Minimum sampled training pairs per step for the pairwise losses (p_pair / p_pdice; design-m9-phase2
     # section 5): '1' = today, 'n' = the group size (k == N: random N-cycle). Validation unaffected.
     min_pairs: str = "1"
+    # --max-pairs K (retrain-prereqs design 16.3): cap on the sampled training pairs per step,
+    # applied after min_pairs (k = min(K, max(floor, round(p N (N - 1))))); 0 = no cap, no new op.
+    max_pairs: int = 0
     # TF-side intensity augmentation (--intensity-aug-device tf): a `params.IntensityAugConfig`
     # passed to every post-process (DALI then runs without it), or None (default: no op).
     intensity_aug_tf: Optional[object] = None
     # --pair-recompute: the deform TRAINING step's pairwise Dice / LNCC one pair at a time under
     # tf.recompute_grad (`losses.pair_terms_recompute`); False = today's ops. Validation unaffected.
     pair_recompute: bool = False
+    # Delayed task start (retrain-prereqs design 5): {task: first step} (tasks not listed start at 0;
+    # {} = today) and the per-task LR ramp length W on the delayed task's steps (0 = no ramp).
+    task_start_steps: Dict[str, int] = dataclasses.field(default_factory=dict)
+    task_start_ramp_steps: int = 0
 
 
 def _peak_gpu_mb():
@@ -543,9 +611,42 @@ class Trainer:
             p = float(cfg.cascade_skip_prob)
             if not (math.isfinite(p) and 0.0 <= p < 1.0):
                 raise ValueError("cascade_skip_prob must be in [0, 1), got %r" % cfg.cascade_skip_prob)
+        # Per-task, per-stage skip (retrain-prereqs design 4.2 / 4.3): stage order of the [n_stages]
+        # skip input and the mode, both fixed at construction.
+        self._frozen_levels = [4] if self._n_stages == 1 else ([4, 2] if self._n_stages == 2 else [])
+        self._skip_stage = {}
+        for t, spec in dict(cfg.cascade_skip_stage or {}).items():
+            self._skip_stage[t] = {}
+            for lv, ps in dict(spec).items():
+                ps = float(ps)
+                if cascade is None:
+                    raise ValueError("cascade_skip_stage needs a cascade (got a spec for task %r)" % t)
+                if int(lv) not in self._frozen_levels:
+                    raise ValueError("cascade_skip_stage[%r]: level %r is not a frozen level %s"
+                                     % (t, lv, self._frozen_levels))
+                if not (math.isfinite(ps) and 0.0 <= ps < 1.0):
+                    raise ValueError("cascade_skip_stage[%r][%r] must be in [0, 1), got %r" % (t, lv, ps))
+                self._skip_stage[t][int(lv)] = ps
+        stage_on = any(ps > 0 for d in self._skip_stage.values() for ps in d.values())
+        if stage_on and float(cfg.cascade_skip_prob) > 0:
+            raise ValueError("cascade_skip_prob and cascade_skip_stage are mutually exclusive")
+        self._skip_mode = ("legacy" if cascade is not None and float(cfg.cascade_skip_prob) > 0
+                           else ("stage" if stage_on else "off"))
         self.S_np = np.asarray(S, np.float64)
         self.S = tf.constant(self.S_np, tf.float32)
-        self.schedule = TaskSchedule(cfg.task_ratio, cfg.seed)
+        # Delayed task start (retrain-prereqs design 5.3): re-check what the parser checks.
+        ratio_tasks = [k for k, v in dict(cfg.task_ratio).items() if float(v) > 0]
+        starts = dict(cfg.task_start_steps or {})
+        for t, st in starts.items():
+            if t not in ratio_tasks:
+                raise ValueError("task_start_steps: task %r is not in task_ratio %s" % (t, ratio_tasks))
+            if not (isinstance(st, int) and st >= 0):
+                raise ValueError("task_start_steps[%r] must be an integer >= 0, got %r" % (t, st))
+        if ratio_tasks and all(starts.get(t, 0) > 0 for t in ratio_tasks):
+            raise ValueError("task_start_steps: at least one task must start at step 0, got %r" % starts)
+        if not (isinstance(cfg.task_start_ramp_steps, int) and cfg.task_start_ramp_steps >= 0):
+            raise ValueError("task_start_ramp_steps must be an integer >= 0, got %r" % cfg.task_start_ramp_steps)
+        self.schedule = TaskSchedule(cfg.task_ratio, cfg.seed, starts)
         missing = [t for t in self.schedule.tasks if t not in self.sources]
         if missing:
             raise ValueError("no data source for task(s) %s" % missing)
@@ -574,6 +675,9 @@ class Trainer:
                            if DEFORM in self.schedule.tasks and self.linear_tasks else {})
         if cfg.min_pairs not in MIN_PAIRS:
             raise ValueError("min_pairs must be one of %s, got %r" % (MIN_PAIRS, cfg.min_pairs))
+        if (isinstance(cfg.max_pairs, bool) or not isinstance(cfg.max_pairs, (int, np.integer))
+                or cfg.max_pairs < 0):
+            raise ValueError("max_pairs must be an int >= 0 (0 = no cap), got %r" % (cfg.max_pairs,))
         self.step = tf.Variable(0, dtype=tf.int64, trainable=False, name="global_step")
         self.postprocess = {}
         for t in self.sources:
@@ -582,14 +686,15 @@ class Trainer:
                     self.level, flip_prob=cfg.flip_prob, p_pdice=cfg.p_pdice,
                     seed=cfg.seed + POSTPROCESS_SEED_OFFSET[t], n_classes=cfg.n_classes,
                     residual_affine=cfg.deform_residual_affine, min_pairs=cfg.min_pairs,
-                    intensity_aug=cfg.intensity_aug_tf)
+                    intensity_aug=cfg.intensity_aug_tf, max_pairs=int(cfg.max_pairs))
             else:
                 self.postprocess[t] = LinearPostprocess(t, self.level, flip_prob=cfg.flip_prob,
                                                         p_pair=cfg.p_pair,
                                                         seed=cfg.seed + POSTPROCESS_SEED_OFFSET[t],
                                                         target_iters=cfg.target_iters,
                                                         min_pairs=cfg.min_pairs,
-                                                        intensity_aug=cfg.intensity_aug_tf)
+                                                        intensity_aug=cfg.intensity_aug_tf,
+                                                        max_pairs=int(cfg.max_pairs))
         self._identity_cache = {}
         self._frozen_cache = {}         # cascade: frozen-stage validation baselines
         self.trace_counts = {t: 0 for t in self.sources}
@@ -666,6 +771,24 @@ class Trainer:
             return int(self.cfg.deform_group_size)
         return int(self.cfg.group_size)
 
+    def _skip_spec(self):
+        """Trailing skip input of the cascade step functions: bool[] (legacy / off) or
+        bool[n_stages] in stage mode (index i = ``self._frozen_levels[i]``)."""
+        if self._skip_mode == "stage":
+            return tf.TensorSpec([self._n_stages], tf.bool)
+        return tf.TensorSpec([], tf.bool)
+
+    def stage_skip_probs(self, task):
+        """{frozen level: p} of `task` in stage mode (unlisted levels 0), else {}."""
+        if self._skip_mode != "stage":
+            return {}
+        return {lv: float(self._skip_stage.get(task, {}).get(lv, 0.0)) for lv in self._frozen_levels}
+
+    def _stage_skip_on(self, task):
+        """Trace-time switches (on4, on2) of `task`: True iff stage mode and p > 0 for that level."""
+        p = self.stage_skip_probs(task)
+        return p.get(4, 0.0) > 0, p.get(2, 0.0) > 0
+
     def _make_deform_step(self):
         model, opt, cfg = self.model, self.optimizer, self.cfg
         task = DEFORM
@@ -684,14 +807,18 @@ class Trainer:
             ncc_kw["lean_losses"] = True
         if cfg.pair_recompute:                  # trace-time switch: off = today's ops
             ncc_kw["pair_recompute"] = True
-            ncc_kw["n_pairs"] = num_pairs_static(self._group_size(task), cfg.p_pdice, cfg.min_pairs)
+            ncc_kw["n_pairs"] = num_pairs_static(self._group_size(task), cfg.p_pdice, cfg.min_pairs,
+                                                 int(cfg.max_pairs))
         cascade_kw = {"lean": True} if lean else {}
         w = self._task_weight(task)
         norm_on = self.task_grad_norm > 0      # trace-time switch: off adds no op
-        pairs_on = cfg.min_pairs == "n"         # trace-time switch: '1' adds no op / result key
+        # trace-time switch: '1' without a cap adds no op / result key
+        pairs_on = cfg.min_pairs == "n" or cfg.max_pairs > 0
         cascade = self.cascade                 # trace-time switch (design section 5): None adds no op
         skip_on = cascade is not None and float(cfg.cascade_skip_prob) > 0
         chain = self._n_stages == 2            # trace-time switch: frozen 4 -> 2 chain (level 1)
+        stage = self._skip_mode == "stage"     # trace-time switch: per-stage skip (retrain-prereqs 4.3)
+        on4, on2 = self._stage_skip_on(task)
 
         def body(images, labels, t_dali=None, skip=None):
             self.trace_counts[task] += 1          # Python side effect: runs only while tracing
@@ -700,7 +827,16 @@ class Trainer:
             in_finite = tf.reduce_all(tf.math.is_finite(x))
             batch["images"] = tf.where(in_finite, x, tf.zeros_like(x))
             x_in = batch["images"]
-            if cascade is not None and not chain:  # frozen stage + pre-warp, outside the tape
+            if stage and not chain:               # level 2, stage mode: skip level 4 = U = U_inv = 0
+                prev = cascade.deform(batch["images"])
+                U, U_inv = prev["U"], prev["U_inv"]
+                if on4:
+                    U, U_inv = CS.skip_fields(skip[0], [U, U_inv])
+            elif stage:                           # level 1, stage mode: independent level 4 / 2 skips
+                prev = cascade.deform_skip(batch["images"], skip4=skip[0] if on4 else None,
+                                           skip2=skip[1] if on2 else None)
+                U, U_inv = prev["U"], prev["U_inv"]
+            elif cascade is not None and not chain:  # frozen stage + pre-warp, outside the tape
                 prev = cascade.deform(batch["images"])
                 U, U_inv = prev["U"], prev["U_inv"]
                 if skip_on:
@@ -773,7 +909,7 @@ class Trainer:
 
         if cascade is not None:                   # residual affine excluded (Trainer.__init__)
             return tf.function(lambda images, labels, skip: body(images, labels, None, skip),
-                               input_signature=signature + [tf.TensorSpec([], tf.bool)])
+                               input_signature=signature + [self._skip_spec()])
         if residual:
             return tf.function(lambda images, labels, t_dali: body(images, labels, t_dali),
                                input_signature=signature)
@@ -791,11 +927,14 @@ class Trainer:
             raise ValueError("loss_scale_mm2 must be finite and > 0, got %r" % loss_scale)
         w = self._task_weight(task)
         norm_on = self.task_grad_norm > 0      # trace-time switch: off adds no op
-        pairs_on = cfg.min_pairs == "n"         # trace-time switch: '1' adds no op / result key
+        # trace-time switch: '1' without a cap adds no op / result key
+        pairs_on = cfg.min_pairs == "n" or cfg.max_pairs > 0
         S = self.S
         cascade = self.cascade                 # trace-time switch (design section 4): None adds no op
         skip_on = cascade is not None and float(cfg.cascade_skip_prob) > 0
         chain = self._n_stages == 2            # trace-time switch: frozen 4 -> 2 chain (level 1)
+        stage = self._skip_mode == "stage"     # trace-time switch: per-stage skip (retrain-prereqs 4.3)
+        on4, on2 = self._stage_skip_on(task)
         spacing = P.LEVEL_SPACING[self.level]
 
         def body(images, t_dali, rt_dali=None, skip=None):
@@ -807,7 +946,14 @@ class Trainer:
             in_finite = tf.reduce_all(tf.math.is_finite(x))
             batch["images"] = tf.where(in_finite, x, tf.zeros_like(x))
             x_in = batch["images"]
-            if cascade is not None and not chain:  # frozen stage + pre-warp, outside the tape
+            if stage and not chain:               # level 2, stage mode: skip level 4 = A_prev = I
+                A_prev = cascade.linear(batch["images"], task)
+                if on4:
+                    A_prev = CS.skip_linear(skip[0], A_prev)
+            elif stage:                           # level 1, stage mode: independent level 4 / 2 skips
+                A_prev = cascade.linear_skip(batch["images"], task, skip4=skip[0] if on4 else None,
+                                             skip2=skip[1] if on2 else None)
+            elif cascade is not None and not chain:  # frozen stage + pre-warp, outside the tape
                 A_prev = cascade.linear(batch["images"], task)
                 if skip_on:
                     A_prev = CS.skip_linear(skip, A_prev)
@@ -876,7 +1022,7 @@ class Trainer:
             return res
 
         if cascade is not None:                   # one extra trailing input: skip bool[] (design section 6)
-            skip_spec = [tf.TensorSpec([], tf.bool)]
+            skip_spec = [self._skip_spec()]
             if task == "rigid":
                 return tf.function(lambda images, t_dali, rt_dali, skip: body(images, t_dali, rt_dali, skip),
                                    input_signature=signature + skip_spec)
@@ -916,10 +1062,17 @@ class Trainer:
     def train_step(self, task, batch_tuple, skip=False):
         """Run one step of `task` on a DALI-format tuple (control extras are ignored). Returns
         Python scalars. ``skip`` (cascade only, design section 6): skip the frozen stage in this step
-        (passed as the step's trailing bool input; ignored without a cascade)."""
+        (passed as the step's trailing bool input; ignored without a cascade). In stage mode
+        (retrain-prereqs design 4.3) ``skip`` is a tuple / list of n_stages bools in the order of
+        ``self._frozen_levels`` (a bare bool raises TypeError)."""
         batch_tuple, _ = self.split_batch(task, batch_tuple)
         if self.cascade is None:
             out = self._steps[task](*batch_tuple)
+        elif self._skip_mode == "stage":
+            if not isinstance(skip, (tuple, list)) or len(skip) != self._n_stages:
+                raise TypeError("stage-mode skip must be a tuple / list of %d bools (levels %s), got %r"
+                                % (self._n_stages, self._frozen_levels, skip))
+            out = self._steps[task](*batch_tuple, tf.constant([bool(s) for s in skip], tf.bool))
         else:
             out = self._steps[task](*batch_tuple, tf.constant(bool(skip)))
         res = {k: float(v.numpy()) for k, v in out.items() if k not in ("finite", "n_vars_updated")}
@@ -1717,6 +1870,11 @@ class Trainer:
             s = int(self.step.numpy())
             task = self.schedule.draw(s)
             lr = lr_at(s, cfg.schedule)
+            # Delayed task's LR ramp (retrain-prereqs design 5.3); untouched otherwise.
+            t_start = int((cfg.task_start_steps or {}).get(task, 0))
+            ramp = int(cfg.task_start_ramp_steps)
+            if t_start > 0 and ramp > 0 and s < t_start + ramp:
+                lr *= (s - t_start + 1) / ramp
             O.set_learning_rate(self.optimizer, lr)
             # Control files first (curriculum / G of this step), then the batch. With the DALI
             # prefetch the batch may still come from an earlier state (~1 batch); its emitted
@@ -1725,14 +1883,24 @@ class Trainer:
             t0 = time.perf_counter()
             batch, extras = self.split_batch(task, next(self.sources[task]))
             t1 = time.perf_counter()
-            skip = cascade_skip_draw(cfg.seed, s, p_skip) if p_skip > 0 else False
+            if self._skip_mode == "stage":     # retrain-prereqs design 4.3: one draw per frozen stage
+                p_stage = self.stage_skip_probs(task)
+                skip = tuple(cascade_stage_skip_draw(cfg.seed, s, task, lv, p_stage[lv])
+                             for lv in self._frozen_levels)
+            else:
+                skip = cascade_skip_draw(cfg.seed, s, p_skip) if p_skip > 0 else False
             res = self.train_step(task, batch, skip=skip)
             t2 = time.perf_counter()
             done = s + 1
             rec = {"step": done, "task": task, "lr": lr, "data_ms": 1e3 * (t1 - t0),
                    "compute_ms": 1e3 * (t2 - t1)}
             rec.update(res)
-            if p_skip > 0:
+            if self._skip_mode == "stage":
+                for lv, sk in zip(self._frozen_levels, skip):
+                    if p_stage[lv] > 0:
+                        rec["cascade_skip_l%d" % lv] = bool(sk)
+                        acc.update({"train_%s/cascade_skip_l%d" % (task, lv): float(sk)})
+            elif p_skip > 0:
                 rec["cascade_skip"] = bool(skip)
                 acc.update({CASCADE_SKIP_KEY: float(skip)})
             if self.cascade is not None:

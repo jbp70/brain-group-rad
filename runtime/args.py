@@ -46,12 +46,21 @@ Pattern from the rigid project's ``runtime/args.py`` (argparse + ``str2bool``). 
 * minimum pair count (milestone 9 phase 2, `.agents/tasks/milestone-9-phase2/design-m9-phase2.md`
   section 5): --min-pairs 1 (today: at least 1 sampled training pair per step); 'n' raises the
   floor to the group size N. --p-pair and --p-pdice must be in (0, 1].
+* --max-pairs K (retrain-prereqs design 16.3): cap on the sampled training pairs per step, applied
+  after --min-pairs (k = min(K, max(floor, round(p N (N - 1))))); K >= 0, 0 = no cap (default).
 * intensity augmentation (`.agents/tasks/tf-intensity-aug/plan.md`): --intensity-aug true,
   --intensity-aug-device dali (in the DALI pipelines, every run unchanged); 'tf' runs the same
   chain in the TF post-process (DALI gets IntensityAugConfig.off()); not with
   --overfit-one-group. --intensity-aug false turns it off on both devices.
+  --lowres-method nn (default) | tent (retrain-prereqs design section 3; shift-free
+  triangle-filtered low-res, TF device only: errors with --intensity-aug-device dali, no effect
+  with --intensity-aug false).
 * --pair-recompute false (default: today's ops); true = the deform training step's pairwise
   Dice / LNCC one pair at a time under tf.recompute_grad (needs 'deform' in --task-ratio).
+  Level-1 option only: it unrolls one serialized block per pair; at level 4 with N 48 (226 pairs)
+  graph construction ran ~2 h at 99 % CPU (cluster job 10519650).
+* delayed task start (retrain-prereqs design section 5.2): --task-start-step 'task:step' (default
+  None = every task from step 0, today) and --task-start-ramp-steps W (default 0 = no LR ramp).
 """
 import argparse
 import collections
@@ -118,6 +127,41 @@ def parse_task_ratio(text):
     return out
 
 
+def parse_task_start_steps(text, ratio):
+    """--task-start-step 'deform:3000' -> {task: start step} (only listed tasks; None / '' -> {}).
+
+    retrain-prereqs design 5.2: every task must be in `ratio` (the parsed --task-ratio), steps are
+    integers >= 0, no duplicates (ValueError naming the problem). The checks against --steps and
+    "one task starts at 0" need the final step count and are done in `parse_args`.
+    """
+    out = collections.OrderedDict()
+    if text is None:
+        return out
+    for part in str(text).split(","):
+        part = part.strip()
+        if not part:
+            continue
+        name, sep, v = part.partition(":")
+        name = name.strip()
+        if name not in ALL_TASKS:
+            raise ValueError("unknown task {!r} in --task-start-step {!r} (tasks: {})".format(name, text, ALL_TASKS))
+        if name not in ratio:
+            raise ValueError("--task-start-step: task {!r} is not in --task-ratio ({})".format(
+                name, ",".join(ratio)))
+        if not sep or not v.strip():
+            raise ValueError("--task-start-step needs task:step, got {!r}".format(part))
+        try:
+            step = int(v.strip())
+        except ValueError:
+            raise ValueError("--task-start-step: step must be an integer >= 0, got {!r}".format(part))
+        if step < 0:
+            raise ValueError("--task-start-step: step must be an integer >= 0, got {!r}".format(part))
+        if name in out:
+            raise ValueError("--task-start-step: duplicate task {!r} in {!r}".format(name, text))
+        out[name] = step
+    return out
+
+
 def parse_task_loss_weights(text):
     """'rigid:1,affine:1,deform:4' -> {task: weight} (finite, > 0) for every task in ALL_TASKS;
     tasks not named get 1.0. None or '' -> all 1.0."""
@@ -138,6 +182,36 @@ def parse_task_loss_weights(text):
         if not (math.isfinite(weight) and weight > 0):
             raise ValueError("task loss weight must be finite and > 0, got {!r}".format(part))
         out[name] = weight
+    return out
+
+
+def parse_skip_spec(text, flag, levels):
+    """Per-stage cascade skip spec (retrain-prereqs design 4.2): '4:0,2:0.15' -> {level: p}.
+
+    Comma list of ``level:prob``; every level an int in `levels` (the run's frozen stage levels),
+    p finite in [0, 1), no duplicate level; '' -> {} (unlisted levels = 0). Errors raise
+    ValueError naming `flag` and the bad entry."""
+    out = {}
+    for part in str(text).split(","):
+        part = part.strip()
+        if not part:
+            continue
+        lv, sep, pv = part.partition(":")
+        try:
+            if not sep:
+                raise ValueError
+            level = int(lv.strip())
+            prob = float(pv.strip())
+        except ValueError:
+            raise ValueError("%s: malformed entry %r (expected level:prob)" % (flag, part))
+        if level not in levels:
+            raise ValueError("%s: level %d in %r is not a frozen stage of this run (frozen levels %s)"
+                             % (flag, level, part, list(levels)))
+        if not (math.isfinite(prob) and 0.0 <= prob < 1.0):
+            raise ValueError("%s: probability in %r must be finite and in [0, 1)" % (flag, part))
+        if level in out:
+            raise ValueError("%s: duplicate level %d in %r" % (flag, level, part))
+        out[level] = prob
     return out
 
 
@@ -200,7 +274,8 @@ def build_parser():
     g.add_argument("--dampening", type=float, default=0.0)
     g.add_argument("--nesterov", type=str2bool, default=True)
     g.add_argument("--decoupled", type=str2bool, default=False, help="decoupled weight decay (SGDW)")
-    g.add_argument("--weight-decay", type=float, default=3e-5)
+    g.add_argument("--weight-decay", type=float, default=3e-5,
+                   help="used by sgdw and adamw only; adam ignores it (retrain-prereqs design 2)")
     g.add_argument("--exclude-from-weight-decay", type=str2bool, default=True, help="no decay on gamma/beta/bias")
     g.add_argument("--clipnorm", type=float, default=12.0, help="global_clipnorm (<= 0 disables)")
     g.add_argument("--schedule", default="cosine", choices=["cosine", "poly", "cycle", "constant"])
@@ -215,6 +290,15 @@ def build_parser():
                    "Needed on 8 GB WSL GPUs, where growing into the last GB pages GPU memory to host RAM")
     g = p.add_argument_group("tasks and losses")
     g.add_argument("--task-ratio", default="rigid:1", help="e.g. 'rigid:1,affine:1' or 'rigid:1,affine:1,deform:2'")
+    g.add_argument("--task-start-step", default=None, metavar="SPEC",
+                   help="delayed task start (retrain-prereqs design 5): comma list 'task:step', e.g. "
+                   "'deform:3000'; tasks must be in --task-ratio, steps integers >= 0 and < --steps; "
+                   "tasks not listed start at 0 and at least one task must start at 0. Before its "
+                   "start a task is never drawn (the others share the ratio). Default: all at 0")
+    g.add_argument("--task-start-ramp-steps", type=int, default=0, metavar="W",
+                   help="linear LR ramp on a delayed task's steps s in [start, start + W): lr x "
+                   "(s - start + 1) / W (tasks starting at 0 never get it). 0 = no ramp (default); "
+                   "> 0 needs a --task-start-step entry > 0")
     g.add_argument("--lambda-pair", type=float, default=1.0)
     g.add_argument("--loss-scale-mm2", type=float, default=1.0,
                    help="divide the training objective (center + lambda_pair * pair, mm^2) by this "
@@ -245,6 +329,11 @@ def build_parser():
                    "size N (k = min(max(N, round(p N (N-1))), N (N-1)); k == N samples a random "
                    "N-cycle so every image is once source and once target). Validation pairs are "
                    "unaffected")
+    g.add_argument("--max-pairs", type=int, default=0,
+                   help="cap on the sampled training pairs per step (linear pairwise loss and deform "
+                   "pairwise Dice/LNCC), applied after --min-pairs (k = min(K, max(floor, "
+                   "round(p N (N-1))))), so a K below the min-pairs floor wins; 0 = no cap "
+                   "(default). Validation pairs (--val-deform-max-pairs) are unaffected")
     g.add_argument("--flip-prob", type=float, default=0.5, help="per-axis group flip probability")
     g.add_argument("--target-iters", type=int, default=10)
     g = p.add_argument_group("deformable task (milestone 6; 'deform' in --task-ratio)")
@@ -290,7 +379,9 @@ def build_parser():
     g.add_argument("--pair-recompute", type=str2bool, default=False,
                    help="memory knob (tf-intensity-aug addendum): each sampled deform pair's warp, "
                    "pairwise soft Dice and pairwise LNCC under tf.recompute_grad, one pair alive at a "
-                   "time in forward and backward (same values and gradients); deform task only")
+                   "time in forward and backward (same values and gradients); deform task only. "
+                   "Level-1 option only: it unrolls one serialized block per pair, and at level 4 "
+                   "with N 48 (226 pairs) graph construction ran ~2 h (cluster job 10519650)")
     g.add_argument("--split-group-conv", type=str2bool, default=False,
                    help="memory knob (milestone 9): group blocks compute conv(x) + conv(group mean) "
                    "instead of conv(concat(x, mean)); same variables and checkpoints")
@@ -323,6 +414,10 @@ def build_parser():
                    help="where the intensity augmentation runs: 'dali' (in the DALI pipelines, "
                    "default) or 'tf' (DALI without it, the same chain in the TF post-process; "
                    "frees ~9.5 GB of DALI device memory at level 1). Not with --overfit-one-group")
+    g.add_argument("--lowres-method", choices=list(P.LOWRES_METHODS), default="nn",
+                   help="simulated low-res of the intensity augmentation (retrain-prereqs design "
+                   "section 3): 'nn' (NN down + linear up, default, as DALI) or 'tent' "
+                   "(triangle-filtered down + linear up, shift-free; needs --intensity-aug-device tf)")
     g = p.add_argument_group("curriculum and global transform (design 3.2 v3.5; both default off)")
     g.add_argument("--curriculum", type=str2bool, default=False,
                    help="linear ramp of the per-image ranges from the --<task>-*-start values to "
@@ -378,6 +473,16 @@ def build_parser():
                    "is skipped (A_prev = I, U = 0) in training; at level 1 the LAST frozen stage "
                    "(level 2) is skipped (A_prev = A4, U = U4 of the level-4 stage); in [0, 1), > 0 "
                    "needs --cascade-from; 0 = off (default, no skip ops built). Validation never skips")
+    g.add_argument("--cascade-skip-linear", default=None, metavar="SPEC",
+                   help="per-stage skip of the frozen stages for the LINEAR tasks (rigid and affine "
+                   "share it; retrain-prereqs design 4): comma list level:prob over the run's frozen "
+                   "levels (--level 2: 4; --level 1: 4, 2), e.g. '4:0,2:0.15'; p in [0, 1), unlisted "
+                   "levels 0. A skipped stage contributes the identity and later stages still run; "
+                   "independent draws per stage, task and step; validation never skips. Needs "
+                   "--cascade-from; excludes --cascade-skip-prob > 0. Default: off")
+    g.add_argument("--cascade-skip-deform", default=None, metavar="SPEC",
+                   help="per-stage skip of the frozen stages for the deform task (same format and "
+                   "rules as --cascade-skip-linear), e.g. '4:0.15,2:0.15'. Default: off")
     g.add_argument("--bn-recal-batches", type=int, default=0,
                    help="BN recalibration of the trainable level-2 (or level-1) stage at the start of a fresh "
                    "cascade run: this many forward-only training batches (split over the tasks "
@@ -453,6 +558,8 @@ def parse_args(argv=None):
     if args.intensity_aug_device == "tf" and args.overfit_one_group:
         parser.error("--intensity-aug-device tf needs the DALI training path (--overfit-one-group "
                      "has no intensity augmentation)")
+    if args.lowres_method == "tent" and intensity_aug_device(args) == "dali":
+        parser.error("--lowres-method tent needs --intensity-aug-device tf (DALI only has nn)")
     if args.group_size is None:
         args.group_size = DEFAULT_GROUP_SIZE[args.level]
     if not (math.isfinite(args.loss_scale_mm2) and args.loss_scale_mm2 > 0):
@@ -461,6 +568,8 @@ def parse_args(argv=None):
                       ("--task-grad-norm-min", args.task_grad_norm_min)):
         if not (math.isfinite(val) and val >= 0):
             parser.error("%s must be finite and >= 0, got %r" % (flag, val))
+    if not (math.isfinite(args.weight_decay) and args.weight_decay >= 0):
+        parser.error("--weight-decay must be finite and >= 0, got %r" % args.weight_decay)
     if args.val_png_k < 1 or args.val_png_group < 0:
         parser.error("--val-png-k must be >= 1 and --val-png-group >= 0")
     if args.group_size < 2:
@@ -489,6 +598,8 @@ def parse_args(argv=None):
         parser.error("--integration-steps must be >= 0, got %d" % args.integration_steps)
     if args.val_deform_max_pairs < 1:
         parser.error("--val-deform-max-pairs must be >= 1, got %d" % args.val_deform_max_pairs)
+    if args.max_pairs < 0:
+        parser.error("--max-pairs must be >= 0 (0 = no cap), got %d" % args.max_pairs)
     if args.val_pair_chunk < 1:
         parser.error("--val-pair-chunk must be >= 1, got %d" % args.val_pair_chunk)
     if args.val_image_chunk < 0:
@@ -510,6 +621,27 @@ def parse_args(argv=None):
         parser.error("--cascade-skip-prob must be finite and in [0, 1), got %r" % p_skip)
     if p_skip > 0 and not cascade:
         parser.error("--cascade-skip-prob > 0 needs --cascade-from")
+    # Per-task, per-stage skip (retrain-prereqs design 4.2): the --cascade-from check first, so
+    # --level 4 always gets this message.
+    skip_specs = (("--cascade-skip-linear", args.cascade_skip_linear),
+                  ("--cascade-skip-deform", args.cascade_skip_deform))
+    for flag, spec in skip_specs:
+        if spec is not None and not cascade:
+            parser.error("%s needs --cascade-from" % flag)
+    frozen_levels = [4] if args.level == 2 else [4, 2]
+    parsed_specs = {}
+    for flag, spec in skip_specs:
+        try:
+            parsed_specs[flag] = {} if spec is None else parse_skip_spec(spec, flag, frozen_levels)
+        except ValueError as e:
+            parser.error(str(e))
+    if p_skip > 0 and any(p > 0 for d in parsed_specs.values() for p in d.values()):
+        parser.error("--cascade-skip-prob and --cascade-skip-linear / --cascade-skip-deform are "
+                     "mutually exclusive")
+    args.cascade_skip_stage_parsed = {}
+    for task in args.task_ratio_parsed:
+        flag = "--cascade-skip-deform" if task == DEFORM_TASK else "--cascade-skip-linear"
+        args.cascade_skip_stage_parsed[task] = dict(parsed_specs[flag])
     k_recal = args.bn_recal_batches
     if k_recal < 0:
         parser.error("--bn-recal-batches must be >= 0, got %d" % k_recal)
@@ -551,6 +683,22 @@ def parse_args(argv=None):
         args.run_name = "l%d_%s_%s" % (args.level, ratio, datetime.datetime.now().strftime("%Y%m%d-%H%M%S"))
     if args.overfit_one_group:
         args.steps = args.overfit_max_steps
+    # Delayed task start (retrain-prereqs design 5.2), after the final --steps is known.
+    try:
+        args.task_start_steps_parsed = dict(parse_task_start_steps(args.task_start_step,
+                                                                   args.task_ratio_parsed))
+    except ValueError as e:
+        parser.error(str(e))
+    for task, start in args.task_start_steps_parsed.items():
+        if start >= args.steps:
+            parser.error("--task-start-step %s:%d >= --steps %d: the task would never train"
+                         % (task, start, args.steps))
+    if all(args.task_start_steps_parsed.get(t, 0) > 0 for t in args.task_ratio_parsed):
+        parser.error("--task-start-step: at least one task of --task-ratio must start at step 0")
+    if args.task_start_ramp_steps < 0:
+        parser.error("--task-start-ramp-steps must be >= 0, got %d" % args.task_start_ramp_steps)
+    if args.task_start_ramp_steps > 0 and not any(v > 0 for v in args.task_start_steps_parsed.values()):
+        parser.error("--task-start-ramp-steps needs a --task-start-step entry > 0")
     for task in TRAIN_TASKS:
         for k in ("log_scale", "shear"):
             name = "%s_%s_start" % (task, k)
@@ -690,11 +838,17 @@ def train_config_from_args(args):
                        overfit_dice_threshold=args.overfit_dice_threshold,
                        overfit_fold_max=args.overfit_fold_max,
                        val_deform_max_pairs=args.val_deform_max_pairs,
-                       cascade_skip_prob=args.cascade_skip_prob, val_pair_chunk=args.val_pair_chunk,
+                       cascade_skip_prob=args.cascade_skip_prob,
+                       cascade_skip_stage={t: dict(d) for t, d in
+                                           getattr(args, "cascade_skip_stage_parsed", {}).items()},
+                       val_pair_chunk=args.val_pair_chunk,
                        val_image_chunk=args.val_image_chunk,
                        lean_sampler=bool(args.lean_sampler), lean_losses=bool(args.lean_losses),
-                       min_pairs=args.min_pairs, intensity_aug_tf=intensity_aug_tf(args),
-                       pair_recompute=bool(args.pair_recompute))
+                       min_pairs=args.min_pairs, max_pairs=int(args.max_pairs),
+                       intensity_aug_tf=intensity_aug_tf(args),
+                       pair_recompute=bool(args.pair_recompute),
+                       task_start_steps=dict(getattr(args, "task_start_steps_parsed", {})),
+                       task_start_ramp_steps=int(getattr(args, "task_start_ramp_steps", 0)))
 
 
 def intensity_aug_device(args):
@@ -705,7 +859,7 @@ def intensity_aug_device(args):
 def intensity_aug_tf(args):
     """`IntensityAugConfig` for the TF post-process (--intensity-aug-device tf), else None."""
     if intensity_aug_device(args) == "tf" and not args.overfit_one_group:
-        return P.IntensityAugConfig()
+        return P.IntensityAugConfig(low_res_method=getattr(args, "lowres_method", "nn"))
     return None
 
 

@@ -11,6 +11,17 @@ tf.Variables elementwise; this port compares by identity. One optimizer is share
 build it on ALL trainable variables (`build_optimizer`) before the first step, otherwise a
 rigid-first run has no slots for the scale/shear head and a later affine step fails the
 variable-key lookup.
+
+Weight decay per optimizer (retrain-prereqs design 2): ``adam`` ignores ``weight_decay``, so
+every m4-m9 Adam run trained with zero weight decay whatever its config.json said. ``adamw`` is
+Keras 2.10 ``experimental.AdamW``: decoupled decay ``w <- w - lr_t * wd * w`` before the
+unchanged Adam update, with lr_t = the optimizer's current (scheduled) ``learning_rate``;
+excluded names gamma / beta / bias (BatchNorm and LayerNorm affine parameters and every bias).
+At wd 0 AdamW equals Adam op for op. A non-finite step is skipped together with its decay
+(the decay lives in ``update_step``): in fp32 by the Trainer's ``tf.cond(finite, apply, skip)``
+around ``apply_gradients``; under AMP the Trainer gates only on input finiteness and passes
+non-finite gradients on, so the LossScaleOptimizer's own check is the gradient guard (it skips
+the update and lowers its scale).
 """
 import re
 
@@ -18,6 +29,7 @@ import tensorflow as tf
 
 DEFAULT_WD_EXCLUDE = ("gamma", "beta", "bias")
 OPTIMIZERS = ("sgdw", "sgd", "adam", "adamw")
+WEIGHT_DECAY_OPTIMIZERS = ("sgdw", "adamw")  # the optimizers that apply --weight-decay
 _Base = tf.keras.optimizers.experimental.Optimizer
 
 
@@ -112,8 +124,10 @@ def make_optimizer(name="sgdw", lr=0.01, weight_decay=3e-5, momentum=0.99, dampe
                    jit_compile=False):
     """Build one optimizer (wrapped in a LossScaleOptimizer when ``amp``).
 
-    ``clipnorm`` is the global clip norm (None or <= 0 disables). The weight-decay exclusion
-    (`DEFAULT_WD_EXCLUDE` names) applies to sgdw and adamw.
+    ``clipnorm`` is the global clip norm (None or <= 0 disables). ``weight_decay`` is used by
+    `WEIGHT_DECAY_OPTIMIZERS` only (``adam`` and ``sgd`` ignore it); ``adamw`` decays
+    ``w <- w - lr_t * wd * w`` before the Adam update (lr_t = current learning_rate). The
+    weight-decay exclusion (`DEFAULT_WD_EXCLUDE` names) applies to sgdw and adamw.
     """
     clip = float(clipnorm) if clipnorm is not None and clipnorm > 0 else None
     exp = tf.keras.optimizers.experimental

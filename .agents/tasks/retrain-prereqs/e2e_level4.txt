@@ -1,0 +1,42 @@
+FEAT-004 local level-4 end-to-end run (retrain-prereqs design 12.4)
+=====================================================================
+Date: 2026-10-27, local WSL Ubuntu, conda env tf_gpu (Python 3.9 / TF 2.10), GTX 1080 8 GB (cc 6.1).
+Env: PYTHONDONTWRITEBYTECODE=1 TF_CPP_MIN_LOG_LEVEL=3 TF_CUDNN_WORKSPACE_LIMIT_IN_MB=512
+     BGR_TF_GPU_LIMIT_MB=6000 TF_CUDNN_USE_AUTOTUNE=0; main.py itself capped with --gpu-memory-limit-mb 6000.
+
+Command (repo root):
+python main.py --level 4 --overfit-one-group --overfit-synthetic --group-size 4 \
+  --task-ratio rigid:1,affine:1,deform:2 --optimizer adamw --weight-decay 1e-2 \
+  --task-start-step deform:6 --task-start-ramp-steps 4 --amp true \
+  --overfit-max-steps 20 --overfit-threshold-mm 0 --log-every 1 --val-every 10 --val-png false \
+  --gpu-memory-limit-mb 6000 --seed 0 --results .agents/tasks/retrain-prereqs/e2e_tmp --run-name e2e_l4 \
+  --log-backend jsonl --filters 8,16,16,16,16,16 --reductions 16,8 --dense 64,32 --decoder-widths 8,8,8,8,8
+(TINY widths = tests/runtime_helpers.TINY_ARGS; synthetic phantom groups, no DALI, no TF intensity aug -
+ --overfit-one-group cannot use it.)
+
+Result: EXIT CODE 1 after 127 s wall = overfit threshold not reached in 20 steps (expected and accepted;
+--overfit-threshold-mm 0 can never be reached). Training and both validations (steps 10, 20) ran.
+
+Startup line: optimizer adamw | lr 0.0003 | weight decay 0.01 (decoupled, lr-scaled; excluded gamma/beta/bias: 50 of 68 variables)
+config.json optimizer record: {"decayed_variables": 18, "excluded_variables": 50, "lr": 0.0003, "name": "adamw", "weight_decay": 0.01}
+config.json args: task_start_step='deform:6' task_start_steps_parsed={'deform': 6} task_start_ramp_steps=4 amp=True optimizer='adamw'
+
+Task per step (metrics.jsonl, logged step = s + 1):
+  affine: s = 0, 2, 5, 7, 9, 12, 16   (+ s = 11, 13 affine steps skipped as non-finite, see below)
+  rigid:  s = 1, 3, 4, 8, 14, 18
+  deform: s = 6, 10, 15, 17, 19
+  -> first deform step s = 6; NO deform step before the start (s 0..5 rigid/affine only); 5 deform steps after.
+Losses: every logged loss / center / pair value finite (0 non-finite). Deform losses 0.378-0.417, linear 1157-3131 mm^2.
+AMP: 2 steps (s = 11, 13, both affine) skipped by the trainer's non-finite guard with grad_norm inf and a finite
+  loss = mixed_float16 loss-scale warm-up overflow (same pattern as the cluster AMP runs, 8-11 early skips);
+  nonfinite_total 2, run continued normally.
+LR ramp (schedule cosine, base 3e-4, warmup 1000 > 20 steps, so lr_at is the linear warm-up):
+  deform s = 6: logged lr 4.50001e-07 == lr_at(6) x (6 - 6 + 1) / 4 = 1.80000e-06 / 4  (exact ==)
+  deform s = 10, 15, 17, 19 (>= start + W = 10): lr == lr_at(s) exactly
+  every rigid / affine step: lr == lr_at(s) exactly          -> LR_RAMP_CHECK PASS (20/20 steps ==)
+GPU peak (TF): 763 MB linear only, 2353 MB after the first deform step.
+Validation step 20: val_rigid center 22.16 mm, val_affine center 26.37 mm, val_deform pair Dice 0.7742
+  (= identity 0.7742; 5 tiny deform updates at warm-up lr), mean pair 38.42 mm - not meaningful at 20 steps.
+Checker script verdict: E2E_CHECK PASS (no deform before s = 6, deform after, finite losses, optimizer record present).
+
+Temp results dir .agents/tasks/retrain-prereqs/e2e_tmp deleted after the check.

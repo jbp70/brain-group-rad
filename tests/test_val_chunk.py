@@ -63,6 +63,7 @@ class TestChunkedEqualsUnchunked(unittest.TestCase):
 
 
 @unittest.skipUnless(tf.config.list_physical_devices("GPU"), "needs a GPU")
+@unittest.skipIf(tf_setup.DEFER_MEMORY_TESTS, tf_setup.DEFER_MEMORY_REASON)
 class TestValidationMemory(unittest.TestCase):
     """Level 2 (80x112x96), TINY widths, deform N 2, LNCC 1/1, lean sampler: the train step peaks at
     ~4.6 GB of the 6 GB limit (N 4 does not fit): validation peak unchunked vs chunk 1,

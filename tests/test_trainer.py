@@ -86,6 +86,69 @@ class TestTaskSchedule(unittest.TestCase):
         d3 = [s3.draw(i) for i in range(6000)]
         self.assertAlmostEqual(d3.count("deform") / 6000.0, 2.0 / 3.0, delta=0.03)
 
+    @staticmethod
+    def _old_draws(ratio, seed, n):
+        """Hard-coded replica of the pre-delayed-start TaskSchedule.draw loop."""
+        import random
+        ratio = [(k, float(v)) for k, v in ratio.items() if float(v) > 0]
+        total = sum(v for _, v in ratio)
+        acc, cum = 0.0, []
+        for k, v in ratio:
+            acc += v / total
+            cum.append((acc, k))
+        out = []
+        for step in range(n):
+            if len(cum) == 1:
+                out.append(cum[0][1])
+                continue
+            u = random.Random(seed * 1000003 + step).random()
+            for c, k in cum:
+                if u < c:
+                    out.append(k)
+                    break
+            else:
+                out.append(cum[-1][1])
+        return out
+
+    def test_no_start_steps_unchanged(self):
+        # Retrain-prereqs 11.4 a: without starts (None, {} or all 0) the draws are today's, exactly.
+        for ratio, seed in (({"rigid": 1, "affine": 1, "deform": 2}, 0), ({"rigid": 3, "affine": 1}, 5),
+                            ({"deform": 1}, 2), ({"rigid": 1, "deform": 0.5}, 17)):
+            want = self._old_draws(ratio, seed, 10000)
+            for starts in (None, {}, {t: 0 for t in ratio}):
+                s = TaskSchedule(ratio, seed, starts)
+                self.assertEqual([s.draw(i) for i in range(10000)], want, (ratio, seed, starts))
+            self.assertEqual([TaskSchedule(ratio, seed).draw(i) for i in range(10000)], want)
+
+    def test_delayed_start(self):
+        # Retrain-prereqs 11.4 b: deform:3000 -> no deform before 3000; 1:1 before, 1:1:2 after.
+        ratio = {"rigid": 1, "affine": 1, "deform": 2}
+        s = TaskSchedule(ratio, 0, {"deform": 3000})
+        self.assertEqual(s.active_tasks(2999), ["rigid", "affine"])
+        self.assertEqual(s.active_tasks(3000), ["rigid", "affine", "deform"])
+        before = [s.draw(i) for i in range(3000)]
+        self.assertNotIn("deform", before)
+        self.assertAlmostEqual(before.count("rigid") / 3000.0, 0.5, delta=0.02)
+        after = [s.draw(i) for i in range(3000, 23000)]
+        for t, f in (("rigid", 0.25), ("affine", 0.25), ("deform", 0.5)):
+            self.assertAlmostEqual(after.count(t) / 20000.0, f, delta=0.02, msg=t)
+        # From the start on every task is active: today's draws exactly.
+        self.assertEqual(after, [TaskSchedule(ratio, 0).draw(i) for i in range(3000, 23000)])
+        # 1:1 over 20000 draws before a (far) start; deterministic and call-order independent.
+        late = TaskSchedule(ratio, 0, {"deform": 30000})
+        pre = [late.draw(i) for i in range(20000)]
+        self.assertNotIn("deform", pre)
+        self.assertAlmostEqual(pre.count("rigid") / 20000.0, 0.5, delta=0.02)
+        self.assertEqual(pre, [TaskSchedule(ratio, 0, {"deform": 30000}).draw(i) for i in range(20000)])
+        rev = {i: late.draw(i) for i in reversed(range(500))}
+        self.assertEqual([rev[i] for i in range(500)], pre[:500])
+        # A single active task is returned without a draw.
+        one = TaskSchedule({"rigid": 1, "deform": 2}, 0, {"deform": 10})
+        self.assertEqual({one.draw(i) for i in range(10)}, {"rigid"})
+        for bad in ({"affine": 3}, {"rigid": 2, "deform": 3}, {"deform": -1}):
+            with self.assertRaises(ValueError):
+                TaskSchedule({"rigid": 1, "deform": 2}, 0, bad)
+
 
 class TestTrainStep(TrainerCase):
     def test_none_gradients_filtered(self):
@@ -906,6 +969,23 @@ class TestMinPairsTrainer(DeformCase):
         with self.assertRaises(ValueError):
             self.make_deform(config(task_ratio=ratio, min_pairs="x"))
 
+    def test_max_pairs(self):
+        """--max-pairs (retrain-prereqs design 16.3): the cap reaches both post-processes, the
+        step results carry the capped n_pairs (also with min_pairs '1'), invalid values raise."""
+        ratio = {"rigid": 1.0, "deform": 1.0}
+        for mp, cap, want in (("n", 3, 3.0), ("1", 3, 1.0), ("n", 64, float(N))):
+            tr = self.make_deform(config(task_ratio=ratio, min_pairs=mp, max_pairs=cap))
+            self.assertEqual({t: p.max_pairs for t, p in tr.postprocess.items()},
+                             {"rigid": cap, "deform": cap})
+            for task, batch in (("rigid", self.groups["rigid"]["batch"]), ("deform", self.dgroup["batch"])):
+                res = tr.train_step(task, batch)
+                self.assertTrue(res["finite"])
+                self.assertEqual(res[PAIR_COUNT_KEY], want, (mp, cap, task))
+            free_memory()
+        for bad in (-1, 1.5, True):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                self.make_deform(config(task_ratio=ratio, max_pairs=bad))
+
 
 class TestTFIntensityAug(DeformCase):
     """--intensity-aug-device tf: TrainConfig.intensity_aug_tf reaches every post-process, its
@@ -948,6 +1028,15 @@ class TestTFIntensityAug(DeformCase):
         self.assertTrue(tr2.checkpoint.restore_last())
         for t, pp in tr2.postprocess.items():
             np.testing.assert_array_equal(pp.aug_generator.state.numpy(), states[t], t)
+
+    def test_tent_lowres_step_finite(self):
+        """retrain-prereqs 3: low_res_method 'tent' runs inside the Trainer post-process."""
+        aug = P.IntensityAugConfig(low_res_prob=1.0, low_res_method="tent")
+        tr = self.make_deform(config(task_ratio={"rigid": 1.0, "deform": 1.0}, intensity_aug_tf=aug))
+        for task, batch in (("rigid", self.groups["rigid"]["batch"]), ("deform", self.dgroup["batch"])):
+            res = tr.train_step(task, batch)
+            self.assertTrue(res["finite"], task)
+            self.assertTrue(np.isfinite(float(res["loss"])), task)
 
 
 class TestThreeTasks(DeformCase):
@@ -1031,6 +1120,71 @@ class TestThreeTasks(DeformCase):
                                  ("affine", N, True), ("deform", 2, False), ("deform", 2, True)]))
         self.assertTrue(tr.checkpoint.latest_best.endswith("best-%d" % n_steps))
         self.assertTrue(tr.checkpoint.latest_best_named("deform").endswith("best_deform-%d" % n_steps))
+
+
+class TestDelayedTaskStart(DeformCase):
+    """Retrain-prereqs 11.4 c / e: the delayed task's LR ramp in fit() and a short three-task run
+    with a delayed deform start."""
+
+    def test_lr_ramp(self):
+        # 11.4 c: affine starts at 6 with a 4-step ramp; rigid steps keep lr_at(s).
+        from runtime.schedulers import lr_at
+        start, W, n_steps = 6, 4, 14
+        seed = next(sd for sd in range(1000)
+                    if {TaskSchedule({"rigid": 1, "affine": 1}, sd, {"affine": start}).draw(i)
+                        for i in range(start, start + W)} == {"rigid", "affine"}
+                    and "affine" in {TaskSchedule({"rigid": 1, "affine": 1}, sd, {"affine": start}).draw(i)
+                                     for i in range(start + W, n_steps)})
+        sched = ScheduleConfig("cosine", base_lr=1e-3, total_steps=n_steps, warmup_steps=2)
+        cfg = config(task_ratio={"rigid": 1.0, "affine": 1.0}, seed=seed, schedule=sched, steps=n_steps,
+                     task_start_steps={"affine": start}, task_start_ramp_steps=W)
+        tr = self.make(cfg)
+        tr.fit()
+        self.assertEqual(len(tr.history), n_steps)
+        seen = set()
+        for h in tr.history:
+            s = h["step"] - 1
+            base = lr_at(s, sched)
+            if h["task"] == "affine":
+                self.assertGreaterEqual(s, start)
+                want = base * (s - start + 1) / W if s < start + W else base
+                seen.add("ramp" if s < start + W else "after")
+            else:
+                want = base
+            self.assertEqual(h["lr"], want, (s, h["task"]))
+            self.assertTrue(h["finite"])
+        self.assertEqual(seen, {"ramp", "after"})
+        self.assertAlmostEqual(float(tr.optimizer.learning_rate.numpy()), tr.history[-1]["lr"], places=9)
+        # Default config: no multiplication anywhere.
+        tr0 = self.make(config(task_ratio={"rigid": 1.0, "affine": 1.0}, seed=seed, schedule=sched, steps=4))
+        tr0.fit()
+        self.assertEqual([h["lr"] for h in tr0.history], [lr_at(s, sched) for s in range(4)])
+        with self.assertRaises(ValueError):
+            self.make(config(task_ratio={"rigid": 1.0}, task_start_steps={"affine": 3}))
+        with self.assertRaises(ValueError):
+            self.make(config(task_ratio={"rigid": 1.0}, task_start_steps={"rigid": 3}))
+        with self.assertRaises(ValueError):
+            self.make(config(task_ratio={"rigid": 1.0, "affine": 1.0}, task_start_steps={"affine": 3},
+                             task_start_ramp_steps=-1))
+
+    def test_short_three_task_run(self):
+        # 11.4 e: TINY synthetic three-task run, 12 steps, deform starts at 6.
+        ratio = {"rigid": 1.0, "affine": 1.0, "deform": 2.0}
+        start, n_steps = 6, 12
+        seed = next(sd for sd in range(1000)
+                    if "deform" in {TaskSchedule(ratio, sd, {"deform": start}).draw(i)
+                                    for i in range(start, n_steps)})
+        tr = self.make_deform(config(task_ratio=ratio, seed=seed, steps=n_steps,
+                                     task_start_steps={"deform": start}, task_start_ramp_steps=3))
+        tr.fit()
+        tasks = [h["task"] for h in tr.history]
+        self.assertEqual(len(tasks), n_steps)
+        self.assertNotIn("deform", tasks[:start])
+        self.assertIn("deform", tasks[start:])
+        self.assertTrue(all(h["finite"] for h in tr.history))
+        for h in tr.history:
+            self.assertTrue(np.isfinite(h["loss"]), h)
+        self.assertEqual(tr.trace_counts.get("deform"), 1)
 
 
 class TestTaskLossWeightDeform(DeformCase):

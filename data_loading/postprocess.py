@@ -94,30 +94,45 @@ def _check_min_pairs(min_pairs):
     return min_pairs
 
 
-def num_pairs(n, p_pair=0.1, min_pairs="1"):
+def check_max_pairs(max_pairs):
+    """--max-pairs K (retrain-prereqs design 16.3): a Python int >= 0 (0 = no cap)."""
+    if isinstance(max_pairs, bool) or not isinstance(max_pairs, (int, np.integer)) or max_pairs < 0:
+        raise ValueError("max_pairs must be an int >= 0 (0 = no cap), got {!r}".format(max_pairs))
+    return int(max_pairs)
+
+
+def num_pairs(n, p_pair=0.1, min_pairs="1", max_pairs=0):
     """Number of sampled ordered pairs (int32 tensor): min(max(m, round(p_pair n (n - 1))),
-    n (n - 1)) with floor m = 1 (``min_pairs='1'``, today) or m = n (``'n'``, the group size).
+    n (n - 1)) with floor m = 1 (``min_pairs='1'``, today) or m = n (``'n'``, the group size),
+    then capped at ``max_pairs`` K when K > 0 (applied last: k = min(K, ...); retrain-prereqs
+    design 16.3). K = 0 (default) builds exactly today's ops.
     """
     _check_min_pairs(min_pairs)
+    max_pairs = check_max_pairs(max_pairs)
     n = tf.cast(n, tf.int32)
     total = n * (n - 1)
     k = tf.cast(tf.round(tf.cast(total, tf.float32) * float(p_pair)), tf.int32)
     floor = 1 if min_pairs == "1" else n  # Python switch: '1' builds today's ops exactly
-    return tf.minimum(tf.maximum(k, floor), total)
+    k = tf.minimum(tf.maximum(k, floor), total)
+    if max_pairs > 0:  # Python switch: the default builds no new op (goldens)
+        k = tf.minimum(k, max_pairs)
+    return k
 
 
-def num_pairs_static(n, p_pair=0.1, min_pairs="1"):
+def num_pairs_static(n, p_pair=0.1, min_pairs="1", max_pairs=0):
     """`num_pairs` as a Python int for a static group size n (float32 product, half to even,
     like tf.round), e.g. for the --pair-recompute loop."""
     _check_min_pairs(min_pairs)
+    max_pairs = check_max_pairs(max_pairs)
     n = int(n)
     total = n * (n - 1)
     k = int(np.round(np.float32(total) * np.float32(p_pair)))
     floor = 1 if min_pairs == "1" else n
-    return min(max(k, floor), total)
+    k = min(max(k, floor), total)
+    return min(k, max_pairs) if max_pairs > 0 else k
 
 
-def sample_pairs(generator, n, p_pair=0.1, min_pairs="1"):
+def sample_pairs(generator, n, p_pair=0.1, min_pairs="1", max_pairs=0):
     """Sample distinct ordered pairs (i, j), i != j, without replacement. Returns int32 (i, j).
 
     Draws a uniform random key per ordered pair (flat index k = i (n - 1) + r) and keeps the
@@ -125,13 +140,14 @@ def sample_pairs(generator, n, p_pair=0.1, min_pairs="1"):
     With ``min_pairs='n'`` and exactly k == n pairs, a random n-cycle is returned instead
     (perm from the first n keys, j = roll(perm, -1)): every image is once source and once
     target. Both modes draw ONE uniform([n (n - 1)]) per call (same generator advance).
-    Needs n >= 2.
+    ``max_pairs`` K > 0 caps k after the min-pairs floor (a cap landing on k == n keeps the
+    cycle); the RNG draw is unchanged. Needs n >= 2.
     """
     _check_min_pairs(min_pairs)
     n = tf.cast(n, tf.int32)
     total = n * (n - 1)
     keys = generator.uniform(tf.reshape(total, [1]), dtype=tf.float32)
-    k = num_pairs(n, p_pair, min_pairs)
+    k = num_pairs(n, p_pair, min_pairs, max_pairs)
 
     def topk():
         _, idx = tf.math.top_k(keys, k=k, sorted=True)
@@ -166,6 +182,7 @@ class LinearPostprocess:
       flip_prob: per-axis flip probability (scalar or 3 values); 0 disables flips.
       p_pair: fraction of ordered pairs i != j sampled for the pairwise loss (at least 1).
       min_pairs: '1' (floor 1 pair, default) or 'n' (floor N pairs, sample_pairs).
+      max_pairs: cap K on the sampled pairs, applied after min_pairs (0 = no cap, default).
       seed: seed of the internal tf.random.Generator (flips and pairs).
       target_iters: barycenter iterations for the targets (run to convergence).
       target_dtype: dtype of the target computation (float64 default; results are float32).
@@ -186,7 +203,7 @@ class LinearPostprocess:
 
     def __init__(self, task, level, flip_prob=0.5, p_pair=0.1, seed=0, target_iters=10,
                  target_dtype=tf.float64, pixel_center=P.DALI_PIXEL_CENTER, min_pairs="1",
-                 intensity_aug=None):
+                 intensity_aug=None, max_pairs=0):
         if task not in P.TASKS:
             raise ValueError("task must be one of {}, got {!r}".format(P.TASKS, task))
         self.task = task
@@ -194,6 +211,7 @@ class LinearPostprocess:
         self.flip_prob = np.broadcast_to(np.asarray(flip_prob, np.float32), (3,)).copy()
         self.p_pair = float(p_pair)
         self.min_pairs = _check_min_pairs(min_pairs)
+        self.max_pairs = check_max_pairs(max_pairs)
         self.target_iters = int(target_iters)
         self.target_dtype = target_dtype
         self.pixel_center = float(pixel_center)
@@ -221,7 +239,8 @@ class LinearPostprocess:
         tgt = tf.cast(target_mm, self.target_dtype)
         a_star = tfm.barycentric_targets(tgt, self.target_iters)
         n = tf.shape(images)[0]
-        pair_i, pair_j = sample_pairs(self.generator, n, self.p_pair, self.min_pairs)
+        pair_i, pair_j = sample_pairs(self.generator, n, self.p_pair, self.min_pairs,
+                                      self.max_pairs)
         p_star = tfm.pair_targets(tgt, pair_i, pair_j)
         return {"images": images,
                 "T_render": tf.cast(t_mm, tf.float32),
@@ -247,6 +266,7 @@ class DeformPostprocess:
       flip_prob: per-axis flip probability (scalar or 3 values); 0 disables flips.
       p_pdice: fraction of ordered pairs sampled for the pairwise Dice loss (at least 1).
       min_pairs: '1' (floor 1 pair, default) or 'n' (floor N pairs, sample_pairs).
+      max_pairs: cap K on the sampled pairs, applied after min_pairs (0 = no cap, default).
       seed: seed of the internal tf.random.Generator (flips, then pairs).
       n_classes: one-hot depth (train18 + background = `params.N_TRAIN_LABELS`).
       residual_affine: the pipeline emits T_dali (third output); then ``t_dali`` is required.
@@ -262,12 +282,13 @@ class DeformPostprocess:
 
     def __init__(self, level, flip_prob=0.5, p_pdice=0.1, seed=0, n_classes=P.N_TRAIN_LABELS,
                  residual_affine=False, pixel_center=P.DALI_PIXEL_CENTER, min_pairs="1",
-                 intensity_aug=None):
+                 intensity_aug=None, max_pairs=0):
         self.task = P.DEFORM_TASK
         self.level = P.check_level(level)
         self.flip_prob = np.broadcast_to(np.asarray(flip_prob, np.float32), (3,)).copy()
         self.p_pdice = float(p_pdice)
         self.min_pairs = _check_min_pairs(min_pairs)
+        self.max_pairs = check_max_pairs(max_pairs)
         self.n_classes = int(n_classes)
         self.residual_affine = bool(residual_affine)
         self.pixel_center = float(pixel_center)
@@ -295,7 +316,8 @@ class DeformPostprocess:
         images, mats = apply_flip(images, mats, flip_axes)
         labels, _ = apply_flip(labels, [], flip_axes)
         n = tf.shape(images)[0]
-        pair_i, pair_j = sample_pairs(self.generator, n, self.p_pdice, self.min_pairs)
+        pair_i, pair_j = sample_pairs(self.generator, n, self.p_pdice, self.min_pairs,
+                                      self.max_pairs)
         out = {"images": images, "labels": labels,
                "onehot": tf.one_hot(labels, self.n_classes, dtype=tf.float32),
                "pair_i": pair_i, "pair_j": pair_j, "flip_axes": flip_axes}

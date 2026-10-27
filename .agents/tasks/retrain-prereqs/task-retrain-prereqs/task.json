@@ -1,0 +1,7 @@
+{
+  "task_id": "task-retrain-prereqs",
+  "task_description": "Code prerequisites for retraining the level 4 -> 2 -> 1 cascade from scratch (approved design .agents/tasks/retrain-prereqs/design.md v1.3 + review v1.3 findings): AdamW, shift-free 'tent' low-res on the TF aug path, per-task/per-stage cascade skip, delayed task start for a one-run level-4 schedule, from-scratch SLURM scripts + level-4 sweep helper + run summarizer, docs and report. No commits, no cluster access.",
+  "status": "completed",
+  "feature_order": ["FEAT-001", "FEAT-002", "FEAT-003", "FEAT-004", "FEAT-007", "FEAT-005", "FEAT-006"],
+  "blocked_reason": null
+}

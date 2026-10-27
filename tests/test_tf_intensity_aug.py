@@ -160,6 +160,122 @@ class TestOps(unittest.TestCase):
         np.testing.assert_array_equal(aug1(x, urow(), off), x)
 
 
+F_GRID = np.arange(0.5, 0.951, 0.05)
+SLAB_WIDTHS = (12, 16, 20)
+
+
+def slab_stack(shape, axis):
+    """0/1 slabs along `axis` of a volume `shape`, stacked in the channel axis: interior slabs
+    (widths SLAB_WIDTHS at 5 starts in [2, n - w - 2]) plus one edge slab (start 0, width 12),
+    last. Returns (x float32 [*shape, K], list of (start, width))."""
+    n = shape[axis]
+    slabs = [(int(s), w) for w in SLAB_WIDTHS
+             for s in np.linspace(2, n - w - 2, 5).round().astype(int)] + [(0, 12)]
+    x = np.zeros(tuple(shape) + (len(slabs),), np.float32)
+    for k, (s, w) in enumerate(slabs):
+        sl = [slice(None)] * 3 + [k]
+        sl[axis] = slice(s, s + w)
+        x[tuple(sl)] = 1.0
+    return x, slabs
+
+
+def centroids(v, axis):
+    """Centroid along `axis` per channel of v [X, Y, Z, K] (float64)."""
+    p = np.asarray(v, np.float64).sum(axis=tuple(a for a in range(3) if a != axis))   # [n, K]
+    o = np.arange(p.shape[0], dtype=np.float64)[:, None]
+    return (o * p).sum(0) / p.sum(0)
+
+
+class TestTentLowres(unittest.TestCase):
+    """retrain-prereqs design 11.2 a-e: --lowres-method nn | tent (`lowres_resample`)."""
+
+    def test_a_nn_unchanged(self):
+        x = np.random.default_rng(21).uniform(size=(11, 16, 13, 1)).astype(np.float32)
+        for roi in tfa.LOWRES_ROIS:
+            for f in (0.5, 0.63, 0.8, 0.97, 1.0):
+                want = tfa.lowres_resample(x, f, roi).numpy()
+                got = tfa.lowres_resample(x, f, roi, method="nn").numpy()
+                np.testing.assert_array_equal(got, want, err_msg=str((roi, f)))
+        np.testing.assert_array_equal(tfa.lowres_resample(x, 0.63, method="nn").numpy(),
+                                      tfa.lowres_resample(x, 0.63).numpy())
+        with self.assertRaises(ValueError):
+            tfa.lowres_resample(x, 0.5, method="area")
+        with self.assertRaises(ValueError):
+            tfa.lowres_resample(x, 0.5, "bogus", method="nn")
+
+    def test_b_tent_matches_loop_reference(self):
+        rng = np.random.default_rng(22)
+        worst = 0.0
+        for shape in ((11, 16, 13), (40, 56, 48)):
+            x = rng.uniform(size=shape + (1,)).astype(np.float32)
+            for f in (0.5, 0.55, 0.63, 0.8, 0.97):
+                d = float(np.abs(tfa.lowres_resample(x, f, method="tent").numpy()
+                                 - ref.lowres_tent_np(x, f)).max())
+                worst = max(worst, d)
+                self.assertLess(d, 1e-5, (shape, f))
+        sys.stderr.write("\n[11.2b] tent TF vs loop numpy: max |diff| %.3g\n" % worst)
+        # Inside the chain: cfg.low_res_method reaches lowres_resample; same draws as nn.
+        cfg = P.IntensityAugConfig(noise=False, brightness=False, contrast=False, gamma=False,
+                                   low_res_prob=0.5, low_res_method="tent")
+        u = urow(low_res_apply=0.0, low_res_factor=0.4)
+        f = ref.factors_from_uniforms(u, cfg)["low_res_factor"]
+        x = phantom((11, 16, 13), seed=2)
+        np.testing.assert_allclose(aug1(x, u, cfg), np.clip(ref.lowres_tent_np(x, f), 0, 1), atol=1e-5)
+        self.assertGreater(np.abs(aug1(x, u, cfg) - aug1(x, u, only("low_res"))).max(), 1e-3)
+
+    def test_c_centroid_shift(self):
+        cases = [((40, 56, 48), a) for a in range(3)]                   # level 4, full 3-D
+        for a, n in enumerate(P.LEVEL_SHAPE[1]):                       # level 1, one axis at a time
+            shape = [4, 4, 4]
+            shape[a] = n
+            cases.append((tuple(shape), a))
+        worst = {"tent": 0.0, "nn": 0.0, "tent_edge": 0.0}
+        for shape, axis in cases:
+            x, slabs = slab_stack(shape, axis)
+            c0 = centroids(x, axis)
+            for f in F_GRID:
+                for method in ("tent", "nn"):
+                    d = np.abs(centroids(tfa.lowres_resample(x, float(f), method=method).numpy(), axis) - c0)
+                    worst[method] = max(worst[method], float(d[:-1].max()))
+                    if method == "tent":
+                        self.assertLess(float(d[:-1].max()), 0.02, (shape, axis, f, slabs[int(np.argmax(d[:-1]))]))
+                        worst["tent_edge"] = max(worst["tent_edge"], float(d[-1]))
+                        self.assertLess(float(d[-1]), 0.07, (shape, axis, f, "edge"))
+        sys.stderr.write("\n[11.2c] |centroid shift| worst: tent interior %.4f, tent edge %.4f, nn %.4f vox\n"
+                         % (worst["tent"], worst["tent_edge"], worst["nn"]))
+        self.assertGreater(worst["nn"], 0.1)            # documents today's NN bias
+
+    def test_d_mass_constants_identity(self):
+        rng = np.random.default_rng(24)
+        x = rng.uniform(size=(40, 56, 48, 1)).astype(np.float32)
+        const = np.full((11, 16, 13, 1), 0.37, np.float32)
+        for f in (0.5, 0.63, 0.8, 0.97):
+            out = tfa.lowres_resample(x, f, method="tent").numpy()
+            np.testing.assert_allclose(out.astype(np.float64).sum(), x.astype(np.float64).sum(), rtol=1e-5)
+            self.assertLessEqual(float(np.abs(tfa.lowres_resample(const, f, method="tent").numpy()
+                                              - const).max()), 1e-6)
+        np.testing.assert_array_equal(tfa.lowres_resample(x, 1.0, method="tent").numpy(), x)
+        np.testing.assert_array_equal(
+            tfa.lowres_resample(x, tf.constant(1.0, tf.float64), method="tent").numpy(), x)
+
+    def test_e_graph_mode_static_shape(self):
+        traces = []
+
+        @tf.function
+        def fn(v, f):
+            traces.append(1)
+            out = tfa.lowres_resample(v, f, method="tent")
+            self.assertEqual(out.shape.as_list(), v.shape.as_list())
+            return out
+
+        x = np.random.default_rng(25).uniform(size=(11, 16, 13, 1)).astype(np.float32)
+        for f in (0.55, 0.7, 0.9):
+            out = fn(tf.constant(x), tf.constant(f, tf.float64)).numpy()
+            self.assertEqual(out.shape, x.shape)
+            np.testing.assert_allclose(out, ref.lowres_tent_np(x, f), atol=1e-5)
+        self.assertEqual(len(traces), 1)
+
+
 class TestChain(unittest.TestCase):
     """T8-T10: full chain vs the reference, per image and statistically."""
 

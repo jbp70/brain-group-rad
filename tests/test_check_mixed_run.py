@@ -348,6 +348,25 @@ class TestCascade(CheckMixedRunCase):
         d2 = self.cascade_run("c2")
         self.assertEqual(self.failed(cmr.check(d2, TASKS3, STEPS, expect_skip=True)[1]), ["cascade_skip"])
 
+    def test_stage_skip(self):
+        """Retrain-prereqs 4.5: stage mode needs every train_<task>/cascade_skip_l<lv> with p > 0
+        (INFO observed vs p); a missing p > 0 key fails; p 0 keys are not required."""
+        cfg = cascade_config()
+        cfg["cascade"].update({"skip_mode": "stage", "skip_consistency_warnings": [],
+                               "skip_probs": {"rigid": {"4": 0.0}, "affine": {"4": 0.0},
+                                              "deform": {"4": 0.15}}})
+        keys = {"train_deform/cascade_skip_l4": 0.25}
+        d = self.run_dir("s", TASKS3, config=cfg, events=(BN_EVENT,), train_extra=dict(TIMING, **keys))
+        ok, res = cmr.check(d, TASKS3, STEPS, expect_skip=True)
+        self.assertTrue(ok, self.failed(res))
+        x = self.details(res)
+        self.assertIn("cascade_skip_deform_l4", x)
+        self.assertEqual(x["cascade_skip_rate_deform_l4"], "INFO skip deform l4: observed 0.25 vs p 0.15")
+        self.assertNotIn("cascade_skip", x)                          # the legacy key is not required
+        self.assertFalse([n for n in x if n.startswith("cascade_skip_rigid")])
+        d2 = self.run_dir("s2", TASKS3, config=cfg, events=(BN_EVENT,), train_extra=TIMING)
+        self.assertEqual(self.failed(cmr.check(d2, TASKS3, STEPS, expect_skip=True)[1]), ["cascade_skip_deform_l4"])
+
     def verdict(self, eff, steps=STEPS, every=5, from_step=None):
         d = self.cascade_run("gb_%d" % len(os.listdir(self.tmp)), enc_grad=True, eff=eff, steps=steps,
                              every=every)
@@ -524,6 +543,25 @@ class TestLevel1Chain(CheckMixedRunCase):
         ok, res = cmr.check(self.chain_run("c4", cfg=cfg, n_pairs=4.0), TASKS_RD, STEPS, expect_min_pairs="n")
         self.assertEqual(self.failed(res), ["n_pairs_deform"])
 
+    def test_min_pairs_with_max_pairs(self):
+        """config.json args.max_pairs (--max-pairs, retrain-prereqs 16.3) caps the expected count."""
+        cfg = chain_config()
+        cfg["args"]["max_pairs"] = 3                         # rigid min(3, 4) = 3, deform min(3, 2) = 2
+        ok, res = cmr.check(self.chain_run("m", cfg=cfg, n_pairs=3.0), TASKS_RD, STEPS, expect_min_pairs="n")
+        self.assertTrue(ok, self.failed(res))
+        ok, res = cmr.check(self.chain_run("m2", cfg=cfg, n_pairs=4.0), TASKS_RD, STEPS, expect_min_pairs="n")
+        self.assertEqual(self.failed(res), ["n_pairs_rigid"])
+        self.assertIn("expected 3", self.details(res)["n_pairs_rigid"])
+        cfg["args"]["max_pairs"] = 1                         # deform logged 2 > 1 now fails
+        ok, res = cmr.check(self.chain_run("m1", cfg=cfg, n_pairs=1.0), TASKS_RD, STEPS, expect_min_pairs="n")
+        self.assertEqual(self.failed(res), ["n_pairs_deform"])
+        cfg["args"]["max_pairs"] = 64                        # cap above the count: no effect
+        ok, res = cmr.check(self.chain_run("m3", cfg=cfg, n_pairs=4.0), TASKS_RD, STEPS, expect_min_pairs="n")
+        self.assertTrue(ok, self.failed(res))
+        cfg["args"]["max_pairs"] = 0
+        ok, res = cmr.check(self.chain_run("m4", cfg=cfg, n_pairs=4.0), TASKS_RD, STEPS, expect_min_pairs="n")
+        self.assertTrue(ok, self.failed(res))
+
     def test_project_val_every(self):
         # smoke-like cadence: val_every 100 in config.json; one val/wall_s of 30 s, mean step 0.1 s,
         # recal 3 s
@@ -561,6 +599,10 @@ class TestLevel1Chain(CheckMixedRunCase):
         self.assertEqual(cmr.expected_pairs(1, 4, 0.1), 1)
         self.assertEqual(cmr.expected_pairs(1, 16, 0.1), 24)
         self.assertEqual(cmr.expected_pairs(4, 4, 1.0), 12)
+        self.assertEqual(cmr.expected_pairs(48, 48, 0.1, 64), 64)
+        self.assertEqual(cmr.expected_pairs(32, 32, 0.1, 64), 64)
+        self.assertEqual(cmr.expected_pairs(16, 16, 0.1, 64), 24)
+        self.assertEqual(cmr.expected_pairs(16, 16, 0.1, 0), 24)
 
 
 if __name__ == "__main__":

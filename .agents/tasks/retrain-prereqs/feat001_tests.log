@@ -1,0 +1,1196 @@
+=== stage1: new tests
+test_a_wd0_equals_adam (tests.test_runtime_optim.TestAdamW) ... FAIL
+test_b_decay_only_on_kernels (tests.test_runtime_optim.TestAdamW) ... ok
+test_c_decay_magnitude (tests.test_runtime_optim.TestAdamW) ... ok
+test_d_amp_loss_scale_optimizer (tests.test_runtime_optim.TestAdamW) ... WARNING:tensorflow:You forgot to call LossScaleOptimizer.get_scaled_loss() and LossScaleOptimizer.get_unscaled_gradients() before calling LossScaleOptimizer.apply_gradients(). This will likely result in worse model quality, so please call them in the correct places! For example:
+    with tf.GradientTape() as tape:
+      loss = loss_fn()
+      scaled_loss = opt.get_scaled_loss(loss)
+    scaled_grads = tape.gradient(scaled_loss, vars)
+    grads = opt.get_unscaled_gradients(scaled_grads)
+    opt.apply_gradients([(grads, var)])
+For more information, see https://www.tensorflow.org/api_docs/python/tf/keras/mixed_precision/LossScaleOptimizer
+WARNING:tensorflow:You forgot to call LossScaleOptimizer.get_scaled_loss() and LossScaleOptimizer.get_unscaled_gradients() before calling LossScaleOptimizer.apply_gradients(). This will likely result in worse model quality, so please call them in the correct places! For example:
+    with tf.GradientTape() as tape:
+      loss = loss_fn()
+      scaled_loss = opt.get_scaled_loss(loss)
+    scaled_grads = tape.gradient(scaled_loss, vars)
+    grads = opt.get_unscaled_gradients(scaled_grads)
+    opt.apply_gradients([(grads, var)])
+For more information, see https://www.tensorflow.org/api_docs/python/tf/keras/mixed_precision/LossScaleOptimizer
+FAIL
+test_e_checkpoint_round_trip (tests.test_runtime_optim.TestAdamW) ... ok
+test_decoupled_decay_functional (tests.test_runtime_optim.TestOptimizers) ... ok
+test_default_clipnorm (tests.test_runtime_optim.TestOptimizers) ... ok
+test_every_optimizer_steps_and_lr_helpers (tests.test_runtime_optim.TestOptimizers) ... WARNING:tensorflow:You forgot to call LossScaleOptimizer.get_scaled_loss() and LossScaleOptimizer.get_unscaled_gradients() before calling LossScaleOptimizer.apply_gradients(). This will likely result in worse model quality, so please call them in the correct places! For example:
+    with tf.GradientTape() as tape:
+      loss = loss_fn()
+      scaled_loss = opt.get_scaled_loss(loss)
+    scaled_grads = tape.gradient(scaled_loss, vars)
+    grads = opt.get_unscaled_gradients(scaled_grads)
+    opt.apply_gradients([(grads, var)])
+For more information, see https://www.tensorflow.org/api_docs/python/tf/keras/mixed_precision/LossScaleOptimizer
+WARNING:tensorflow:You forgot to call LossScaleOptimizer.get_scaled_loss() and LossScaleOptimizer.get_unscaled_gradients() before calling LossScaleOptimizer.apply_gradients(). This will likely result in worse model quality, so please call them in the correct places! For example:
+    with tf.GradientTape() as tape:
+      loss = loss_fn()
+      scaled_loss = opt.get_scaled_loss(loss)
+    scaled_grads = tape.gradient(scaled_loss, vars)
+    grads = opt.get_unscaled_gradients(scaled_grads)
+    opt.apply_gradients([(grads, var)])
+For more information, see https://www.tensorflow.org/api_docs/python/tf/keras/mixed_precision/LossScaleOptimizer
+WARNING:tensorflow:You forgot to call LossScaleOptimizer.get_scaled_loss() and LossScaleOptimizer.get_unscaled_gradients() before calling LossScaleOptimizer.apply_gradients(). This will likely result in worse model quality, so please call them in the correct places! For example:
+    with tf.GradientTape() as tape:
+      loss = loss_fn()
+      scaled_loss = opt.get_scaled_loss(loss)
+    scaled_grads = tape.gradient(scaled_loss, vars)
+    grads = opt.get_unscaled_gradients(scaled_grads)
+    opt.apply_gradients([(grads, var)])
+For more information, see https://www.tensorflow.org/api_docs/python/tf/keras/mixed_precision/LossScaleOptimizer
+WARNING:tensorflow:You forgot to call LossScaleOptimizer.get_scaled_loss() and LossScaleOptimizer.get_unscaled_gradients() before calling LossScaleOptimizer.apply_gradients(). This will likely result in worse model quality, so please call them in the correct places! For example:
+    with tf.GradientTape() as tape:
+      loss = loss_fn()
+      scaled_loss = opt.get_scaled_loss(loss)
+    scaled_grads = tape.gradient(scaled_loss, vars)
+    grads = opt.get_unscaled_gradients(scaled_grads)
+    opt.apply_gradients([(grads, var)])
+For more information, see https://www.tensorflow.org/api_docs/python/tf/keras/mixed_precision/LossScaleOptimizer
+ok
+test_sgdw_matches_reference_update (tests.test_runtime_optim.TestOptimizers) ... ok
+test_weight_decay_exclusion (tests.test_runtime_optim.TestOptimizers) ... ok
+test_weight_decay_optimizers_constant (tests.test_runtime_optim.TestOptimizers) ... ok
+test_bad_name (tests.test_runtime_optim.TestSchedules) ... ok
+test_constant (tests.test_runtime_optim.TestSchedules) ... ok
+test_cosine_midpoint (tests.test_runtime_optim.TestSchedules) ... ok
+test_cycle_restarts (tests.test_runtime_optim.TestSchedules) ... ok
+test_warmup_and_endpoints (tests.test_runtime_optim.TestSchedules) ... ok
+test_adam_note_and_no_record (tests.test_main.TestOptimizerMain) ... ok
+test_adamw_record_and_resume (tests.test_main.TestOptimizerMain) ... /mnt/d/Research/Brain_Registration_Projects/brain-group-rad/tests/runtime_helpers.py:43: ResourceWarning: unclosed file <_io.TextIOWrapper name='/tmp/bgr_m4_main_z86nx89b/results/w/logs/metrics.jsonl' mode='a' encoding='UTF-8'>
+  gc.collect()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+ok
+test_check_optimizer_unit (tests.test_main.TestOptimizerMain) ... usage: python -m unittest [-h] [--data DATA] [--results RESULTS]
+                          [--run-name RUN_NAME] [--resume RESUME]
+                          [--level {4,2,1}] [--group-size GROUP_SIZE]
+                          [--steps STEPS] [--val-every VAL_EVERY]
+                          [--val-groups VAL_GROUPS]
+                          [--val-group-size VAL_GROUP_SIZE]
+                          [--val-seed VAL_SEED] [--log-every LOG_EVERY]
+                          [--ckpt-every CKPT_EVERY] [--val-png VAL_PNG]
+                          [--val-png-k VAL_PNG_K]
+                          [--val-png-group VAL_PNG_GROUP]
+                          [--val-png-gt-row VAL_PNG_GT_ROW]
+                          [--val-png-mean-col VAL_PNG_MEAN_COL]
+                          [--best-metric BEST_METRIC]
+                          [--optimizer {sgdw,sgd,adam,adamw}] [--lr LR]
+                          [--momentum MOMENTUM] [--dampening DAMPENING]
+                          [--nesterov NESTEROV] [--decoupled DECOUPLED]
+                          [--weight-decay WEIGHT_DECAY]
+                          [--exclude-from-weight-decay EXCLUDE_FROM_WEIGHT_DECAY]
+                          [--clipnorm CLIPNORM]
+                          [--schedule {cosine,poly,cycle,constant}]
+                          [--warmup-steps WARMUP_STEPS]
+                          [--min-lr-factor MIN_LR_FACTOR] [--power POWER]
+                          [--cycle-steps CYCLE_STEPS] [--amp AMP] [--xla XLA]
+                          [--gpu-memory-limit-mb GPU_MEMORY_LIMIT_MB]
+                          [--task-ratio TASK_RATIO]
+                          [--lambda-pair LAMBDA_PAIR]
+                          [--loss-scale-mm2 LOSS_SCALE_MM2]
+                          [--task-loss-weights TASK_LOSS_WEIGHTS]
+                          [--task-grad-norm TASK_GRAD_NORM]
+                          [--task-grad-norm-min TASK_GRAD_NORM_MIN]
+                          [--p-pair P_PAIR] [--min-pairs {1,n}]
+                          [--flip-prob FLIP_PROB]
+                          [--target-iters TARGET_ITERS]
+                          [--lambda-pdice LAMBDA_PDICE] [--p-pdice P_PDICE]
+                          [--lambda-dice-template LAMBDA_DICE_TEMPLATE]
+                          [--lambda-ncc-template LAMBDA_NCC_TEMPLATE]
+                          [--lambda-ncc-pair LAMBDA_NCC_PAIR]
+                          [--ncc-window NCC_WINDOW]
+                          [--lambda-smooth LAMBDA_SMOOTH]
+                          [--smooth-order {1,2}]
+                          [--integration-steps INTEGRATION_STEPS]
+                          [--decoder-widths DECODER_WIDTHS]
+                          [--deform-decoder {auto,true,false}]
+                          [--deform-residual-affine DEFORM_RESIDUAL_AFFINE]
+                          [--deform-group-size DEFORM_GROUP_SIZE]
+                          [--gradient-checkpointing {none,integrator,decoder,both,full}]
+                          [--lean-sampler LEAN_SAMPLER]
+                          [--lean-losses LEAN_LOSSES]
+                          [--pair-recompute PAIR_RECOMPUTE]
+                          [--split-group-conv SPLIT_GROUP_CONV]
+                          [--overfit-dice-threshold OVERFIT_DICE_THRESHOLD]
+                          [--overfit-fold-max OVERFIT_FOLD_MAX]
+                          [--val-deform-max-pairs VAL_DEFORM_MAX_PAIRS]
+                          [--val-pair-chunk VAL_PAIR_CHUNK]
+                          [--val-image-chunk VAL_IMAGE_CHUNK]
+                          [--rigid-rotation-deg RIGID_ROTATION_DEG]
+                          [--rigid-translation-mm RIGID_TRANSLATION_MM]
+                          [--rigid-log-scale RIGID_LOG_SCALE]
+                          [--rigid-shear RIGID_SHEAR]
+                          [--affine-rotation-deg AFFINE_ROTATION_DEG]
+                          [--affine-translation-mm AFFINE_TRANSLATION_MM]
+                          [--affine-log-scale AFFINE_LOG_SCALE]
+                          [--affine-shear AFFINE_SHEAR]
+                          [--intensity-aug INTENSITY_AUG]
+                          [--intensity-aug-device {dali,tf}]
+                          [--curriculum CURRICULUM]
+                          [--curriculum-ramp-steps CURRICULUM_RAMP_STEPS]
+                          [--rigid-rotation-deg-start RIGID_ROTATION_DEG_START]
+                          [--rigid-translation-mm-start RIGID_TRANSLATION_MM_START]
+                          [--rigid-log-scale-start RIGID_LOG_SCALE_START]
+                          [--rigid-shear-start RIGID_SHEAR_START]
+                          [--affine-rotation-deg-start AFFINE_ROTATION_DEG_START]
+                          [--affine-translation-mm-start AFFINE_TRANSLATION_MM_START]
+                          [--affine-log-scale-start AFFINE_LOG_SCALE_START]
+                          [--affine-shear-start AFFINE_SHEAR_START]
+                          [--global-transform GLOBAL_TRANSFORM]
+                          [--global-rot-max-deg GLOBAL_ROT_MAX_DEG]
+                          [--global-trans-max-mm GLOBAL_TRANS_MAX_MM]
+                          [--global-resample-every GLOBAL_RESAMPLE_EVERY]
+                          [--global-start-step GLOBAL_START_STEP]
+                          [--global-ramp-steps GLOBAL_RAMP_STEPS]
+                          [--init-weights INIT_WEIGHTS]
+                          [--cascade-from CASCADE_FROM]
+                          [--cascade-skip-prob CASCADE_SKIP_PROB]
+                          [--bn-recal-batches BN_RECAL_BATCHES]
+                          [--bn-recal-freeze BN_RECAL_FREEZE]
+                          [--bn-recal-validate BN_RECAL_VALIDATE]
+                          [--num-threads NUM_THREADS] [--prefetch PREFETCH]
+                          [--shuffle-mode {epoch,buffer}]
+                          [--group-config {A,B}] [--block {single,residual}]
+                          [--norm {batch,instance,none}]
+                          [--dense-norm {layer,batch,none}]
+                          [--head-activation {relu,none}] [--filters FILTERS]
+                          [--reductions REDUCTIONS] [--dense DENSE]
+                          [--dropout DROPOUT]
+                          [--dense-group-concat-first DENSE_GROUP_CONCAT_FIRST]
+                          [--negative-slope NEGATIVE_SLOPE]
+                          [--translation-scale TRANSLATION_SCALE]
+                          [--centering-iters CENTERING_ITERS]
+                          [--bn-momentum BN_MOMENTUM] [--seed SEED]
+                          [--nonfinite-patience NONFINITE_PATIENCE]
+                          [--quiet QUIET]
+                          [--log-backend {auto,dllogger,jsonl}] [--dry-run]
+                          [--overfit-one-group] [--overfit-synthetic]
+                          [--overfit-threshold-mm OVERFIT_THRESHOLD_MM]
+                          [--overfit-max-steps OVERFIT_MAX_STEPS]
+python -m unittest: error: --weight-decay must be finite and >= 0, got -1.0
+usage: python -m unittest [-h] [--data DATA] [--results RESULTS]
+                          [--run-name RUN_NAME] [--resume RESUME]
+                          [--level {4,2,1}] [--group-size GROUP_SIZE]
+                          [--steps STEPS] [--val-every VAL_EVERY]
+                          [--val-groups VAL_GROUPS]
+                          [--val-group-size VAL_GROUP_SIZE]
+                          [--val-seed VAL_SEED] [--log-every LOG_EVERY]
+                          [--ckpt-every CKPT_EVERY] [--val-png VAL_PNG]
+                          [--val-png-k VAL_PNG_K]
+                          [--val-png-group VAL_PNG_GROUP]
+                          [--val-png-gt-row VAL_PNG_GT_ROW]
+                          [--val-png-mean-col VAL_PNG_MEAN_COL]
+                          [--best-metric BEST_METRIC]
+                          [--optimizer {sgdw,sgd,adam,adamw}] [--lr LR]
+                          [--momentum MOMENTUM] [--dampening DAMPENING]
+                          [--nesterov NESTEROV] [--decoupled DECOUPLED]
+                          [--weight-decay WEIGHT_DECAY]
+                          [--exclude-from-weight-decay EXCLUDE_FROM_WEIGHT_DECAY]
+                          [--clipnorm CLIPNORM]
+                          [--schedule {cosine,poly,cycle,constant}]
+                          [--warmup-steps WARMUP_STEPS]
+                          [--min-lr-factor MIN_LR_FACTOR] [--power POWER]
+                          [--cycle-steps CYCLE_STEPS] [--amp AMP] [--xla XLA]
+                          [--gpu-memory-limit-mb GPU_MEMORY_LIMIT_MB]
+                          [--task-ratio TASK_RATIO]
+                          [--lambda-pair LAMBDA_PAIR]
+                          [--loss-scale-mm2 LOSS_SCALE_MM2]
+                          [--task-loss-weights TASK_LOSS_WEIGHTS]
+                          [--task-grad-norm TASK_GRAD_NORM]
+                          [--task-grad-norm-min TASK_GRAD_NORM_MIN]
+                          [--p-pair P_PAIR] [--min-pairs {1,n}]
+                          [--flip-prob FLIP_PROB]
+                          [--target-iters TARGET_ITERS]
+                          [--lambda-pdice LAMBDA_PDICE] [--p-pdice P_PDICE]
+                          [--lambda-dice-template LAMBDA_DICE_TEMPLATE]
+                          [--lambda-ncc-template LAMBDA_NCC_TEMPLATE]
+                          [--lambda-ncc-pair LAMBDA_NCC_PAIR]
+                          [--ncc-window NCC_WINDOW]
+                          [--lambda-smooth LAMBDA_SMOOTH]
+                          [--smooth-order {1,2}]
+                          [--integration-steps INTEGRATION_STEPS]
+                          [--decoder-widths DECODER_WIDTHS]
+                          [--deform-decoder {auto,true,false}]
+                          [--deform-residual-affine DEFORM_RESIDUAL_AFFINE]
+                          [--deform-group-size DEFORM_GROUP_SIZE]
+                          [--gradient-checkpointing {none,integrator,decoder,both,full}]
+                          [--lean-sampler LEAN_SAMPLER]
+                          [--lean-losses LEAN_LOSSES]
+                          [--pair-recompute PAIR_RECOMPUTE]
+                          [--split-group-conv SPLIT_GROUP_CONV]
+                          [--overfit-dice-threshold OVERFIT_DICE_THRESHOLD]
+                          [--overfit-fold-max OVERFIT_FOLD_MAX]
+                          [--val-deform-max-pairs VAL_DEFORM_MAX_PAIRS]
+                          [--val-pair-chunk VAL_PAIR_CHUNK]
+                          [--val-image-chunk VAL_IMAGE_CHUNK]
+                          [--rigid-rotation-deg RIGID_ROTATION_DEG]
+                          [--rigid-translation-mm RIGID_TRANSLATION_MM]
+                          [--rigid-log-scale RIGID_LOG_SCALE]
+                          [--rigid-shear RIGID_SHEAR]
+                          [--affine-rotation-deg AFFINE_ROTATION_DEG]
+                          [--affine-translation-mm AFFINE_TRANSLATION_MM]
+                          [--affine-log-scale AFFINE_LOG_SCALE]
+                          [--affine-shear AFFINE_SHEAR]
+                          [--intensity-aug INTENSITY_AUG]
+                          [--intensity-aug-device {dali,tf}]
+                          [--curriculum CURRICULUM]
+                          [--curriculum-ramp-steps CURRICULUM_RAMP_STEPS]
+                          [--rigid-rotation-deg-start RIGID_ROTATION_DEG_START]
+                          [--rigid-translation-mm-start RIGID_TRANSLATION_MM_START]
+                          [--rigid-log-scale-start RIGID_LOG_SCALE_START]
+                          [--rigid-shear-start RIGID_SHEAR_START]
+                          [--affine-rotation-deg-start AFFINE_ROTATION_DEG_START]
+                          [--affine-translation-mm-start AFFINE_TRANSLATION_MM_START]
+                          [--affine-log-scale-start AFFINE_LOG_SCALE_START]
+                          [--affine-shear-start AFFINE_SHEAR_START]
+                          [--global-transform GLOBAL_TRANSFORM]
+                          [--global-rot-max-deg GLOBAL_ROT_MAX_DEG]
+                          [--global-trans-max-mm GLOBAL_TRANS_MAX_MM]
+                          [--global-resample-every GLOBAL_RESAMPLE_EVERY]
+                          [--global-start-step GLOBAL_START_STEP]
+                          [--global-ramp-steps GLOBAL_RAMP_STEPS]
+                          [--init-weights INIT_WEIGHTS]
+                          [--cascade-from CASCADE_FROM]
+                          [--cascade-skip-prob CASCADE_SKIP_PROB]
+                          [--bn-recal-batches BN_RECAL_BATCHES]
+                          [--bn-recal-freeze BN_RECAL_FREEZE]
+                          [--bn-recal-validate BN_RECAL_VALIDATE]
+                          [--num-threads NUM_THREADS] [--prefetch PREFETCH]
+                          [--shuffle-mode {epoch,buffer}]
+                          [--group-config {A,B}] [--block {single,residual}]
+                          [--norm {batch,instance,none}]
+                          [--dense-norm {layer,batch,none}]
+                          [--head-activation {relu,none}] [--filters FILTERS]
+                          [--reductions REDUCTIONS] [--dense DENSE]
+                          [--dropout DROPOUT]
+                          [--dense-group-concat-first DENSE_GROUP_CONCAT_FIRST]
+                          [--negative-slope NEGATIVE_SLOPE]
+                          [--translation-scale TRANSLATION_SCALE]
+                          [--centering-iters CENTERING_ITERS]
+                          [--bn-momentum BN_MOMENTUM] [--seed SEED]
+                          [--nonfinite-patience NONFINITE_PATIENCE]
+                          [--quiet QUIET]
+                          [--log-backend {auto,dllogger,jsonl}] [--dry-run]
+                          [--overfit-one-group] [--overfit-synthetic]
+                          [--overfit-threshold-mm OVERFIT_THRESHOLD_MM]
+                          [--overfit-max-steps OVERFIT_MAX_STEPS]
+python -m unittest: error: --weight-decay must be finite and >= 0, got nan
+usage: python -m unittest [-h] [--data DATA] [--results RESULTS]
+                          [--run-name RUN_NAME] [--resume RESUME]
+                          [--level {4,2,1}] [--group-size GROUP_SIZE]
+                          [--steps STEPS] [--val-every VAL_EVERY]
+                          [--val-groups VAL_GROUPS]
+                          [--val-group-size VAL_GROUP_SIZE]
+                          [--val-seed VAL_SEED] [--log-every LOG_EVERY]
+                          [--ckpt-every CKPT_EVERY] [--val-png VAL_PNG]
+                          [--val-png-k VAL_PNG_K]
+                          [--val-png-group VAL_PNG_GROUP]
+                          [--val-png-gt-row VAL_PNG_GT_ROW]
+                          [--val-png-mean-col VAL_PNG_MEAN_COL]
+                          [--best-metric BEST_METRIC]
+                          [--optimizer {sgdw,sgd,adam,adamw}] [--lr LR]
+                          [--momentum MOMENTUM] [--dampening DAMPENING]
+                          [--nesterov NESTEROV] [--decoupled DECOUPLED]
+                          [--weight-decay WEIGHT_DECAY]
+                          [--exclude-from-weight-decay EXCLUDE_FROM_WEIGHT_DECAY]
+                          [--clipnorm CLIPNORM]
+                          [--schedule {cosine,poly,cycle,constant}]
+                          [--warmup-steps WARMUP_STEPS]
+                          [--min-lr-factor MIN_LR_FACTOR] [--power POWER]
+                          [--cycle-steps CYCLE_STEPS] [--amp AMP] [--xla XLA]
+                          [--gpu-memory-limit-mb GPU_MEMORY_LIMIT_MB]
+                          [--task-ratio TASK_RATIO]
+                          [--lambda-pair LAMBDA_PAIR]
+                          [--loss-scale-mm2 LOSS_SCALE_MM2]
+                          [--task-loss-weights TASK_LOSS_WEIGHTS]
+                          [--task-grad-norm TASK_GRAD_NORM]
+                          [--task-grad-norm-min TASK_GRAD_NORM_MIN]
+                          [--p-pair P_PAIR] [--min-pairs {1,n}]
+                          [--flip-prob FLIP_PROB]
+                          [--target-iters TARGET_ITERS]
+                          [--lambda-pdice LAMBDA_PDICE] [--p-pdice P_PDICE]
+                          [--lambda-dice-template LAMBDA_DICE_TEMPLATE]
+                          [--lambda-ncc-template LAMBDA_NCC_TEMPLATE]
+                          [--lambda-ncc-pair LAMBDA_NCC_PAIR]
+                          [--ncc-window NCC_WINDOW]
+                          [--lambda-smooth LAMBDA_SMOOTH]
+                          [--smooth-order {1,2}]
+                          [--integration-steps INTEGRATION_STEPS]
+                          [--decoder-widths DECODER_WIDTHS]
+                          [--deform-decoder {auto,true,false}]
+                          [--deform-residual-affine DEFORM_RESIDUAL_AFFINE]
+                          [--deform-group-size DEFORM_GROUP_SIZE]
+                          [--gradient-checkpointing {none,integrator,decoder,both,full}]
+                          [--lean-sampler LEAN_SAMPLER]
+                          [--lean-losses LEAN_LOSSES]
+                          [--pair-recompute PAIR_RECOMPUTE]
+                          [--split-group-conv SPLIT_GROUP_CONV]
+                          [--overfit-dice-threshold OVERFIT_DICE_THRESHOLD]
+                          [--overfit-fold-max OVERFIT_FOLD_MAX]
+                          [--val-deform-max-pairs VAL_DEFORM_MAX_PAIRS]
+                          [--val-pair-chunk VAL_PAIR_CHUNK]
+                          [--val-image-chunk VAL_IMAGE_CHUNK]
+                          [--rigid-rotation-deg RIGID_ROTATION_DEG]
+                          [--rigid-translation-mm RIGID_TRANSLATION_MM]
+                          [--rigid-log-scale RIGID_LOG_SCALE]
+                          [--rigid-shear RIGID_SHEAR]
+                          [--affine-rotation-deg AFFINE_ROTATION_DEG]
+                          [--affine-translation-mm AFFINE_TRANSLATION_MM]
+                          [--affine-log-scale AFFINE_LOG_SCALE]
+                          [--affine-shear AFFINE_SHEAR]
+                          [--intensity-aug INTENSITY_AUG]
+                          [--intensity-aug-device {dali,tf}]
+                          [--curriculum CURRICULUM]
+                          [--curriculum-ramp-steps CURRICULUM_RAMP_STEPS]
+                          [--rigid-rotation-deg-start RIGID_ROTATION_DEG_START]
+                          [--rigid-translation-mm-start RIGID_TRANSLATION_MM_START]
+                          [--rigid-log-scale-start RIGID_LOG_SCALE_START]
+                          [--rigid-shear-start RIGID_SHEAR_START]
+                          [--affine-rotation-deg-start AFFINE_ROTATION_DEG_START]
+                          [--affine-translation-mm-start AFFINE_TRANSLATION_MM_START]
+                          [--affine-log-scale-start AFFINE_LOG_SCALE_START]
+                          [--affine-shear-start AFFINE_SHEAR_START]
+                          [--global-transform GLOBAL_TRANSFORM]
+                          [--global-rot-max-deg GLOBAL_ROT_MAX_DEG]
+                          [--global-trans-max-mm GLOBAL_TRANS_MAX_MM]
+                          [--global-resample-every GLOBAL_RESAMPLE_EVERY]
+                          [--global-start-step GLOBAL_START_STEP]
+                          [--global-ramp-steps GLOBAL_RAMP_STEPS]
+                          [--init-weights INIT_WEIGHTS]
+                          [--cascade-from CASCADE_FROM]
+                          [--cascade-skip-prob CASCADE_SKIP_PROB]
+                          [--bn-recal-batches BN_RECAL_BATCHES]
+                          [--bn-recal-freeze BN_RECAL_FREEZE]
+                          [--bn-recal-validate BN_RECAL_VALIDATE]
+                          [--num-threads NUM_THREADS] [--prefetch PREFETCH]
+                          [--shuffle-mode {epoch,buffer}]
+                          [--group-config {A,B}] [--block {single,residual}]
+                          [--norm {batch,instance,none}]
+                          [--dense-norm {layer,batch,none}]
+                          [--head-activation {relu,none}] [--filters FILTERS]
+                          [--reductions REDUCTIONS] [--dense DENSE]
+                          [--dropout DROPOUT]
+                          [--dense-group-concat-first DENSE_GROUP_CONCAT_FIRST]
+                          [--negative-slope NEGATIVE_SLOPE]
+                          [--translation-scale TRANSLATION_SCALE]
+                          [--centering-iters CENTERING_ITERS]
+                          [--bn-momentum BN_MOMENTUM] [--seed SEED]
+                          [--nonfinite-patience NONFINITE_PATIENCE]
+                          [--quiet QUIET]
+                          [--log-backend {auto,dllogger,jsonl}] [--dry-run]
+                          [--overfit-one-group] [--overfit-synthetic]
+                          [--overfit-threshold-mm OVERFIT_THRESHOLD_MM]
+                          [--overfit-max-steps OVERFIT_MAX_STEPS]
+python -m unittest: error: --weight-decay must be finite and >= 0, got inf
+ok
+
+======================================================================
+FAIL: test_a_wd0_equals_adam (tests.test_runtime_optim.TestAdamW)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/mnt/d/Research/Brain_Registration_Projects/brain-group-rad/tests/test_runtime_optim.py", line 183, in test_a_wd0_equals_adam
+    self.assertEqual(len(sa), 1 + 2 * len(init))          # iterations + m, v per variable
+AssertionError: 8 != 9
+
+======================================================================
+FAIL: test_d_amp_loss_scale_optimizer (tests.test_runtime_optim.TestAdamW)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/mnt/d/Research/Brain_Registration_Projects/brain-group-rad/tests/test_runtime_optim.py", line 238, in test_d_amp_loss_scale_optimizer
+    self.assertEqual(int(O.inner_optimizer(opt).iterations.numpy()), 1)
+AssertionError: 2 != 1
+
+----------------------------------------------------------------------
+Ran 19 tests in 152.694s
+
+FAILED (failures=2)
+STAGE1_RC 1
+=== stage2: tests.test_runtime_optim tests.test_main
+test_a_wd0_equals_adam (tests.test_runtime_optim.TestAdamW) ... FAIL
+test_b_decay_only_on_kernels (tests.test_runtime_optim.TestAdamW) ... ok
+test_c_decay_magnitude (tests.test_runtime_optim.TestAdamW) ... ok
+test_d_amp_loss_scale_optimizer (tests.test_runtime_optim.TestAdamW) ... WARNING:tensorflow:You forgot to call LossScaleOptimizer.get_scaled_loss() and LossScaleOptimizer.get_unscaled_gradients() before calling LossScaleOptimizer.apply_gradients(). This will likely result in worse model quality, so please call them in the correct places! For example:
+    with tf.GradientTape() as tape:
+      loss = loss_fn()
+      scaled_loss = opt.get_scaled_loss(loss)
+    scaled_grads = tape.gradient(scaled_loss, vars)
+    grads = opt.get_unscaled_gradients(scaled_grads)
+    opt.apply_gradients([(grads, var)])
+For more information, see https://www.tensorflow.org/api_docs/python/tf/keras/mixed_precision/LossScaleOptimizer
+WARNING:tensorflow:You forgot to call LossScaleOptimizer.get_scaled_loss() and LossScaleOptimizer.get_unscaled_gradients() before calling LossScaleOptimizer.apply_gradients(). This will likely result in worse model quality, so please call them in the correct places! For example:
+    with tf.GradientTape() as tape:
+      loss = loss_fn()
+      scaled_loss = opt.get_scaled_loss(loss)
+    scaled_grads = tape.gradient(scaled_loss, vars)
+    grads = opt.get_unscaled_gradients(scaled_grads)
+    opt.apply_gradients([(grads, var)])
+For more information, see https://www.tensorflow.org/api_docs/python/tf/keras/mixed_precision/LossScaleOptimizer
+FAIL
+test_e_checkpoint_round_trip (tests.test_runtime_optim.TestAdamW) ... ok
+test_decoupled_decay_functional (tests.test_runtime_optim.TestOptimizers) ... ok
+test_default_clipnorm (tests.test_runtime_optim.TestOptimizers) ... ok
+test_every_optimizer_steps_and_lr_helpers (tests.test_runtime_optim.TestOptimizers) ... WARNING:tensorflow:You forgot to call LossScaleOptimizer.get_scaled_loss() and LossScaleOptimizer.get_unscaled_gradients() before calling LossScaleOptimizer.apply_gradients(). This will likely result in worse model quality, so please call them in the correct places! For example:
+    with tf.GradientTape() as tape:
+      loss = loss_fn()
+      scaled_loss = opt.get_scaled_loss(loss)
+    scaled_grads = tape.gradient(scaled_loss, vars)
+    grads = opt.get_unscaled_gradients(scaled_grads)
+    opt.apply_gradients([(grads, var)])
+For more information, see https://www.tensorflow.org/api_docs/python/tf/keras/mixed_precision/LossScaleOptimizer
+WARNING:tensorflow:You forgot to call LossScaleOptimizer.get_scaled_loss() and LossScaleOptimizer.get_unscaled_gradients() before calling LossScaleOptimizer.apply_gradients(). This will likely result in worse model quality, so please call them in the correct places! For example:
+    with tf.GradientTape() as tape:
+      loss = loss_fn()
+      scaled_loss = opt.get_scaled_loss(loss)
+    scaled_grads = tape.gradient(scaled_loss, vars)
+    grads = opt.get_unscaled_gradients(scaled_grads)
+    opt.apply_gradients([(grads, var)])
+For more information, see https://www.tensorflow.org/api_docs/python/tf/keras/mixed_precision/LossScaleOptimizer
+WARNING:tensorflow:You forgot to call LossScaleOptimizer.get_scaled_loss() and LossScaleOptimizer.get_unscaled_gradients() before calling LossScaleOptimizer.apply_gradients(). This will likely result in worse model quality, so please call them in the correct places! For example:
+    with tf.GradientTape() as tape:
+      loss = loss_fn()
+      scaled_loss = opt.get_scaled_loss(loss)
+    scaled_grads = tape.gradient(scaled_loss, vars)
+    grads = opt.get_unscaled_gradients(scaled_grads)
+    opt.apply_gradients([(grads, var)])
+For more information, see https://www.tensorflow.org/api_docs/python/tf/keras/mixed_precision/LossScaleOptimizer
+WARNING:tensorflow:You forgot to call LossScaleOptimizer.get_scaled_loss() and LossScaleOptimizer.get_unscaled_gradients() before calling LossScaleOptimizer.apply_gradients(). This will likely result in worse model quality, so please call them in the correct places! For example:
+    with tf.GradientTape() as tape:
+      loss = loss_fn()
+      scaled_loss = opt.get_scaled_loss(loss)
+    scaled_grads = tape.gradient(scaled_loss, vars)
+    grads = opt.get_unscaled_gradients(scaled_grads)
+    opt.apply_gradients([(grads, var)])
+For more information, see https://www.tensorflow.org/api_docs/python/tf/keras/mixed_precision/LossScaleOptimizer
+ok
+test_sgdw_matches_reference_update (tests.test_runtime_optim.TestOptimizers) ... ok
+test_weight_decay_exclusion (tests.test_runtime_optim.TestOptimizers) ... ok
+test_weight_decay_optimizers_constant (tests.test_runtime_optim.TestOptimizers) ... ok
+test_bad_name (tests.test_runtime_optim.TestSchedules) ... ok
+test_constant (tests.test_runtime_optim.TestSchedules) ... ok
+test_cosine_midpoint (tests.test_runtime_optim.TestSchedules) ... ok
+test_cycle_restarts (tests.test_runtime_optim.TestSchedules) ... ok
+test_warmup_and_endpoints (tests.test_runtime_optim.TestSchedules) ... ok
+test_cascade_overfit_smoke_and_level_error (tests.test_main.TestCascadeMain) ... ok
+test_build_n (tests.test_main.TestDeformMain) ... ok
+test_dali_data_wiring_with_deform (tests.test_main.TestDeformMain) ... ok
+test_deform_real_data_overfit_path (tests.test_main.TestDeformMain) ... ok
+test_memory_knobs_dry_run (tests.test_main.TestDeformMain) ... ok
+test_mixed_three_task_dry_run (tests.test_main.TestDeformMain) ... WARNING:tensorflow:5 out of the last 5 calls to <function Trainer._val_fn.<locals>.fwd at 0x7f0f08444790> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:5 out of the last 5 calls to <function Trainer._val_fn.<locals>.fwd_train_mode at 0x7f0fc8068d30> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:6 out of the last 6 calls to <function Trainer._val_fn.<locals>.fwd at 0x7f0f0870bd30> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:6 out of the last 6 calls to <function Trainer._val_fn.<locals>.fwd_train_mode at 0x7f0f883ea790> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+ok
+test_synthetic_deform_dry_run (tests.test_main.TestDeformMain) ... WARNING:tensorflow:5 out of the last 8 calls to <function Trainer._make_deform_step.<locals>.<lambda> at 0x7f0f9e787550> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:5 out of the last 8 calls to <function Trainer._val_deform_fn.<locals>.fwd at 0x7f0f640f45e0> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:5 out of the last 8 calls to <function Trainer._val_deform_fn.<locals>.fwd_train_mode at 0x7f0f640f4700> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+ok
+test_synthetic_deform_ncc_dry_run (tests.test_main.TestDeformMain) ... WARNING:tensorflow:6 out of the last 10 calls to <function Trainer._make_deform_step.<locals>.<lambda> at 0x7f0f0921b280> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:6 out of the last 9 calls to <function Trainer._val_deform_fn.<locals>.fwd at 0x7f0f883ea550> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:6 out of the last 9 calls to <function Trainer._val_deform_fn.<locals>.fwd_train_mode at 0x7f10515d85e0> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+ok
+test_three_task_validation_group_sizes (tests.test_main.TestDeformMain) ... ok
+test_trainer_lean_mismatch (tests.test_main.TestDeformMain) ... ok
+test_device_routing (tests.test_main.TestIntensityAugDevice) ... ok
+test_overfit_parse_error (tests.test_main.TestIntensityAugDevice) ... usage: python -m unittest [-h] [--data DATA] [--results RESULTS]
+                          [--run-name RUN_NAME] [--resume RESUME]
+                          [--level {4,2,1}] [--group-size GROUP_SIZE]
+                          [--steps STEPS] [--val-every VAL_EVERY]
+                          [--val-groups VAL_GROUPS]
+                          [--val-group-size VAL_GROUP_SIZE]
+                          [--val-seed VAL_SEED] [--log-every LOG_EVERY]
+                          [--ckpt-every CKPT_EVERY] [--val-png VAL_PNG]
+                          [--val-png-k VAL_PNG_K]
+                          [--val-png-group VAL_PNG_GROUP]
+                          [--val-png-gt-row VAL_PNG_GT_ROW]
+                          [--val-png-mean-col VAL_PNG_MEAN_COL]
+                          [--best-metric BEST_METRIC]
+                          [--optimizer {sgdw,sgd,adam,adamw}] [--lr LR]
+                          [--momentum MOMENTUM] [--dampening DAMPENING]
+                          [--nesterov NESTEROV] [--decoupled DECOUPLED]
+                          [--weight-decay WEIGHT_DECAY]
+                          [--exclude-from-weight-decay EXCLUDE_FROM_WEIGHT_DECAY]
+                          [--clipnorm CLIPNORM]
+                          [--schedule {cosine,poly,cycle,constant}]
+                          [--warmup-steps WARMUP_STEPS]
+                          [--min-lr-factor MIN_LR_FACTOR] [--power POWER]
+                          [--cycle-steps CYCLE_STEPS] [--amp AMP] [--xla XLA]
+                          [--gpu-memory-limit-mb GPU_MEMORY_LIMIT_MB]
+                          [--task-ratio TASK_RATIO]
+                          [--lambda-pair LAMBDA_PAIR]
+                          [--loss-scale-mm2 LOSS_SCALE_MM2]
+                          [--task-loss-weights TASK_LOSS_WEIGHTS]
+                          [--task-grad-norm TASK_GRAD_NORM]
+                          [--task-grad-norm-min TASK_GRAD_NORM_MIN]
+                          [--p-pair P_PAIR] [--min-pairs {1,n}]
+                          [--flip-prob FLIP_PROB]
+                          [--target-iters TARGET_ITERS]
+                          [--lambda-pdice LAMBDA_PDICE] [--p-pdice P_PDICE]
+                          [--lambda-dice-template LAMBDA_DICE_TEMPLATE]
+                          [--lambda-ncc-template LAMBDA_NCC_TEMPLATE]
+                          [--lambda-ncc-pair LAMBDA_NCC_PAIR]
+                          [--ncc-window NCC_WINDOW]
+                          [--lambda-smooth LAMBDA_SMOOTH]
+                          [--smooth-order {1,2}]
+                          [--integration-steps INTEGRATION_STEPS]
+                          [--decoder-widths DECODER_WIDTHS]
+                          [--deform-decoder {auto,true,false}]
+                          [--deform-residual-affine DEFORM_RESIDUAL_AFFINE]
+                          [--deform-group-size DEFORM_GROUP_SIZE]
+                          [--gradient-checkpointing {none,integrator,decoder,both,full}]
+                          [--lean-sampler LEAN_SAMPLER]
+                          [--lean-losses LEAN_LOSSES]
+                          [--pair-recompute PAIR_RECOMPUTE]
+                          [--split-group-conv SPLIT_GROUP_CONV]
+                          [--overfit-dice-threshold OVERFIT_DICE_THRESHOLD]
+                          [--overfit-fold-max OVERFIT_FOLD_MAX]
+                          [--val-deform-max-pairs VAL_DEFORM_MAX_PAIRS]
+                          [--val-pair-chunk VAL_PAIR_CHUNK]
+                          [--val-image-chunk VAL_IMAGE_CHUNK]
+                          [--rigid-rotation-deg RIGID_ROTATION_DEG]
+                          [--rigid-translation-mm RIGID_TRANSLATION_MM]
+                          [--rigid-log-scale RIGID_LOG_SCALE]
+                          [--rigid-shear RIGID_SHEAR]
+                          [--affine-rotation-deg AFFINE_ROTATION_DEG]
+                          [--affine-translation-mm AFFINE_TRANSLATION_MM]
+                          [--affine-log-scale AFFINE_LOG_SCALE]
+                          [--affine-shear AFFINE_SHEAR]
+                          [--intensity-aug INTENSITY_AUG]
+                          [--intensity-aug-device {dali,tf}]
+                          [--curriculum CURRICULUM]
+                          [--curriculum-ramp-steps CURRICULUM_RAMP_STEPS]
+                          [--rigid-rotation-deg-start RIGID_ROTATION_DEG_START]
+                          [--rigid-translation-mm-start RIGID_TRANSLATION_MM_START]
+                          [--rigid-log-scale-start RIGID_LOG_SCALE_START]
+                          [--rigid-shear-start RIGID_SHEAR_START]
+                          [--affine-rotation-deg-start AFFINE_ROTATION_DEG_START]
+                          [--affine-translation-mm-start AFFINE_TRANSLATION_MM_START]
+                          [--affine-log-scale-start AFFINE_LOG_SCALE_START]
+                          [--affine-shear-start AFFINE_SHEAR_START]
+                          [--global-transform GLOBAL_TRANSFORM]
+                          [--global-rot-max-deg GLOBAL_ROT_MAX_DEG]
+                          [--global-trans-max-mm GLOBAL_TRANS_MAX_MM]
+                          [--global-resample-every GLOBAL_RESAMPLE_EVERY]
+                          [--global-start-step GLOBAL_START_STEP]
+                          [--global-ramp-steps GLOBAL_RAMP_STEPS]
+                          [--init-weights INIT_WEIGHTS]
+                          [--cascade-from CASCADE_FROM]
+                          [--cascade-skip-prob CASCADE_SKIP_PROB]
+                          [--bn-recal-batches BN_RECAL_BATCHES]
+                          [--bn-recal-freeze BN_RECAL_FREEZE]
+                          [--bn-recal-validate BN_RECAL_VALIDATE]
+                          [--num-threads NUM_THREADS] [--prefetch PREFETCH]
+                          [--shuffle-mode {epoch,buffer}]
+                          [--group-config {A,B}] [--block {single,residual}]
+                          [--norm {batch,instance,none}]
+                          [--dense-norm {layer,batch,none}]
+                          [--head-activation {relu,none}] [--filters FILTERS]
+                          [--reductions REDUCTIONS] [--dense DENSE]
+                          [--dropout DROPOUT]
+                          [--dense-group-concat-first DENSE_GROUP_CONCAT_FIRST]
+                          [--negative-slope NEGATIVE_SLOPE]
+                          [--translation-scale TRANSLATION_SCALE]
+                          [--centering-iters CENTERING_ITERS]
+                          [--bn-momentum BN_MOMENTUM] [--seed SEED]
+                          [--nonfinite-patience NONFINITE_PATIENCE]
+                          [--quiet QUIET]
+                          [--log-backend {auto,dllogger,jsonl}] [--dry-run]
+                          [--overfit-one-group] [--overfit-synthetic]
+                          [--overfit-threshold-mm OVERFIT_THRESHOLD_MM]
+                          [--overfit-max-steps OVERFIT_MAX_STEPS]
+python -m unittest: error: --intensity-aug-device tf needs the DALI training path (--overfit-one-group has no intensity augmentation)
+usage: python -m unittest [-h] [--data DATA] [--results RESULTS]
+                          [--run-name RUN_NAME] [--resume RESUME]
+                          [--level {4,2,1}] [--group-size GROUP_SIZE]
+                          [--steps STEPS] [--val-every VAL_EVERY]
+                          [--val-groups VAL_GROUPS]
+                          [--val-group-size VAL_GROUP_SIZE]
+                          [--val-seed VAL_SEED] [--log-every LOG_EVERY]
+                          [--ckpt-every CKPT_EVERY] [--val-png VAL_PNG]
+                          [--val-png-k VAL_PNG_K]
+                          [--val-png-group VAL_PNG_GROUP]
+                          [--val-png-gt-row VAL_PNG_GT_ROW]
+                          [--val-png-mean-col VAL_PNG_MEAN_COL]
+                          [--best-metric BEST_METRIC]
+                          [--optimizer {sgdw,sgd,adam,adamw}] [--lr LR]
+                          [--momentum MOMENTUM] [--dampening DAMPENING]
+                          [--nesterov NESTEROV] [--decoupled DECOUPLED]
+                          [--weight-decay WEIGHT_DECAY]
+                          [--exclude-from-weight-decay EXCLUDE_FROM_WEIGHT_DECAY]
+                          [--clipnorm CLIPNORM]
+                          [--schedule {cosine,poly,cycle,constant}]
+                          [--warmup-steps WARMUP_STEPS]
+                          [--min-lr-factor MIN_LR_FACTOR] [--power POWER]
+                          [--cycle-steps CYCLE_STEPS] [--amp AMP] [--xla XLA]
+                          [--gpu-memory-limit-mb GPU_MEMORY_LIMIT_MB]
+                          [--task-ratio TASK_RATIO]
+                          [--lambda-pair LAMBDA_PAIR]
+                          [--loss-scale-mm2 LOSS_SCALE_MM2]
+                          [--task-loss-weights TASK_LOSS_WEIGHTS]
+                          [--task-grad-norm TASK_GRAD_NORM]
+                          [--task-grad-norm-min TASK_GRAD_NORM_MIN]
+                          [--p-pair P_PAIR] [--min-pairs {1,n}]
+                          [--flip-prob FLIP_PROB]
+                          [--target-iters TARGET_ITERS]
+                          [--lambda-pdice LAMBDA_PDICE] [--p-pdice P_PDICE]
+                          [--lambda-dice-template LAMBDA_DICE_TEMPLATE]
+                          [--lambda-ncc-template LAMBDA_NCC_TEMPLATE]
+                          [--lambda-ncc-pair LAMBDA_NCC_PAIR]
+                          [--ncc-window NCC_WINDOW]
+                          [--lambda-smooth LAMBDA_SMOOTH]
+                          [--smooth-order {1,2}]
+                          [--integration-steps INTEGRATION_STEPS]
+                          [--decoder-widths DECODER_WIDTHS]
+                          [--deform-decoder {auto,true,false}]
+                          [--deform-residual-affine DEFORM_RESIDUAL_AFFINE]
+                          [--deform-group-size DEFORM_GROUP_SIZE]
+                          [--gradient-checkpointing {none,integrator,decoder,both,full}]
+                          [--lean-sampler LEAN_SAMPLER]
+                          [--lean-losses LEAN_LOSSES]
+                          [--pair-recompute PAIR_RECOMPUTE]
+                          [--split-group-conv SPLIT_GROUP_CONV]
+                          [--overfit-dice-threshold OVERFIT_DICE_THRESHOLD]
+                          [--overfit-fold-max OVERFIT_FOLD_MAX]
+                          [--val-deform-max-pairs VAL_DEFORM_MAX_PAIRS]
+                          [--val-pair-chunk VAL_PAIR_CHUNK]
+                          [--val-image-chunk VAL_IMAGE_CHUNK]
+                          [--rigid-rotation-deg RIGID_ROTATION_DEG]
+                          [--rigid-translation-mm RIGID_TRANSLATION_MM]
+                          [--rigid-log-scale RIGID_LOG_SCALE]
+                          [--rigid-shear RIGID_SHEAR]
+                          [--affine-rotation-deg AFFINE_ROTATION_DEG]
+                          [--affine-translation-mm AFFINE_TRANSLATION_MM]
+                          [--affine-log-scale AFFINE_LOG_SCALE]
+                          [--affine-shear AFFINE_SHEAR]
+                          [--intensity-aug INTENSITY_AUG]
+                          [--intensity-aug-device {dali,tf}]
+                          [--curriculum CURRICULUM]
+                          [--curriculum-ramp-steps CURRICULUM_RAMP_STEPS]
+                          [--rigid-rotation-deg-start RIGID_ROTATION_DEG_START]
+                          [--rigid-translation-mm-start RIGID_TRANSLATION_MM_START]
+                          [--rigid-log-scale-start RIGID_LOG_SCALE_START]
+                          [--rigid-shear-start RIGID_SHEAR_START]
+                          [--affine-rotation-deg-start AFFINE_ROTATION_DEG_START]
+                          [--affine-translation-mm-start AFFINE_TRANSLATION_MM_START]
+                          [--affine-log-scale-start AFFINE_LOG_SCALE_START]
+                          [--affine-shear-start AFFINE_SHEAR_START]
+                          [--global-transform GLOBAL_TRANSFORM]
+                          [--global-rot-max-deg GLOBAL_ROT_MAX_DEG]
+                          [--global-trans-max-mm GLOBAL_TRANS_MAX_MM]
+                          [--global-resample-every GLOBAL_RESAMPLE_EVERY]
+                          [--global-start-step GLOBAL_START_STEP]
+                          [--global-ramp-steps GLOBAL_RAMP_STEPS]
+                          [--init-weights INIT_WEIGHTS]
+                          [--cascade-from CASCADE_FROM]
+                          [--cascade-skip-prob CASCADE_SKIP_PROB]
+                          [--bn-recal-batches BN_RECAL_BATCHES]
+                          [--bn-recal-freeze BN_RECAL_FREEZE]
+                          [--bn-recal-validate BN_RECAL_VALIDATE]
+                          [--num-threads NUM_THREADS] [--prefetch PREFETCH]
+                          [--shuffle-mode {epoch,buffer}]
+                          [--group-config {A,B}] [--block {single,residual}]
+                          [--norm {batch,instance,none}]
+                          [--dense-norm {layer,batch,none}]
+                          [--head-activation {relu,none}] [--filters FILTERS]
+                          [--reductions REDUCTIONS] [--dense DENSE]
+                          [--dropout DROPOUT]
+                          [--dense-group-concat-first DENSE_GROUP_CONCAT_FIRST]
+                          [--negative-slope NEGATIVE_SLOPE]
+                          [--translation-scale TRANSLATION_SCALE]
+                          [--centering-iters CENTERING_ITERS]
+                          [--bn-momentum BN_MOMENTUM] [--seed SEED]
+                          [--nonfinite-patience NONFINITE_PATIENCE]
+                          [--quiet QUIET]
+                          [--log-backend {auto,dllogger,jsonl}] [--dry-run]
+                          [--overfit-one-group] [--overfit-synthetic]
+                          [--overfit-threshold-mm OVERFIT_THRESHOLD_MM]
+                          [--overfit-max-steps OVERFIT_MAX_STEPS]
+python -m unittest: error: argument --intensity-aug-device: invalid choice: 'gpu' (choose from 'dali', 'tf')
+ok
+test_resume_guard (tests.test_main.TestIntensityAugDevice) ... ok
+test_check_cascade_fingerprints (tests.test_main.TestLevel1CascadeErrors) ... ok
+test_level1_cascade_from_errors (tests.test_main.TestLevel1CascadeErrors) ... WARNING:tensorflow:Mixed precision compatibility check (mixed_float16): WARNING
+Your GPUs may run slowly with dtype policy mixed_float16 because they do not have compute capability of at least 7.0. Your GPUs:
+  NVIDIA GeForce GTX 1080, compute capability 6.1 (x2)
+See https://developer.nvidia.com/cuda-gpus for a list of GPUs and their compute capabilities.
+If you will use compatible GPU(s) not attached to this host, e.g. by running a multi-worker model, you can ignore this warning. This message will only be logged once
+
+[level-1 cascade-from] main.py: --cascade-from /tmp/bgr_m4_main_qr5lwlb5/results/m8/ckpt/last: FrozenChain.from_checkpoint(/tmp/bgr_m4_main_qr5lwlb5/results/m8/ckpt/last/last-4): AssertionError: Found 188 Python objects tha
+ok
+test_level1_chain_resume_and_checker (tests.test_main.TestLevel1CascadeMain) ... WARNING:tensorflow:5 out of the last 7 calls to <function Trainer._make_train_step.<locals>.<lambda> at 0x7f0f9f0229d0> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:5 out of the last 7 calls to <function Trainer._cascade_val_fn.<locals>.fwd at 0x7f0f08430790> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:6 out of the last 8 calls to <function Trainer._cascade_val_fn.<locals>.fwd at 0x7f0f9f0ad940> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+
+[T-E1] level 4 -> 2 -> 1 + resume: 386 s
+ok
+test_dry_run_without_dali_fails_clearly (tests.test_main.TestMain) ... ok
+test_real_data_overfit_path (tests.test_main.TestMain) ... WARNING:tensorflow:6 out of the last 10 calls to <function Trainer._make_train_step.<locals>.<lambda> at 0x7f0f981578b0> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+ok
+test_synthetic_overfit_dry_run (tests.test_main.TestMain) ... ok
+test_adam_note_and_no_record (tests.test_main.TestOptimizerMain) ... ok
+test_adamw_record_and_resume (tests.test_main.TestOptimizerMain) ... /mnt/d/Research/Brain_Registration_Projects/brain-group-rad/tests/runtime_helpers.py:43: ResourceWarning: unclosed file <_io.TextIOWrapper name='/tmp/bgr_m4_main_umhlid8o/results/w/logs/metrics.jsonl' mode='a' encoding='UTF-8'>
+  gc.collect()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+ok
+test_check_optimizer_unit (tests.test_main.TestOptimizerMain) ... usage: python -m unittest [-h] [--data DATA] [--results RESULTS]
+                          [--run-name RUN_NAME] [--resume RESUME]
+                          [--level {4,2,1}] [--group-size GROUP_SIZE]
+                          [--steps STEPS] [--val-every VAL_EVERY]
+                          [--val-groups VAL_GROUPS]
+                          [--val-group-size VAL_GROUP_SIZE]
+                          [--val-seed VAL_SEED] [--log-every LOG_EVERY]
+                          [--ckpt-every CKPT_EVERY] [--val-png VAL_PNG]
+                          [--val-png-k VAL_PNG_K]
+                          [--val-png-group VAL_PNG_GROUP]
+                          [--val-png-gt-row VAL_PNG_GT_ROW]
+                          [--val-png-mean-col VAL_PNG_MEAN_COL]
+                          [--best-metric BEST_METRIC]
+                          [--optimizer {sgdw,sgd,adam,adamw}] [--lr LR]
+                          [--momentum MOMENTUM] [--dampening DAMPENING]
+                          [--nesterov NESTEROV] [--decoupled DECOUPLED]
+                          [--weight-decay WEIGHT_DECAY]
+                          [--exclude-from-weight-decay EXCLUDE_FROM_WEIGHT_DECAY]
+                          [--clipnorm CLIPNORM]
+                          [--schedule {cosine,poly,cycle,constant}]
+                          [--warmup-steps WARMUP_STEPS]
+                          [--min-lr-factor MIN_LR_FACTOR] [--power POWER]
+                          [--cycle-steps CYCLE_STEPS] [--amp AMP] [--xla XLA]
+                          [--gpu-memory-limit-mb GPU_MEMORY_LIMIT_MB]
+                          [--task-ratio TASK_RATIO]
+                          [--lambda-pair LAMBDA_PAIR]
+                          [--loss-scale-mm2 LOSS_SCALE_MM2]
+                          [--task-loss-weights TASK_LOSS_WEIGHTS]
+                          [--task-grad-norm TASK_GRAD_NORM]
+                          [--task-grad-norm-min TASK_GRAD_NORM_MIN]
+                          [--p-pair P_PAIR] [--min-pairs {1,n}]
+                          [--flip-prob FLIP_PROB]
+                          [--target-iters TARGET_ITERS]
+                          [--lambda-pdice LAMBDA_PDICE] [--p-pdice P_PDICE]
+                          [--lambda-dice-template LAMBDA_DICE_TEMPLATE]
+                          [--lambda-ncc-template LAMBDA_NCC_TEMPLATE]
+                          [--lambda-ncc-pair LAMBDA_NCC_PAIR]
+                          [--ncc-window NCC_WINDOW]
+                          [--lambda-smooth LAMBDA_SMOOTH]
+                          [--smooth-order {1,2}]
+                          [--integration-steps INTEGRATION_STEPS]
+                          [--decoder-widths DECODER_WIDTHS]
+                          [--deform-decoder {auto,true,false}]
+                          [--deform-residual-affine DEFORM_RESIDUAL_AFFINE]
+                          [--deform-group-size DEFORM_GROUP_SIZE]
+                          [--gradient-checkpointing {none,integrator,decoder,both,full}]
+                          [--lean-sampler LEAN_SAMPLER]
+                          [--lean-losses LEAN_LOSSES]
+                          [--pair-recompute PAIR_RECOMPUTE]
+                          [--split-group-conv SPLIT_GROUP_CONV]
+                          [--overfit-dice-threshold OVERFIT_DICE_THRESHOLD]
+                          [--overfit-fold-max OVERFIT_FOLD_MAX]
+                          [--val-deform-max-pairs VAL_DEFORM_MAX_PAIRS]
+                          [--val-pair-chunk VAL_PAIR_CHUNK]
+                          [--val-image-chunk VAL_IMAGE_CHUNK]
+                          [--rigid-rotation-deg RIGID_ROTATION_DEG]
+                          [--rigid-translation-mm RIGID_TRANSLATION_MM]
+                          [--rigid-log-scale RIGID_LOG_SCALE]
+                          [--rigid-shear RIGID_SHEAR]
+                          [--affine-rotation-deg AFFINE_ROTATION_DEG]
+                          [--affine-translation-mm AFFINE_TRANSLATION_MM]
+                          [--affine-log-scale AFFINE_LOG_SCALE]
+                          [--affine-shear AFFINE_SHEAR]
+                          [--intensity-aug INTENSITY_AUG]
+                          [--intensity-aug-device {dali,tf}]
+                          [--curriculum CURRICULUM]
+                          [--curriculum-ramp-steps CURRICULUM_RAMP_STEPS]
+                          [--rigid-rotation-deg-start RIGID_ROTATION_DEG_START]
+                          [--rigid-translation-mm-start RIGID_TRANSLATION_MM_START]
+                          [--rigid-log-scale-start RIGID_LOG_SCALE_START]
+                          [--rigid-shear-start RIGID_SHEAR_START]
+                          [--affine-rotation-deg-start AFFINE_ROTATION_DEG_START]
+                          [--affine-translation-mm-start AFFINE_TRANSLATION_MM_START]
+                          [--affine-log-scale-start AFFINE_LOG_SCALE_START]
+                          [--affine-shear-start AFFINE_SHEAR_START]
+                          [--global-transform GLOBAL_TRANSFORM]
+                          [--global-rot-max-deg GLOBAL_ROT_MAX_DEG]
+                          [--global-trans-max-mm GLOBAL_TRANS_MAX_MM]
+                          [--global-resample-every GLOBAL_RESAMPLE_EVERY]
+                          [--global-start-step GLOBAL_START_STEP]
+                          [--global-ramp-steps GLOBAL_RAMP_STEPS]
+                          [--init-weights INIT_WEIGHTS]
+                          [--cascade-from CASCADE_FROM]
+                          [--cascade-skip-prob CASCADE_SKIP_PROB]
+                          [--bn-recal-batches BN_RECAL_BATCHES]
+                          [--bn-recal-freeze BN_RECAL_FREEZE]
+                          [--bn-recal-validate BN_RECAL_VALIDATE]
+                          [--num-threads NUM_THREADS] [--prefetch PREFETCH]
+                          [--shuffle-mode {epoch,buffer}]
+                          [--group-config {A,B}] [--block {single,residual}]
+                          [--norm {batch,instance,none}]
+                          [--dense-norm {layer,batch,none}]
+                          [--head-activation {relu,none}] [--filters FILTERS]
+                          [--reductions REDUCTIONS] [--dense DENSE]
+                          [--dropout DROPOUT]
+                          [--dense-group-concat-first DENSE_GROUP_CONCAT_FIRST]
+                          [--negative-slope NEGATIVE_SLOPE]
+                          [--translation-scale TRANSLATION_SCALE]
+                          [--centering-iters CENTERING_ITERS]
+                          [--bn-momentum BN_MOMENTUM] [--seed SEED]
+                          [--nonfinite-patience NONFINITE_PATIENCE]
+                          [--quiet QUIET]
+                          [--log-backend {auto,dllogger,jsonl}] [--dry-run]
+                          [--overfit-one-group] [--overfit-synthetic]
+                          [--overfit-threshold-mm OVERFIT_THRESHOLD_MM]
+                          [--overfit-max-steps OVERFIT_MAX_STEPS]
+python -m unittest: error: --weight-decay must be finite and >= 0, got -1.0
+usage: python -m unittest [-h] [--data DATA] [--results RESULTS]
+                          [--run-name RUN_NAME] [--resume RESUME]
+                          [--level {4,2,1}] [--group-size GROUP_SIZE]
+                          [--steps STEPS] [--val-every VAL_EVERY]
+                          [--val-groups VAL_GROUPS]
+                          [--val-group-size VAL_GROUP_SIZE]
+                          [--val-seed VAL_SEED] [--log-every LOG_EVERY]
+                          [--ckpt-every CKPT_EVERY] [--val-png VAL_PNG]
+                          [--val-png-k VAL_PNG_K]
+                          [--val-png-group VAL_PNG_GROUP]
+                          [--val-png-gt-row VAL_PNG_GT_ROW]
+                          [--val-png-mean-col VAL_PNG_MEAN_COL]
+                          [--best-metric BEST_METRIC]
+                          [--optimizer {sgdw,sgd,adam,adamw}] [--lr LR]
+                          [--momentum MOMENTUM] [--dampening DAMPENING]
+                          [--nesterov NESTEROV] [--decoupled DECOUPLED]
+                          [--weight-decay WEIGHT_DECAY]
+                          [--exclude-from-weight-decay EXCLUDE_FROM_WEIGHT_DECAY]
+                          [--clipnorm CLIPNORM]
+                          [--schedule {cosine,poly,cycle,constant}]
+                          [--warmup-steps WARMUP_STEPS]
+                          [--min-lr-factor MIN_LR_FACTOR] [--power POWER]
+                          [--cycle-steps CYCLE_STEPS] [--amp AMP] [--xla XLA]
+                          [--gpu-memory-limit-mb GPU_MEMORY_LIMIT_MB]
+                          [--task-ratio TASK_RATIO]
+                          [--lambda-pair LAMBDA_PAIR]
+                          [--loss-scale-mm2 LOSS_SCALE_MM2]
+                          [--task-loss-weights TASK_LOSS_WEIGHTS]
+                          [--task-grad-norm TASK_GRAD_NORM]
+                          [--task-grad-norm-min TASK_GRAD_NORM_MIN]
+                          [--p-pair P_PAIR] [--min-pairs {1,n}]
+                          [--flip-prob FLIP_PROB]
+                          [--target-iters TARGET_ITERS]
+                          [--lambda-pdice LAMBDA_PDICE] [--p-pdice P_PDICE]
+                          [--lambda-dice-template LAMBDA_DICE_TEMPLATE]
+                          [--lambda-ncc-template LAMBDA_NCC_TEMPLATE]
+                          [--lambda-ncc-pair LAMBDA_NCC_PAIR]
+                          [--ncc-window NCC_WINDOW]
+                          [--lambda-smooth LAMBDA_SMOOTH]
+                          [--smooth-order {1,2}]
+                          [--integration-steps INTEGRATION_STEPS]
+                          [--decoder-widths DECODER_WIDTHS]
+                          [--deform-decoder {auto,true,false}]
+                          [--deform-residual-affine DEFORM_RESIDUAL_AFFINE]
+                          [--deform-group-size DEFORM_GROUP_SIZE]
+                          [--gradient-checkpointing {none,integrator,decoder,both,full}]
+                          [--lean-sampler LEAN_SAMPLER]
+                          [--lean-losses LEAN_LOSSES]
+                          [--pair-recompute PAIR_RECOMPUTE]
+                          [--split-group-conv SPLIT_GROUP_CONV]
+                          [--overfit-dice-threshold OVERFIT_DICE_THRESHOLD]
+                          [--overfit-fold-max OVERFIT_FOLD_MAX]
+                          [--val-deform-max-pairs VAL_DEFORM_MAX_PAIRS]
+                          [--val-pair-chunk VAL_PAIR_CHUNK]
+                          [--val-image-chunk VAL_IMAGE_CHUNK]
+                          [--rigid-rotation-deg RIGID_ROTATION_DEG]
+                          [--rigid-translation-mm RIGID_TRANSLATION_MM]
+                          [--rigid-log-scale RIGID_LOG_SCALE]
+                          [--rigid-shear RIGID_SHEAR]
+                          [--affine-rotation-deg AFFINE_ROTATION_DEG]
+                          [--affine-translation-mm AFFINE_TRANSLATION_MM]
+                          [--affine-log-scale AFFINE_LOG_SCALE]
+                          [--affine-shear AFFINE_SHEAR]
+                          [--intensity-aug INTENSITY_AUG]
+                          [--intensity-aug-device {dali,tf}]
+                          [--curriculum CURRICULUM]
+                          [--curriculum-ramp-steps CURRICULUM_RAMP_STEPS]
+                          [--rigid-rotation-deg-start RIGID_ROTATION_DEG_START]
+                          [--rigid-translation-mm-start RIGID_TRANSLATION_MM_START]
+                          [--rigid-log-scale-start RIGID_LOG_SCALE_START]
+                          [--rigid-shear-start RIGID_SHEAR_START]
+                          [--affine-rotation-deg-start AFFINE_ROTATION_DEG_START]
+                          [--affine-translation-mm-start AFFINE_TRANSLATION_MM_START]
+                          [--affine-log-scale-start AFFINE_LOG_SCALE_START]
+                          [--affine-shear-start AFFINE_SHEAR_START]
+                          [--global-transform GLOBAL_TRANSFORM]
+                          [--global-rot-max-deg GLOBAL_ROT_MAX_DEG]
+                          [--global-trans-max-mm GLOBAL_TRANS_MAX_MM]
+                          [--global-resample-every GLOBAL_RESAMPLE_EVERY]
+                          [--global-start-step GLOBAL_START_STEP]
+                          [--global-ramp-steps GLOBAL_RAMP_STEPS]
+                          [--init-weights INIT_WEIGHTS]
+                          [--cascade-from CASCADE_FROM]
+                          [--cascade-skip-prob CASCADE_SKIP_PROB]
+                          [--bn-recal-batches BN_RECAL_BATCHES]
+                          [--bn-recal-freeze BN_RECAL_FREEZE]
+                          [--bn-recal-validate BN_RECAL_VALIDATE]
+                          [--num-threads NUM_THREADS] [--prefetch PREFETCH]
+                          [--shuffle-mode {epoch,buffer}]
+                          [--group-config {A,B}] [--block {single,residual}]
+                          [--norm {batch,instance,none}]
+                          [--dense-norm {layer,batch,none}]
+                          [--head-activation {relu,none}] [--filters FILTERS]
+                          [--reductions REDUCTIONS] [--dense DENSE]
+                          [--dropout DROPOUT]
+                          [--dense-group-concat-first DENSE_GROUP_CONCAT_FIRST]
+                          [--negative-slope NEGATIVE_SLOPE]
+                          [--translation-scale TRANSLATION_SCALE]
+                          [--centering-iters CENTERING_ITERS]
+                          [--bn-momentum BN_MOMENTUM] [--seed SEED]
+                          [--nonfinite-patience NONFINITE_PATIENCE]
+                          [--quiet QUIET]
+                          [--log-backend {auto,dllogger,jsonl}] [--dry-run]
+                          [--overfit-one-group] [--overfit-synthetic]
+                          [--overfit-threshold-mm OVERFIT_THRESHOLD_MM]
+                          [--overfit-max-steps OVERFIT_MAX_STEPS]
+python -m unittest: error: --weight-decay must be finite and >= 0, got nan
+usage: python -m unittest [-h] [--data DATA] [--results RESULTS]
+                          [--run-name RUN_NAME] [--resume RESUME]
+                          [--level {4,2,1}] [--group-size GROUP_SIZE]
+                          [--steps STEPS] [--val-every VAL_EVERY]
+                          [--val-groups VAL_GROUPS]
+                          [--val-group-size VAL_GROUP_SIZE]
+                          [--val-seed VAL_SEED] [--log-every LOG_EVERY]
+                          [--ckpt-every CKPT_EVERY] [--val-png VAL_PNG]
+                          [--val-png-k VAL_PNG_K]
+                          [--val-png-group VAL_PNG_GROUP]
+                          [--val-png-gt-row VAL_PNG_GT_ROW]
+                          [--val-png-mean-col VAL_PNG_MEAN_COL]
+                          [--best-metric BEST_METRIC]
+                          [--optimizer {sgdw,sgd,adam,adamw}] [--lr LR]
+                          [--momentum MOMENTUM] [--dampening DAMPENING]
+                          [--nesterov NESTEROV] [--decoupled DECOUPLED]
+                          [--weight-decay WEIGHT_DECAY]
+                          [--exclude-from-weight-decay EXCLUDE_FROM_WEIGHT_DECAY]
+                          [--clipnorm CLIPNORM]
+                          [--schedule {cosine,poly,cycle,constant}]
+                          [--warmup-steps WARMUP_STEPS]
+                          [--min-lr-factor MIN_LR_FACTOR] [--power POWER]
+                          [--cycle-steps CYCLE_STEPS] [--amp AMP] [--xla XLA]
+                          [--gpu-memory-limit-mb GPU_MEMORY_LIMIT_MB]
+                          [--task-ratio TASK_RATIO]
+                          [--lambda-pair LAMBDA_PAIR]
+                          [--loss-scale-mm2 LOSS_SCALE_MM2]
+                          [--task-loss-weights TASK_LOSS_WEIGHTS]
+                          [--task-grad-norm TASK_GRAD_NORM]
+                          [--task-grad-norm-min TASK_GRAD_NORM_MIN]
+                          [--p-pair P_PAIR] [--min-pairs {1,n}]
+                          [--flip-prob FLIP_PROB]
+                          [--target-iters TARGET_ITERS]
+                          [--lambda-pdice LAMBDA_PDICE] [--p-pdice P_PDICE]
+                          [--lambda-dice-template LAMBDA_DICE_TEMPLATE]
+                          [--lambda-ncc-template LAMBDA_NCC_TEMPLATE]
+                          [--lambda-ncc-pair LAMBDA_NCC_PAIR]
+                          [--ncc-window NCC_WINDOW]
+                          [--lambda-smooth LAMBDA_SMOOTH]
+                          [--smooth-order {1,2}]
+                          [--integration-steps INTEGRATION_STEPS]
+                          [--decoder-widths DECODER_WIDTHS]
+                          [--deform-decoder {auto,true,false}]
+                          [--deform-residual-affine DEFORM_RESIDUAL_AFFINE]
+                          [--deform-group-size DEFORM_GROUP_SIZE]
+                          [--gradient-checkpointing {none,integrator,decoder,both,full}]
+                          [--lean-sampler LEAN_SAMPLER]
+                          [--lean-losses LEAN_LOSSES]
+                          [--pair-recompute PAIR_RECOMPUTE]
+                          [--split-group-conv SPLIT_GROUP_CONV]
+                          [--overfit-dice-threshold OVERFIT_DICE_THRESHOLD]
+                          [--overfit-fold-max OVERFIT_FOLD_MAX]
+                          [--val-deform-max-pairs VAL_DEFORM_MAX_PAIRS]
+                          [--val-pair-chunk VAL_PAIR_CHUNK]
+                          [--val-image-chunk VAL_IMAGE_CHUNK]
+                          [--rigid-rotation-deg RIGID_ROTATION_DEG]
+                          [--rigid-translation-mm RIGID_TRANSLATION_MM]
+                          [--rigid-log-scale RIGID_LOG_SCALE]
+                          [--rigid-shear RIGID_SHEAR]
+                          [--affine-rotation-deg AFFINE_ROTATION_DEG]
+                          [--affine-translation-mm AFFINE_TRANSLATION_MM]
+                          [--affine-log-scale AFFINE_LOG_SCALE]
+                          [--affine-shear AFFINE_SHEAR]
+                          [--intensity-aug INTENSITY_AUG]
+                          [--intensity-aug-device {dali,tf}]
+                          [--curriculum CURRICULUM]
+                          [--curriculum-ramp-steps CURRICULUM_RAMP_STEPS]
+                          [--rigid-rotation-deg-start RIGID_ROTATION_DEG_START]
+                          [--rigid-translation-mm-start RIGID_TRANSLATION_MM_START]
+                          [--rigid-log-scale-start RIGID_LOG_SCALE_START]
+                          [--rigid-shear-start RIGID_SHEAR_START]
+                          [--affine-rotation-deg-start AFFINE_ROTATION_DEG_START]
+                          [--affine-translation-mm-start AFFINE_TRANSLATION_MM_START]
+                          [--affine-log-scale-start AFFINE_LOG_SCALE_START]
+                          [--affine-shear-start AFFINE_SHEAR_START]
+                          [--global-transform GLOBAL_TRANSFORM]
+                          [--global-rot-max-deg GLOBAL_ROT_MAX_DEG]
+                          [--global-trans-max-mm GLOBAL_TRANS_MAX_MM]
+                          [--global-resample-every GLOBAL_RESAMPLE_EVERY]
+                          [--global-start-step GLOBAL_START_STEP]
+                          [--global-ramp-steps GLOBAL_RAMP_STEPS]
+                          [--init-weights INIT_WEIGHTS]
+                          [--cascade-from CASCADE_FROM]
+                          [--cascade-skip-prob CASCADE_SKIP_PROB]
+                          [--bn-recal-batches BN_RECAL_BATCHES]
+                          [--bn-recal-freeze BN_RECAL_FREEZE]
+                          [--bn-recal-validate BN_RECAL_VALIDATE]
+                          [--num-threads NUM_THREADS] [--prefetch PREFETCH]
+                          [--shuffle-mode {epoch,buffer}]
+                          [--group-config {A,B}] [--block {single,residual}]
+                          [--norm {batch,instance,none}]
+                          [--dense-norm {layer,batch,none}]
+                          [--head-activation {relu,none}] [--filters FILTERS]
+                          [--reductions REDUCTIONS] [--dense DENSE]
+                          [--dropout DROPOUT]
+                          [--dense-group-concat-first DENSE_GROUP_CONCAT_FIRST]
+                          [--negative-slope NEGATIVE_SLOPE]
+                          [--translation-scale TRANSLATION_SCALE]
+                          [--centering-iters CENTERING_ITERS]
+                          [--bn-momentum BN_MOMENTUM] [--seed SEED]
+                          [--nonfinite-patience NONFINITE_PATIENCE]
+                          [--quiet QUIET]
+                          [--log-backend {auto,dllogger,jsonl}] [--dry-run]
+                          [--overfit-one-group] [--overfit-synthetic]
+                          [--overfit-threshold-mm OVERFIT_THRESHOLD_MM]
+                          [--overfit-max-steps OVERFIT_MAX_STEPS]
+python -m unittest: error: --weight-decay must be finite and >= 0, got inf
+ok
+test_overfit_affine_below_1mm (tests.test_main.TestOverfit) ... 
+[overfit affine:1] steps 1846, reached True, best worst-task 10-step mean 0.7949 mm, per task {'affine': 0.7948701500892639}, median step 519 ms
+[overfit affine:1 val] step, eval_center_rms_mm, trainmode_center_rms_mm:
+  250   23.593    1.644
+  500    3.037    2.126
+  750    1.650    1.655
+  1000    1.157    1.052
+  1250    2.406    2.412
+  1500    1.499    1.467
+  1750    1.020    0.985
+  1846    0.606    0.618
+[overfit affine:1 final] affine eval 0.6063 mm, train mode 0.6180 mm
+[overfit affine final] scale 0.499 %, shear 0.549 %, QR rotation 0.617 deg (centered)
+ok
+test_overfit_mixed_rigid_affine_below_1mm (tests.test_main.TestOverfit) ... 
+[overfit rigid:1,affine:1] steps 2199, reached True, best worst-task 10-step mean 0.7903 mm, per task {'rigid': 0.6393289536237716, 'affine': 0.7903458118438721}, median step 511 ms
+[overfit rigid:1,affine:1 val] step, rigid_eval_center_rms_mm, rigid_trainmode_center_rms_mm, affine_eval_center_rms_mm, affine_trainmode_center_rms_mm:
+  250   18.503    8.116   22.480    7.458
+  500    2.304    1.967    4.195    3.922
+  750    1.394    1.404    3.642    3.649
+  1000    0.771    0.775    1.511    1.545
+  1250    1.215    1.204    1.585    1.530
+  1500    1.031    1.056    1.486    1.450
+  1750    0.767    0.781    1.048    1.007
+  2000    0.797    0.815    0.996    0.956
+  2199    0.318    0.336    0.605    0.620
+[overfit rigid:1,affine:1 final] rigid eval 0.3176 mm, train mode 0.3365 mm
+[overfit rigid:1,affine:1 final] affine eval 0.6053 mm, train mode 0.6201 mm
+ok
+test_overfit_synthetic_group_below_1mm (tests.test_main.TestOverfit) ... 
+[overfit curve] lr 3e-4, steps 593, reached True, best 10-step mean 0.7611 mm, median step 504 ms
+  step    1  center RMS  22.291 mm  pair RMS  41.478 mm
+  step   50  center RMS  12.744 mm  pair RMS  20.225 mm
+  step  100  center RMS  10.511 mm  pair RMS  19.724 mm
+  step  150  center RMS   8.059 mm  pair RMS   8.654 mm
+  step  200  center RMS   6.110 mm  pair RMS   5.501 mm
+  step  250  center RMS   4.789 mm  pair RMS   8.746 mm
+  step  300  center RMS   3.557 mm  pair RMS   5.931 mm
+  step  350  center RMS   1.938 mm  pair RMS   3.572 mm
+  step  400  center RMS   1.168 mm  pair RMS   2.522 mm
+  step  450  center RMS   2.033 mm  pair RMS   1.696 mm
+  step  500  center RMS   1.154 mm  pair RMS   0.858 mm
+  step  550  center RMS   0.884 mm  pair RMS   1.868 mm
+  step  593  center RMS   0.478 mm  pair RMS   1.063 mm
+[overfit val] step, eval-mode center RMS, train-mode center RMS (mm):
+   250   21.354    4.717
+   500    1.815    1.356
+   593    0.763    0.589
+ok
+test_init_weights_warm_start (tests.test_main.TestResumeControlsAndWarmStart) ... ok
+test_resumed_step_control_values_before_pipelines (tests.test_main.TestResumeControlsAndWarmStart) ... ok
+test_three_task_warm_start_smoke (tests.test_main.TestResumeControlsAndWarmStart) ... 
+[m7 smoke] seed 0
+  PASS final_step             last logged step 12 (expected >= 12)
+  PASS train_rigid            4 logged train_rigid/loss values, all finite
+  PASS train_affine           3 logged train_affine/loss values, all finite
+  PASS train_deform           5 logged train_deform/loss values, all finite
+  PASS val_rigid              final-step validation complete
+  PASS val_affine             final-step validation complete
+  PASS val_deform             final-step validation complete
+  PASS val_mean_pair_rms_mm   val/mean_pair_rms_mm = 38.414682302396216, linear task pair RMS [35.176576336775334, 41.652788268017105]
+  PASS trace_once             trace counts {'rigid': 1, 'affine': 1, 'deform': 1} (1 per task)
+  PASS finite_steps           non-finite steps: 0
+  PASS val_png                PNGs ['rigid_step0000012.png', 'affine_step0000012.png', 'deform_step0000012.png'] present: [True, True, True]
+  PASS best_checkpoint        ckpt/best has a checkpoint: True
+  PASS best_deform_checkpoint ckpt/best_deform has a checkpoint: True
+  PASS init_weights           mode partial (expected partial), restored ['centering', 'encoder', 'linear_decoder'], fresh ['deform_decoder'] (expected ['deform_decoder']), config diff {'deform_decoder': [False, True]}
+  PASS enc_grad_rigid         4/4 logged values, median raw 3903, eff 4.531, task grad_norm 102.8
+  PASS enc_grad_affine        3/3 logged values, median raw 1.19e+04, eff 7.286, task grad_norm 186.3
+  PASS enc_grad_deform        5/5 logged values, median raw 0.007565, eff 0.007565, task grad_norm 0.1843
+  PASS enc_grad_ratio         INFO median eff ratio linear/deform rigid 599, affine 963 (target [0.1, 10])
+ok
+
+======================================================================
+FAIL: test_a_wd0_equals_adam (tests.test_runtime_optim.TestAdamW)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/mnt/d/Research/Brain_Registration_Projects/brain-group-rad/tests/test_runtime_optim.py", line 183, in test_a_wd0_equals_adam
+    self.assertEqual(len(sa), 1 + 2 * len(init))          # iterations + m, v per variable
+AssertionError: 8 != 9
+
+======================================================================
+FAIL: test_d_amp_loss_scale_optimizer (tests.test_runtime_optim.TestAdamW)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/mnt/d/Research/Brain_Registration_Projects/brain-group-rad/tests/test_runtime_optim.py", line 238, in test_d_amp_loss_scale_optimizer
+    self.assertEqual(int(O.inner_optimizer(opt).iterations.numpy()), 1)
+AssertionError: 2 != 1
+
+----------------------------------------------------------------------
+Ran 44 tests in 3857.259s
+
+FAILED (failures=2)
+overfit: reached=False best 10-step mean center RMS (worst task) nan mm after 2 steps; final val center RMS: rigid eval 22.1609 mm, train mode 22.1608 mm
+overfit: reached=False best 10-step mean center RMS (worst task) nan mm after 2 steps; final val center RMS: rigid eval 22.1664 mm, train mode 22.1663 mm
+overfit deform: reached=False after 3 steps; 10-step window soft template Dice nan (threshold 0.9), fold nan (max 0.001); final val template Dice 0.3991, pair Dice 0.1164 (identity 0.4001 / 0.1164), neg J 0.0000 %
+dry run: steps 0 -> 2, trace counts {'rigid': 1, 'deform': 1}, finite True
+dry run: steps 0 -> 2, trace counts {'rigid': 1, 'affine': 0, 'deform': 1}, finite True
+overfit: reached=False best 10-step mean center RMS (worst task) nan mm after 4 steps; final val center RMS: rigid eval 22.1609 mm, train mode 22.1605 mm; affine eval 26.3739 mm, train mode 26.3739 mm
+overfit deform: reached=False after 4 steps; 10-step window soft template Dice nan (threshold 0.9), fold nan (max 0.001); final val template Dice 0.8643, pair Dice 0.7742 (identity 0.8635 / 0.7742), neg J 0.0000 %
+dry run: steps 0 -> 2, trace counts {'deform': 1}, finite True
+dry run: steps 0 -> 2, trace counts {'deform': 1}, finite True
+overfit: reached=False best 10-step mean center RMS (worst task) nan mm after 3 steps; final val center RMS: rigid eval 21.1131 mm, train mode 21.1131 mm
+overfit: reached=False best 10-step mean center RMS (worst task) nan mm after 3 steps; final val center RMS: rigid eval 21.1183 mm, train mode 21.1183 mm
+overfit: reached=False best 10-step mean center RMS (worst task) nan mm after 3 steps; final val center RMS: rigid eval 21.1153 mm, train mode 21.1153 mm
+overfit: reached=False best 10-step mean center RMS (worst task) nan mm after 2 steps; final val center RMS: rigid eval 21.1149 mm, train mode 21.1149 mm
+overfit: reached=False best 10-step mean center RMS (worst task) 14.8880 mm after 20 steps; final val center RMS: rigid eval 18.3573 mm, train mode 13.7494 mm
+overfit: reached=False best 10-step mean center RMS (worst task) nan mm after 5 steps; final val center RMS: rigid eval 18.3149 mm, train mode 12.9966 mm
+dry run: steps 0 -> 2, trace counts {'rigid': 1}, finite True
+dry run: steps 0 -> 2, trace counts {'rigid': 1}, finite True
+overfit: reached=True best 10-step mean center RMS (worst task) 0.7949 mm after 1846 steps; final val center RMS: affine eval 0.6063 mm, train mode 0.6180 mm
+overfit: reached=True best 10-step mean center RMS (worst task) 0.7903 mm after 2199 steps; final val center RMS: rigid eval 0.3176 mm, train mode 0.3365 mm; affine eval 0.6053 mm, train mode 0.6201 mm
+overfit: reached=True best 10-step mean center RMS (worst task) 0.7611 mm after 593 steps; final val center RMS: rigid eval 0.7629 mm, train mode 0.5886 mm
+dry run: steps 0 -> 2, trace counts {'rigid': 1}, finite True
+dry run: steps 0 -> 2, trace counts {'rigid': 1}, finite True
+dry run: steps 0 -> 2, trace counts {'rigid': 1, 'deform': 1}, finite True
+overfit: reached=False best 10-step mean center RMS (worst task) nan mm after 6 steps; final val center RMS: rigid eval 22.1575 mm, train mode 21.9104 mm; affine eval 26.3671 mm, train mode 26.1441 mm
+overfit: reached=False best 10-step mean center RMS (worst task) nan mm after 12 steps; final val center RMS: rigid eval 22.1390 mm, train mode 20.1991 mm; affine eval 26.3849 mm, train mode 25.1197 mm
+overfit deform: reached=False after 12 steps; 10-step window soft template Dice nan (threshold 0.9), fold nan (max 0.001); final val template Dice 0.8438, pair Dice 0.6953 (identity 0.8345 / 0.6953), neg J 0.0000 %
+STAGE2_RC 1
+=== stage3: goldens
+test_matches_golden (tests.test_trainer.TestLinearOnlyUnchanged) ... 
+[golden] max |diff| 0 (tolerance 0)
+ok
+test_matches_golden (tests.test_trainer.TestDeformUnchanged) ... 
+[golden deform] max |diff| 0 (tolerance 0)
+ok
+
+----------------------------------------------------------------------
+Ran 2 tests in 92.070s
+
+OK
+STAGE3_RC 0
+ALL_DONE

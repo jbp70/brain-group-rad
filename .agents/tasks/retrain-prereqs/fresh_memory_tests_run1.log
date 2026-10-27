@@ -1,0 +1,134 @@
+=== tests.test_measure_memory
+test_invalid_values (tests.test_measure_memory.TestCliErrors) ... ok
+test_child_argv_custom_widths (tests.test_measure_memory.TestIsolate) ... ok
+test_child_crash_gives_error_record (tests.test_measure_memory.TestIsolate) ... environment: {'python': '3.9.13', 'tensorflow': '2.10.0', 'numpy': '1.24.3', 'gpu': 'NVIDIA GeForce GTX 1080', 'gpu_memory_limit_mb': 6000, 'level': 4, 'warmup_steps': 2, 'measured_steps': 10, 'build_n': 2, 'val_pair_chunk': 16, 'cuda_visible_devices': None, 'tf_cudnn_use_autotune': '0'}
+deform N=2   narrow   casc=False ckpt=full       amp=False T=7 ls=0 ll=0 sp=0 ERROR: child exit code 1, no record written (val None)  pred    988.4 MB (D)
+ok
+test_one_child_per_configuration (tests.test_measure_memory.TestIsolate) ... written /tmp/mlm_iso_8b2xq12z/iso.json
+environment: {'python': '3.9.13', 'tensorflow': '2.10.0', 'numpy': '1.24.3', 'gpu': 'NVIDIA GeForce GTX 1080', 'gpu_memory_limit_mb': 6000, 'level': 4, 'warmup_steps': 2, 'measured_steps': 10, 'build_n': 2, 'val_pair_chunk': 16, 'cuda_visible_devices': None, 'tf_cudnn_use_autotune': '0'}
+ok
+test_skip_after_child_oom (tests.test_measure_memory.TestIsolate) ... written /tmp/mlm_iso_880nc8zh/iso.json
+environment: {'python': '3.9.13', 'tensorflow': '2.10.0', 'numpy': '1.24.3', 'gpu': 'NVIDIA GeForce GTX 1080', 'gpu_memory_limit_mb': 6000, 'level': 4, 'warmup_steps': 2, 'measured_steps': 10, 'build_n': 2, 'val_pair_chunk': 16, 'cuda_visible_devices': None, 'tf_cudnn_use_autotune': '0'}
+deform N=3   narrow   casc=False ckpt=full       amp=False T=7 ls=1 ll=0 sp=0 SKIPPED: OOM at N = 2 (val None)  pred   1411.0 MB (D)
+ok
+test_int32_check (tests.test_measure_memory.TestMaxPairsAndInt32Check) ... FAIL
+test_max_pairs_axis (tests.test_measure_memory.TestMaxPairsAndInt32Check) ... written /tmp/mlm_iso_8s1g5d64/iso.json
+environment: {'python': '3.9.13', 'tensorflow': '2.10.0', 'numpy': '1.24.3', 'gpu': 'NVIDIA GeForce GTX 1080', 'gpu_memory_limit_mb': 0, 'level': 4, 'warmup_steps': 2, 'measured_steps': 10, 'build_n': 2, 'val_pair_chunk': 16, 'cuda_visible_devices': None, 'tf_cudnn_use_autotune': '0'}
+ok
+test_n_pairs_recorded_in_process_records (tests.test_measure_memory.TestMaxPairsAndInt32Check)
+Records written by the parent (here: int32 'limit' records) carry max_pairs and n_pairs. ... written /tmp/mlm_cap_88htxhi1/cap.json
+environment: {'python': '3.9.13', 'tensorflow': '2.10.0', 'numpy': '1.24.3', 'gpu': 'NVIDIA GeForce GTX 1080', 'gpu_memory_limit_mb': 0, 'level': 1, 'warmup_steps': 2, 'measured_steps': 10, 'build_n': 2, 'val_pair_chunk': 16, 'cuda_visible_devices': None, 'tf_cudnn_use_autotune': '0'}
+rigid  N=16  default  casc=False ckpt=none       amp=False T=7 ls=0 ll=0 sp=1 LIMIT: int32 element check: train/stem output 16x160x224x192x32 has 3523215360 elements > 2^31 - 1 (not run) (val None)  pred  20492.4 MB (E)
+rigid  N=24  default  casc=False ckpt=none       amp=False T=7 ls=0 ll=0 sp=1 SKIPPED: LIMIT at N = 16 (val None)  pred  30376.0 MB (E)
+ok
+test_incremental_write (tests.test_measure_memory.TestMeasureLevelMemory)
+Design 5.1 (v5): the output is merged and written atomically after every configuration. ... written /tmp/mlm_cap_8or24rh6/cap.json
+environment: {'python': '3.9.13', 'tensorflow': '2.10.0', 'numpy': '1.24.3', 'gpu': 'NVIDIA GeForce GTX 1080', 'gpu_memory_limit_mb': 6000, 'level': 4, 'warmup_steps': 2, 'measured_steps': 10, 'build_n': 2, 'val_pair_chunk': 16, 'cuda_visible_devices': None, 'tf_cudnn_use_autotune': '0'}
+deform N=2   narrow   casc=False ckpt=none       amp=False T=7 ls=0 ll=0 sp=0 peak    200.0 MB (warm-up      1.0, resident     1.0)  step     1.0 ms  pred   2122.3 MB (F)
+deform N=3   narrow   casc=False ckpt=none       amp=False T=7 ls=0 ll=0 sp=0 peak    300.0 MB (warm-up      1.0, resident     1.0)  step     1.0 ms  pred   3071.2 MB (F)
+ok
+test_level1_chain_val_pass (tests.test_measure_memory.TestMeasureLevelMemory)
+T-C8 (milestone 9 phase 2): level-1 --cascade true --val-pass true runs the Trainer chain ... written /tmp/mlm_iloocmo5/inc.json
+environment: {'python': '3.9.13', 'tensorflow': '2.10.0', 'numpy': '1.24.3', 'gpu': 'NVIDIA GeForce GTX 1080', 'gpu_memory_limit_mb': 6000, 'level': 1, 'warmup_steps': 1, 'measured_steps': 1, 'build_n': 2, 'val_pair_chunk': 4, 'cuda_visible_devices': None, 'tf_cudnn_use_autotune': '0'}
+WARNING:tensorflow:Mixed precision compatibility check (mixed_float16): WARNING
+Your GPUs may run slowly with dtype policy mixed_float16 because they do not have compute capability of at least 7.0. Your GPUs:
+  NVIDIA GeForce GTX 1080, compute capability 6.1 (x2)
+See https://developer.nvidia.com/cuda-gpus for a list of GPUs and their compute capabilities.
+If you will use compatible GPU(s) not attached to this host, e.g. by running a multi-worker model, you can ignore this warning. This message will only be logged once
+deform N=2   tiny     casc=True  ckpt=full       amp=True  T=3 ls=1 ll=0 sp=0 OOM: {{function_node __inference_<lambda>_44453}} OOM when allocating tensor with shape[2,160,224,95,3] and type float on /job:localhost/replica:0/task:0/device:GPU:0 by allocator GPU_0_bfc (val oom)  pred  15492.0 MB (Fw)
+ok
+test_tiny_level1 (tests.test_measure_memory.TestMeasureLevelMemory)
+Design 5.6: level-1 TINY N 2 with the frozen-chain stand-in, AMP, full checkpointing and ... written /tmp/mlm_axq_c98j/memory_c8.json
+[T-C8] level-1 chain: status oom peak_mb None val oom/None (162.7 s)
+environment: {'python': '3.9.13', 'tensorflow': '2.10.0', 'numpy': '1.24.3', 'gpu': 'NVIDIA GeForce GTX 1080', 'gpu_memory_limit_mb': 6000, 'level': 1, 'warmup_steps': 1, 'measured_steps': 1, 'build_n': 2, 'val_pair_chunk': 1, 'cuda_visible_devices': None, 'tf_cudnn_use_autotune': '0'}
+deform N=2   tiny     casc=True  ckpt=full       amp=True  T=3 ls=1 ll=1 sp=0 OOM: {{function_node __inference_<lambda>_98551}} failed to allocate memory (val oom)  pred  15492.0 MB (Fw)
+rigid  N=2   tiny     casc=True  ckpt=none       amp=True  T=3 ls=0 ll=0 sp=0 peak   1139.1 MB (warm-up   1191.6, resident   219.9)  step  1128.5 ms  frozen  189.2 ms peak    654.3 MB  pred    716.8 MB (Z)
+written /tmp/mlm_igxsd3sa/memory_l1.json
+[m9 tiny level 1] first invocation 182.6 s
+[m9 tiny level 1] deform status oom peak_mb None pred 15492.023295156412 (Fw) largest 440401920 frozen None/None val oom/None
+[m9 tiny level 1] rigid status ok peak_mb 1139.123291015625 pred 716.8029374335721 (Z) largest 110100480 frozen ok/654.332275390625 val None/None
+environment: {'python': '3.9.13', 'tensorflow': '2.10.0', 'numpy': '1.24.3', 'gpu': 'NVIDIA GeForce GTX 1080', 'gpu_memory_limit_mb': 6000, 'level': 1, 'warmup_steps': 1, 'measured_steps': 1, 'build_n': 2, 'val_pair_chunk': 1, 'cuda_visible_devices': None, 'tf_cudnn_use_autotune': '0'}
+rigid  N=3   tiny     casc=True  ckpt=none       amp=True  T=3 ls=0 ll=0 sp=0 peak   1749.0 MB (warm-up   1729.3, resident   311.3)  step  1587.8 ms  frozen  252.9 ms peak    970.6 MB  pred   1026.2 MB (Z)
+ok
+test_tiny_level2_cascade (tests.test_measure_memory.TestMeasureLevelMemory) ... written /tmp/mlm_igxsd3sa/memory_l1.json
+[m9 tiny level 1] both invocations 232.4 s
+environment: {'python': '3.9.13', 'tensorflow': '2.10.0', 'numpy': '1.24.3', 'gpu': 'NVIDIA GeForce GTX 1080', 'gpu_memory_limit_mb': 6000, 'level': 2, 'warmup_steps': 1, 'measured_steps': 2, 'build_n': 2, 'val_pair_chunk': 16, 'cuda_visible_devices': None, 'tf_cudnn_use_autotune': '0'}
+deform N=2   tiny     casc=True  ckpt=both       amp=False T=3 ls=0 ll=0 sp=0 peak   4562.0 MB (warm-up   3345.2, resident   165.1)  step  2185.6 ms  frozen   81.3 ms peak    312.7 MB  val ok peak   1433.3 MB  7778.0 ms  pred   4040.7 MB (F)
+rigid  N=2   tiny     casc=True  ckpt=none       amp=False T=3 ls=0 ll=0 sp=0 peak    800.0 MB (warm-up    800.0, resident    30.3)  step   540.1 ms  frozen   60.1 ms peak     99.8 MB  pred    697.5 MB (E)
+ok
+test_custom_widths_and_classify (tests.test_measure_memory.TestMergeOldRecord) ... ok
+test_merge_old_record (tests.test_measure_memory.TestMergeOldRecord) ... ok
+
+======================================================================
+FAIL: test_int32_check (tests.test_measure_memory.TestMaxPairsAndInt32Check)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/mnt/d/Research/Brain_Registration_Projects/brain-group-rad/tests/test_measure_memory.py", line 358, in test_int32_check
+    self.assertLess(l4, 2 ** 31 - 1)                           # level-4 linear N 192 is within the limit
+AssertionError: 2642411520 not less than 2147483647
+
+----------------------------------------------------------------------
+Ran 14 tests in 462.691s
+
+FAILED (failures=1)
+written /tmp/mlm_7vdt658_/memory.json
+[T15] deform status ok peak_mb 4561.9990234375 warmup_peak_mb 3345.186279296875 resident_mb 165.112548828125 step_ms 2185.5515241622925 frozen_ms 81.27713203430176 val_status ok val_peak_mb 1433.274169921875 val_ms 7778.0420780181885
+[T15] rigid status ok peak_mb 800.041259765625 warmup_peak_mb 800.012939453125 resident_mb 30.34521484375 step_ms 540.0797128677368 frozen_ms 60.0510835647583 val_status None val_peak_mb None val_ms None
+=== tests.test_measure_memory exit 1
+=== tests.test_pair_recompute.TestPairRecomputeMemory
+test_peak_1_vs_4_pairs (tests.test_pair_recompute.TestPairRecomputeMemory) ... 
+[pair recompute memory, 64x80x64 N 4, default sampler] default 1 / 4 pairs: 1740 / 2241 MiB; recompute 1 / 4 pairs: 1888 / 1887 MiB
+WARNING:tensorflow:5 out of the last 9 calls to <function TestPairRecomputeMemory.peak.<locals>.run at 0x7f387411ad30> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:6 out of the last 11 calls to <function TestPairRecomputeMemory.peak.<locals>.run at 0x7f387411ad30> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+
+[pair recompute memory, 64x80x64 N 4, lean sampler] default 1 / 4 pairs: 1039 / 1517 MiB; recompute 1 / 4 pairs: 968 / 973 MiB
+ok
+
+----------------------------------------------------------------------
+Ran 1 test in 75.423s
+
+OK
+=== tests.test_pair_recompute.TestPairRecomputeMemory exit 0
+=== tests.test_pair_recompute.TestPairRecomputeMemory
+test_peak_1_vs_4_pairs (tests.test_pair_recompute.TestPairRecomputeMemory) ... 
+[pair recompute memory, 64x80x64 N 4, default sampler] default 1 / 4 pairs: 1927 / 2217 MiB; recompute 1 / 4 pairs: 2013 / 1886 MiB
+WARNING:tensorflow:5 out of the last 9 calls to <function TestPairRecomputeMemory.peak.<locals>.run at 0x7fbd2c27ed30> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:6 out of the last 11 calls to <function TestPairRecomputeMemory.peak.<locals>.run at 0x7fbd2c27ed30> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+
+[pair recompute memory, 64x80x64 N 4, lean sampler] default 1 / 4 pairs: 1023 / 1361 MiB; recompute 1 / 4 pairs: 954 / 969 MiB
+ok
+
+----------------------------------------------------------------------
+Ran 1 test in 73.833s
+
+OK
+=== tests.test_pair_recompute.TestPairRecomputeMemory exit 0
+=== tests.test_pair_recompute.TestPairRecomputeMemory
+test_peak_1_vs_4_pairs (tests.test_pair_recompute.TestPairRecomputeMemory) ... 
+[pair recompute memory, 64x80x64 N 4, default sampler] default 1 / 4 pairs: 2049 / 2319 MiB; recompute 1 / 4 pairs: 1877 / 1905 MiB
+WARNING:tensorflow:5 out of the last 9 calls to <function TestPairRecomputeMemory.peak.<locals>.run at 0x7f03b848dd30> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:6 out of the last 11 calls to <function TestPairRecomputeMemory.peak.<locals>.run at 0x7f03b848dd30> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+
+[pair recompute memory, 64x80x64 N 4, lean sampler] default 1 / 4 pairs: 1027 / 1646 MiB; recompute 1 / 4 pairs: 944 / 968 MiB
+ok
+
+----------------------------------------------------------------------
+Ran 1 test in 74.043s
+
+OK
+=== tests.test_pair_recompute.TestPairRecomputeMemory exit 0
+=== tests.test_val_chunk.TestValidationMemory
+test_peaks (tests.test_val_chunk.TestValidationMemory) ... 
+[val chunk, level 2 TINY N 2] train peak 4596 MiB; validation peak unchunked 1421 MiB (resident 96; again after the chunked pass 1421), chunk 1 / pair chunk 1 844 MiB (resident 96)
+ok
+
+----------------------------------------------------------------------
+Ran 1 test in 88.981s
+
+OK
+=== tests.test_val_chunk.TestValidationMemory exit 0
+test_peak_1_vs_4_pairs (tests.test_pair_recompute.TestPairRecomputeMemory) ... skipped 'GPU memory measurement: deferred to a fresh process (BGR_DEFER_MEMORY_TESTS=1)'
+test_peaks (tests.test_val_chunk.TestValidationMemory) ... skipped 'GPU memory measurement: deferred to a fresh process (BGR_DEFER_MEMORY_TESTS=1)'
+Ran 2 tests in 0.000s
+OK (skipped=2)
+FRESH_DONE

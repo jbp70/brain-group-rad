@@ -282,6 +282,96 @@ class TestIsolate(unittest.TestCase):
         self.assertEqual(argv[argv.index("--pair-recompute") + 1], "true")
         self.assertIn("pair_recompute", mlm.KEY_FIELDS)
         self.assertEqual(mlm.config_key(_m9_record()), mlm.config_key(_m9_record(pair_recompute=False)))
+        # --max-pairs (retrain-prereqs 16.6): '0' for records without it; part of the key
+        self.assertEqual(argv[argv.index("--max-pairs") + 1], "0")
+        argv = mlm.child_argv(a, _m9_record(max_pairs=64), False)
+        self.assertEqual(argv[argv.index("--max-pairs") + 1], "64")
+        self.assertIn("max_pairs", mlm.KEY_FIELDS)
+        self.assertEqual(mlm.config_key(_m9_record()), mlm.config_key(_m9_record(max_pairs=0)))
+        self.assertNotEqual(mlm.config_key(_m9_record()), mlm.config_key(_m9_record(max_pairs=64)))
+
+
+@unittest.skipIf(not tf.config.list_physical_devices("GPU"), "main() needs a visible GPU")
+class TestMaxPairsAndInt32Check(unittest.TestCase):
+    """Retrain-prereqs design 16.6 (FEAT-007): --max-pairs grid axis (max_pairs + n_pairs in every
+    record) and --int32-check ('limit' record without running the configuration)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="mlm_cap_")
+        self.out = os.path.join(self.tmp, "cap.json")
+        self.calls = []
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _fake_run(self, base_of):
+        def run(argv, stdin=None):
+            self.calls.append(list(argv))
+            a = dict(zip(argv[2::2], argv[3::2]))
+            base = base_of(a)
+            mlm.write_merged(a["--out"], {"child": True}, [dict(base, status="ok", peak_mb=1.0)])
+            return mock.Mock(returncode=0)
+        return run
+
+    def _main(self, argv):
+        with mock.patch.object(mlm, "configure_gpu", side_effect=AssertionError("parent touched the GPU")):
+            return mlm.main(argv + ["--isolate", "true", "--out", self.out])
+
+    def _results(self):
+        with open(self.out) as f:
+            return json.load(f)["results"]
+
+    def test_max_pairs_axis(self):
+        def base_of(a):
+            return _m9_record(n=int(a["--n"]), gradient_checkpointing="full", min_pairs=a["--min-pairs"],
+                              max_pairs=int(a["--max-pairs"]))
+        with mock.patch.object(mlm.subprocess, "run", self._fake_run(base_of)):
+            rc = self._main(["--level", "4", "--tasks", "deform", "--n", "32,48", "--widths", "narrow",
+                             "--cascade", "false", "--gradient-checkpointing", "full", "--integration-steps", "7",
+                             "--min-pairs", "n", "--max-pairs", "0,64"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(self.calls), 4)
+        got = sorted((int(c[c.index("--n") + 1]), int(c[c.index("--max-pairs") + 1])) for c in self.calls)
+        self.assertEqual(got, [(32, 0), (32, 64), (48, 0), (48, 64)])
+        self.assertEqual(len(self._results()), 4)
+
+    def test_n_pairs_recorded_in_process_records(self):
+        """Records written by the parent (here: int32 'limit' records) carry max_pairs and n_pairs."""
+        with mock.patch.object(mlm.subprocess, "run", side_effect=AssertionError("must not run")):
+            rc = self._main(["--level", "1", "--tasks", "rigid", "--n", "16,24", "--widths", "default",
+                             "--cascade", "false", "--split-group-conv", "true", "--min-pairs", "n",
+                             "--max-pairs", "64", "--int32-check", "true"])
+        self.assertEqual(rc, 0)
+        res = {r["n"]: r for r in self._results()}
+        self.assertEqual((res[16]["status"], res[24]["status"]), ("limit", "skipped"))
+        self.assertIn("int32 element check", res[16]["error"])
+        self.assertEqual((res[16]["max_pairs"], res[16]["n_pairs"]), (64, 24))   # round(0.1 x 240) = 24
+        self.assertEqual((res[24]["max_pairs"], res[24]["n_pairs"]), (64, 55))   # round(0.1 x 552) = 55
+
+    def test_int32_check(self):
+        base = dict(_m9_record(level=1, task="rigid", widths="default", split_group_conv=True), cascade_kind="none")
+        big, desc = mlm.int32_violation(dict(base, n=16), "rtx8000")
+        self.assertGreater(big, 2 ** 31 - 1, desc)                 # job 10517266: 16x160x224x192x32
+        small, _ = mlm.int32_violation(dict(base, n=2), "rtx8000")
+        self.assertLess(small, 2 ** 31 - 1)
+        # level 4 keeps l2 / l3 at full level resolution: the l3 output 40x56x48x128 is the widest
+        # tensor (not the stem); N 128 / 144 fit, N 160 / 192 exceed 2^31 - 1
+        for n, over in ((128, False), (144, False), (160, True), (192, True)):
+            el, desc = mlm.int32_violation(dict(base, level=4, n=n), "rtx8000")
+            self.assertEqual(el > 2 ** 31 - 1, over, (n, el, desc))
+        self.assertIn("l3 output", mlm.int32_violation(dict(base, level=4, n=192), "rtx8000")[1])
+
+        def base_of(a):
+            return dict(_m9_record(level=1, task="rigid", n=int(a["--n"]), widths="default",
+                                   split_group_conv=True, integration_steps=int(a["--integration-steps"])),
+                        min_pairs="1", max_pairs=0)
+        with mock.patch.object(mlm.subprocess, "run", self._fake_run(base_of)):
+            rc = self._main(["--level", "1", "--tasks", "rigid", "--n", "2,16,24", "--widths", "default",
+                             "--cascade", "false", "--split-group-conv", "true", "--int32-check", "true"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(self.calls), 1)                       # only N 2 is run
+        st = {r["n"]: r["status"] for r in self._results()}
+        self.assertEqual(st, {2: "ok", 16: "limit", 24: "skipped"})
 
 
 def _m9_record(**kw):
@@ -374,6 +464,9 @@ class TestCliErrors(unittest.TestCase):
              "--filters"),
             (["--level", "4", "--cascade", "true"], "--cascade true"),
             (["--isolate", "perhaps"], "--isolate"),
+            (["--max-pairs", "64,-1"], "--max-pairs"),
+            (["--max-pairs", "lots"], "--max-pairs"),
+            (["--int32-check", "maybe"], "--int32-check"),
         ]
         for extra, msg in cases:
             err = io.StringIO()

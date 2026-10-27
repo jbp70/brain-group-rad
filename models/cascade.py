@@ -15,7 +15,7 @@ Conventions (binding; design 2 / 4.6 / 4.7 of `.agents/tasks/network-design/desi
 | Pooling | `pool_to_coarser`: 2x2x2 average pooling ('VALID', float32). Level-2 voxel centers (p - 39.5) * 2 mm; the block {2q, 2q+1} averages to (q - 19.5) * 4 mm = the level-4 center, so block averaging preserves world points. All level-2 axis lengths are even, so a flip commutes with the pooling. |
 | Linear | A_prev_i (image i -> level-4 central frame, centered mm) from the frozen stage; pre-warp x_i = I_i o A_prev_i^-1 (`prewarp_linear`, pull with A^-1, zero fill); composed A_i = Center(R_raw_i A_prev_i) with ONE GroupCentering (`compose_linear`, the trainable model's `centering`). |
 | Deform | (U, U_inv, V) = `diffeo.upsample_displacement` of the frozen (u, u_inv, v) (level-2 voxels); pre-warp x_i = warp(I_i, U_i) (`prewarp_deform`); composed (u, u_inv) = `diffeo.compose_cascade(U, U_inv, u_res, u_inv_res)`. |
-| Skip | `skip_linear` / `skip_fields` (bool scalar tensor): a skipped stage passes its input on (A_prev = I, U = U_inv = 0). Their `tf.where` ops live under the name scope ``cascade_skip`` (tests check that p_skip = 0 graphs contain none). |
+| Skip | `skip_linear` / `skip_fields` (bool scalar tensor): a skipped stage passes its input on (A_prev = I, U = U_inv = 0). Their `tf.where` ops live under the name scope ``cascade_skip`` (tests check that p_skip = 0 graphs contain none). Per-stage skip at level 1 (retrain-prereqs design 4.4): `FrozenChain.linear_skip` / `deform_skip` (skip4: level 4 = identity, level 2 still runs; skip2: level 2 dropped; both: identity). |
 | Float32 | Every `FrozenStage` model is constructed AND built inside `_float32_policy()` (Keras layers capture the dtype policy in ``__init__``), with ``gradient_checkpointing='none'``, so the frozen outputs never depend on --amp. |
 | Inference only | `FrozenStage.linear` / `.deform` always call the model with ``training=False`` (BN moving statistics = the level-4 values, never recalibrated) and wrap the outputs in `tf.stop_gradient`; callers run them outside the GradientTape and never give the frozen variables to the optimizer. |
 """
@@ -270,6 +270,38 @@ class FrozenChain:
         res = dict(res)
         res.update({k: tf.stop_gradient(up(p4[s])) for k, s in (("U4", "U"), ("U4_inv", "U_inv"), ("V4", "V"))})
         return res
+
+    def linear_skip(self, images_l1, task, skip4=None, skip2=None):
+        """A_prev [N, 4, 4] with per-stage skips (retrain-prereqs design 4.1 / 4.4; bool scalar
+        tensors, None = not built). skip4: A4 = I and the level-2 stage still runs on the
+        identity-pre-warped x2 (A = Center2(R2_raw)); skip2: A = A4; both: A = I. No gradient."""
+        x2 = pool_to_coarser(images_l1)
+        A4 = self.stage4.linear(x2, task)
+        if skip4 is not None:
+            A4 = skip_linear(skip4, A4)
+        out = self.model2(prewarp_linear(x2, A4, P.LEVEL_SPACING[CHAIN_LEVEL]), task=task, training=False)
+        A = compose_linear(out["A_raw"], A4, self.model2.centering)
+        if skip2 is not None:
+            A = skip_to(skip2, A4, A)
+        return tf.stop_gradient(A)
+
+    def deform_skip(self, images_l1, skip4=None, skip2=None):
+        """dict U, U_inv (level-1 voxels) with per-stage skips (retrain-prereqs design 4.1 / 4.4).
+        skip4: u4 = u4_inv = 0 and the level-2 stage runs on x2 warped by the zero field; skip2:
+        U = up(U4); both: U = U_inv = 0. No gradient."""
+        x2 = pool_to_coarser(images_l1)
+        p4 = self.stage4.deform(x2)                       # level-4 fields upsampled to level 2
+        U4, U4i = p4["U"], p4["U_inv"]
+        if skip4 is not None:
+            U4, U4i = skip_fields(skip4, [U4, U4i])
+        out = self.model2(prewarp_deform(x2, U4), task=DEFORM_TASK, training=False)
+        u2, u2i = diffeo.compose_cascade(U4, U4i, out["u"], out["u_inv"])
+        up = diffeo.upsample_displacement
+        U, Ui = up(u2), up(u2i)
+        if skip2 is not None:
+            U = skip_to(skip2, up(U4), U)
+            Ui = skip_to(skip2, up(U4i), Ui)
+        return {"U": tf.stop_gradient(U), "U_inv": tf.stop_gradient(Ui)}
 
 
 def skip_to(skip, coarse, fine):

@@ -55,6 +55,12 @@ fingerprints and origins); run-checkpoint keys ``frozen_stage_4`` / ``frozen_sta
 config.json must hold ``cascade.stages`` (RuntimeError), every stage fingerprint is checked
 (`_check_cascade_fingerprints`, RuntimeError naming the level).
 
+Per-stage skip (retrain-prereqs design 4.5): the ``cascade`` record also holds ``skip_mode``
+('off' | 'legacy' | 'stage'), in stage mode ``skip_probs`` {task: {'4': p, '2': p}}, and
+``skip_consistency_warnings`` (level 1: tasks that skip level 4 although the level-2 source was not
+trained with a level-4 skip for them, `_skip_consistency`; printed as WARNING). A resume refreshes
+these three from the current flags and logs ``cascade_skip_changed_on_resume`` when they differ.
+
 Order: parse args (no TF) -> DALI check (unless overfit mode) -> configure_tf_precision() (TF32
 off, memory growth) -> seeds -> mixed_float16 / XLA flags -> [cascade: fresh/resume decision,
 source check] -> data -> model -> [cascade: frozen stage] -> optimizer -> run dir, logger,
@@ -194,6 +200,8 @@ def _build_dali_data(args, level, tf_mods, start_step=0):
                                                                n_groups, seed=args.val_seed)
     S = postprocess.brain_S_matrix(level, data.template_dir)
     desc = "DALI %d train files, %d val images; intensity aug %s" % (len(data.files), n_val, aug_device)
+    if aug_device == "tf" and getattr(args, "lowres_method", "nn") == "tent":
+        desc += " | low-res tent"
     return sources, val_sets, S, desc, controls
 
 
@@ -279,7 +287,7 @@ def main(argv=None):
         init_info["checkpoint"] = os.path.abspath(init_info["checkpoint"])
         if init_info["source_config"]:
             init_info["source_config"] = os.path.abspath(init_info["source_config"])
-    frozen, cascade_rec = None, None
+    frozen, cascade_rec, skip_changed = None, None, None
     if cascade_on:
         from models.cascade import FrozenChain, FrozenStage
         chain = level == 1                       # milestone 9 phase 2: frozen 4 -> 2 chain
@@ -287,7 +295,7 @@ def main(argv=None):
             # Random init; the run checkpoint (key frozen_stage, or frozen_stage_4 / frozen_stage_2
             # for a chain) restores it below.
             frozen = FrozenChain.from_config(model_cfg) if chain else FrozenStage.from_config(model_cfg)
-            cascade_rec = saved_cfg["cascade"]
+            cascade_rec, skip_changed = _refresh_skip_record(saved_cfg["cascade"], args)
         elif chain:
             prefix, src_cfg, src_info = cascade_src
             upstream = src_info["upstream_cascade"]
@@ -318,6 +326,12 @@ def main(argv=None):
                                {"level": 2, "checkpoint_key": "model", "fingerprint": fps[2],
                                 "origin_checkpoint": src_info["checkpoint"],
                                 "origin_step": int(src_info["source_step"])}]}
+            # Retrain-prereqs design 4.5: skip mode / probabilities + the level-1 consistency check.
+            cascade_rec.update(_skip_record(args))
+            skip_warn = _skip_consistency(upstream, getattr(args, "cascade_skip_stage_parsed", None))
+            cascade_rec["skip_consistency_warnings"] = skip_warn
+            for line in _skip_consistency_lines(upstream, skip_warn):
+                print(line)
         else:
             prefix, src_cfg, src_info = cascade_src
             frozen = FrozenStage.from_checkpoint(prefix, src_cfg)
@@ -333,6 +347,8 @@ def main(argv=None):
                            "source_level": int(src_info["source_level"]),
                            "source_step": int(src_info["source_step"]), "fingerprint": frozen.fingerprint,
                            "S_rel_diff_vs_level4": s_rel, "skip_prob": float(args.cascade_skip_prob)}
+            cascade_rec.update(_skip_record(args))          # retrain-prereqs design 4.5
+            cascade_rec["skip_consistency_warnings"] = []    # level-4 source: nothing to check
     optimizer = O.make_optimizer(args.optimizer, lr=args.lr, weight_decay=args.weight_decay,
                                  momentum=args.momentum, dampening=args.dampening,
                                  nesterov=args.nesterov, decoupled=args.decoupled,
@@ -358,15 +374,21 @@ def main(argv=None):
         ckpt_extra = dict(ckpt_extra, **frozen.checkpoint_extra())
     trainer.checkpoint = C.RunCheckpoint(paths["ckpt_last"], paths["ckpt_best"], model, optimizer,
                                          trainer.step, extra=ckpt_extra, extra_best=extra_best)
-    resumed = False
+    resumed, opt_changed = False, None
     if init_info is not None:
         if not args.quiet:
             print(_init_weights_lines(init_info))
     elif args.resume and trainer.checkpoint.latest_last:
         C.check_config_compatible(paths["config"], model_cfg)
         _check_intensity_aug_device(paths["config"], args)
+        opt_changed = _check_optimizer(paths["config"], args)
         resumed = trainer.checkpoint.restore_last()
     config_extra = {"param_counts": dict(counts), "data": data_desc, "init_weights": init_info}
+    # Retrain-prereqs design 2.2: optimizer record (sgdw / adamw only; always rebuilt from the
+    # current flags, so it describes the latest segment of a resumed run).
+    opt_rec = _optimizer_record(args, optimizer, model.trainable_variables)
+    if opt_rec is not None:
+        config_extra["optimizer"] = opt_rec
     if cascade_on:
         if cascade_resume:
             # Design section 9 steps 3-6: restored, fingerprint checked, BN freeze re-applied
@@ -397,6 +419,10 @@ def main(argv=None):
     if init_info is not None:
         # After the PARAMETER record (the first line of metrics.jsonl stays the run parameters).
         logger.log_event(0, dict(init_info, event="init_weights"))
+    if opt_changed is not None:
+        logger.log_event(int(trainer.step.numpy()), dict(opt_changed, event="optimizer_hparam_changed_on_resume"))
+    if skip_changed is not None:
+        logger.log_event(int(trainer.step.numpy()), dict(skip_changed, event="cascade_skip_changed_on_resume"))
     if cascade_on and not cascade_resume and args.bn_recal_batches > 0:
         # Once, at the start of a fresh cascade run (never on a resume: the recalibrated
         # statistics come back with the checkpoint); then config.json again with the record.
@@ -411,6 +437,11 @@ def main(argv=None):
         print("run dir: %s | resumed: %s at step %d | data: %s" % (
             paths["root"], resumed, int(trainer.step.numpy()), data_desc[:200]))
         print("parameters: " + ", ".join("%s=%d" % kv for kv in counts.items()))
+        opt_line = _optimizer_line(args, opt_rec)
+        if opt_line:
+            print(opt_line)
+        for line in _pair_notes(args):
+            print(line)
 
     if args.dry_run:
         summary = trainer.fit(2)
@@ -594,6 +625,175 @@ def _check_intensity_aug_device(config_path, args):
                          "saved %s (TF augmentation %s) in %s; resume with the saved setting or start a "
                          "new --run-name" % (args.intensity_aug_device, "on" if cur_tf else "off", saved_dev,
                                              "on" if saved_tf else "off", config_path))
+
+
+def _check_optimizer(config_path, args, logger=None):
+    """Resume guard (retrain-prereqs design 2.2): SystemExit if --optimizer differs from the run's
+    saved config.json args (slot structures differ: SGDW momentum vs Adam m / v; a missing key
+    means 'adam'). A changed --lr or --weight-decay is allowed: returns
+    ``{'old': {'lr', 'weight_decay'}, 'new': {...}}`` for the caller's
+    ``optimizer_hparam_changed_on_resume`` event (logged via ``logger.log_event`` when `logger`
+    is given), else None."""
+    if not os.path.exists(config_path):
+        return None
+    with open(config_path) as f:
+        saved = (json.load(f).get("args") or {})
+    saved_name = saved.get("optimizer", "adam")
+    if saved_name != args.optimizer:
+        raise SystemExit("main.py: --optimizer %s differs from the run's saved %s in %s; resume with the "
+                         "saved optimizer or start a new --run-name" % (args.optimizer, saved_name, config_path))
+    old = {k: saved.get(k) for k in ("lr", "weight_decay")}
+    new = {"lr": float(args.lr), "weight_decay": float(args.weight_decay)}
+    if all(old[k] is not None and float(old[k]) == new[k] for k in new):
+        return None
+    changed = {"old": old, "new": new}
+    if logger is not None:
+        logger.log_event(0, dict(changed, event="optimizer_hparam_changed_on_resume"))
+    return changed
+
+
+def _optimizer_record(args, optimizer, variables):
+    """config.json ``optimizer`` record for the weight-decay optimizers (sgdw / adamw), else None
+    (default Adam runs write the same config.json as before). Call after the optimizer is built."""
+    from runtime import optimizers as O
+    if args.optimizer not in O.WEIGHT_DECAY_OPTIMIZERS:
+        return None
+    variables = list(variables)
+    k = sum(1 for v in variables if O.uses_weight_decay(optimizer, v))
+    return {"name": args.optimizer, "lr": float(args.lr), "weight_decay": float(args.weight_decay),
+            "decayed_variables": int(k), "excluded_variables": int(len(variables) - k)}
+
+
+def _optimizer_line(args, rec):
+    """The startup optimizer line (weight-decay optimizers), the NOTE for --optimizer adam with a
+    non-zero --weight-decay (ignored), else None."""
+    if rec is not None:
+        n = rec["decayed_variables"] + rec["excluded_variables"]
+        kind = ("decoupled, lr-scaled" if rec["name"] == "adamw" or args.decoupled
+                else "coupled (L2 in the gradient)")
+        return ("optimizer %s | lr %g | weight decay %g (%s; excluded gamma/beta/bias: %d of %d variables)"
+                % (rec["name"], rec["lr"], rec["weight_decay"], kind, rec["excluded_variables"], n))
+    if args.optimizer == "adam" and args.weight_decay != 0:
+        return "NOTE: --weight-decay is ignored by --optimizer adam"
+    return None
+
+
+def _pair_notes(args):
+    """Startup NOTE lines for the training pair options (retrain-prereqs design 16.3 / 16.4):
+    --max-pairs K below a group size with --min-pairs n (the floor N is capped), and
+    --pair-recompute true at level 4 / 2 (a level-1 option)."""
+    out = []
+    k = int(getattr(args, "max_pairs", 0))
+    if args.min_pairs == "n" and k > 0:
+        sizes = sorted({args.deform_group_size if t == A.DEFORM_TASK else args.group_size
+                        for t in args.task_ratio_parsed})
+        small = [n for n in sizes if k < n]
+        if small:
+            out.append("NOTE: max-pairs %d < N (%s): the min-pairs n floor is capped"
+                       % (k, ", ".join(str(n) for n in small)))
+    if args.pair_recompute and args.level in (4, 2):
+        out.append("NOTE: --pair-recompute is a level-1 option; at level %d it unrolls one block per "
+                   "pair (slow graph construction at large N)" % args.level)
+    return out
+
+
+SKIP_RECORD_KEYS = ("skip_mode", "skip_probs", "skip_consistency_warnings")
+
+
+def _skip_record(args):
+    """Cascade-record skip fields of the current flags (retrain-prereqs design 4.5):
+    ``skip_mode`` 'off' | 'legacy' | 'stage' and, in stage mode, ``skip_probs`` {task: {'4': p,
+    '2': p}} over the run's frozen levels (string keys for JSON)."""
+    parsed = getattr(args, "cascade_skip_stage_parsed", None) or {}
+    if float(args.cascade_skip_prob) > 0:
+        return {"skip_mode": "legacy"}
+    if not any(p > 0 for d in parsed.values() for p in d.values()):
+        return {"skip_mode": "off"}
+    levels = [4] if args.level == 2 else [4, 2]
+    return {"skip_mode": "stage",
+            "skip_probs": {t: {str(lv): float(d.get(lv, 0.0)) for lv in levels} for t, d in parsed.items()}}
+
+
+def _source_skip_p4(src_cascade_rec, task):
+    """Level-4 skip probability `task` was trained with in a level-2 source (its config.json
+    ``cascade`` record): legacy ``skip_prob`` > 0 counts for every task; else
+    ``skip_probs[task]['4']``; None when neither is recorded."""
+    legacy = float(src_cascade_rec.get("skip_prob") or 0.0)
+    if legacy > 0:
+        return legacy
+    probs = src_cascade_rec.get("skip_probs")
+    if isinstance(probs, dict) and task in probs and "4" in (probs[task] or {}):
+        return float(probs[task]["4"])
+    return None if "skip_probs" not in src_cascade_rec else 0.0
+
+
+def _skip_consistency(src_cascade_rec, skip_stage_parsed):
+    """Level-1 skip consistency (retrain-prereqs design 4.1 iii / 4.5): the tasks (in the order
+    of `skip_stage_parsed`) that skip level 4 (p > 0) although the level-2 source
+    (`src_cascade_rec`, its config.json ``cascade`` record; None = nothing checked) was trained
+    with no level-4 skip for them (missing or 0; an old record with only ``skip_prob`` = that p
+    for every task)."""
+    if src_cascade_rec is None:
+        return []
+    out = []
+    for task, spec in (skip_stage_parsed or {}).items():
+        if float(spec.get(4, 0.0)) > 0 and not (_source_skip_p4(src_cascade_rec, task) or 0.0) > 0:
+            out.append(task)
+    return out
+
+
+def _skip_consistency_lines(src_cascade_rec, tasks):
+    """The startup WARNING lines for the `tasks` returned by `_skip_consistency`."""
+    lines = []
+    for task in tasks:
+        p = _source_skip_p4(src_cascade_rec, task) if src_cascade_rec is not None else None
+        lines.append("WARNING: --cascade-skip-%s skips level 4 for %s but the level-2 source was trained "
+                     "with level-4 skip p = %s for it; the frozen level-2 stage will see out-of-distribution "
+                     "inputs" % ("deform" if task == "deform" else "linear", task,
+                                 "none" if p is None else "%g" % p))
+    return lines
+
+
+def _source_cascade_record(path):
+    """The ``cascade`` record of a source run's config.json (resume of a level-1 run: only the
+    JSON is read, never the source weights); None if the file is missing or unreadable."""
+    try:
+        with open(path) as f:
+            return json.load(f).get("cascade")
+    except (OSError, TypeError, ValueError, AttributeError):
+        return None
+
+
+def _refresh_skip_record(saved_rec, args):
+    """Resume of a cascade run (retrain-prereqs design 4.5): (record, changed). The saved
+    ``cascade`` record with skip_mode / skip_probs / skip_consistency_warnings rebuilt from the
+    current flags (everything else carried verbatim); ``changed`` = {'old': {...}, 'new': {...}}
+    over SKIP_RECORD_KEYS when any differs from the saved value, else None. Level 1: the
+    consistency check reads the level-2 source's config.json (``source_config``; weights never
+    read); if it cannot be read, unchanged settings carry the saved warnings, else []."""
+    rec = {k: v for k, v in saved_rec.items() if k not in SKIP_RECORD_KEYS}
+    rec.update(_skip_record(args))
+    parsed = getattr(args, "cascade_skip_stage_parsed", None)
+    if args.level == 1:
+        src = _source_cascade_record(saved_rec.get("source_config"))
+        if src is not None:
+            warn = _skip_consistency(src, parsed)
+            for line in _skip_consistency_lines(src, warn):
+                print(line)
+        elif all(rec.get(k) == saved_rec.get(k) for k in ("skip_mode", "skip_probs")):
+            warn = list(saved_rec.get("skip_consistency_warnings") or [])
+        else:
+            warn = []
+    else:
+        warn = []
+    rec["skip_consistency_warnings"] = warn
+    # Records written before these keys existed: mode from skip_prob, no probs, no warnings.
+    old = {"skip_mode": saved_rec.get("skip_mode", "legacy" if float(saved_rec.get("skip_prob") or 0) > 0
+                                      else "off"),
+           "skip_probs": saved_rec.get("skip_probs"),
+           "skip_consistency_warnings": list(saved_rec.get("skip_consistency_warnings") or [])}
+    new = {k: rec.get(k) for k in SKIP_RECORD_KEYS}
+    return rec, (None if old == new else {"old": old, "new": new})
 
 
 FINGERPRINT_RTOL = 1e-12

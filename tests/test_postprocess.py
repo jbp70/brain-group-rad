@@ -204,6 +204,123 @@ class TestMinPairs(unittest.TestCase):
             np.testing.assert_array_equal(a[1].numpy(), b[1].numpy())
 
 
+def _load_checker():
+    import importlib.util
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gpu", "check_mixed_run.py")
+    spec = importlib.util.spec_from_file_location("check_mixed_run", path)
+    cmr = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cmr)
+    return cmr
+
+
+class TestMaxPairs(unittest.TestCase):
+    """--max-pairs K (retrain-prereqs design 16.3): k = min(K, max(floor, round(p N (N - 1))))."""
+
+    NS = (4, 8, 32, 48, 64)
+    KS = (0, 16, 64)
+
+    def test_counts(self):
+        uncapped = {"1": {4: 1, 8: 6, 32: 99, 48: 226, 64: 403},
+                    "n": {4: 4, 8: 8, 32: 99, 48: 226, 64: 403}}
+        for m in pp.MIN_PAIRS:
+            for n in self.NS:
+                for k in self.KS:
+                    want = uncapped[m][n] if k == 0 else min(k, uncapped[m][n])
+                    self.assertEqual(int(pp.num_pairs(n, 0.1, m, k)), want, (m, n, k))
+                    self.assertEqual(pp.num_pairs_static(n, 0.1, m, k), want, (m, n, k))
+                self.assertEqual(int(pp.num_pairs(n, 0.1, m)), uncapped[m][n])
+                self.assertEqual(pp.num_pairs_static(n, 0.1, m), uncapped[m][n])
+        # A cap below the min-pairs floor wins (applied last).
+        self.assertEqual(int(pp.num_pairs(32, 0.1, "n", 16)), 16)
+        self.assertEqual(int(pp.num_pairs(8, 0.1, "n", 5)), 5)
+
+    def test_mirrors_agree(self):
+        from models import memory_model as MM
+        cmr = _load_checker()
+        for n in list(range(2, 41)) + [48, 64, 96]:
+            for p in (0.05, 0.1, 0.25, 1.0):
+                for m in pp.MIN_PAIRS:
+                    floor = 1 if m == "1" else n
+                    for k in (0, 1, 5, 16, 64):
+                        want = int(pp.num_pairs(n, p, m, k))
+                        self.assertEqual(pp.num_pairs_static(n, p, m, k), want, (n, p, m, k))
+                        self.assertEqual(MM.num_pairs(n, p, m, k), want, (n, p, m, k))
+                        self.assertEqual(cmr.expected_pairs(floor, n, p, k), want, (n, p, m, k))
+
+    def test_invalid(self):
+        for bad in (-1, 1.5, True, "4", None):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                pp.num_pairs(8, 0.1, "1", bad)
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                pp.num_pairs_static(8, 0.1, "1", bad)
+        with self.assertRaises(ValueError):
+            pp.LinearPostprocess("rigid", 4, max_pairs=-1)
+        with self.assertRaises(ValueError):
+            pp.DeformPostprocess(4, max_pairs=-2)
+
+    def test_zero_is_bit_exact(self):
+        for m in pp.MIN_PAIRS:
+            for n in (4, 8, 16, 48):
+                ga, gb = tf.random.Generator.from_seed(5), tf.random.Generator.from_seed(5)
+                a = pp.sample_pairs(ga, n, 0.1, m)
+                b = pp.sample_pairs(gb, n, 0.1, m, 0)
+                np.testing.assert_array_equal(a[0].numpy(), b[0].numpy())
+                np.testing.assert_array_equal(a[1].numpy(), b[1].numpy())
+                np.testing.assert_array_equal(ga.state.numpy(), gb.state.numpy())
+
+    def test_cap_keeps_rng_and_prefix(self):
+        """The cap does not change the RNG draw: same generator advance, and (min-pairs 1, top_k
+        sorted) the capped pairs are the first K of the uncapped ones."""
+        for n in (8, 32, 48):
+            ga, gb = tf.random.Generator.from_seed(11), tf.random.Generator.from_seed(11)
+            a = pp.sample_pairs(ga, n, 0.1, "1")
+            b = pp.sample_pairs(gb, n, 0.1, "1", 16)
+            k = min(16, int(pp.num_pairs(n, 0.1)))
+            self.assertEqual(len(b[0].numpy()), k)
+            np.testing.assert_array_equal(a[0].numpy()[:k], b[0].numpy())
+            np.testing.assert_array_equal(a[1].numpy()[:k], b[1].numpy())
+            np.testing.assert_array_equal(ga.state.numpy(), gb.state.numpy())
+
+    def test_capped_pairs_valid(self):
+        for m in pp.MIN_PAIRS:
+            for n in (8, 32, 64):
+                for k in (5, 16, 64):
+                    i, j = pp.sample_pairs(tf.random.Generator.from_seed(n + k), n, 0.1, m, k)
+                    i, j = i.numpy(), j.numpy()
+                    self.assertEqual(len(i), int(pp.num_pairs(n, 0.1, m, k)), (m, n, k))
+                    self.assertTrue(np.all(i != j))
+                    self.assertTrue(np.all((i >= 0) & (i < n) & (j >= 0) & (j < n)))
+                    self.assertEqual(len(set(zip(i, j))), len(i))
+
+    def test_cap_on_n_gives_cycle(self):
+        """--min-pairs n with a cap landing exactly on k == N: the N-cycle (eager and graph)."""
+        n, k = 8, 8                       # round(0.5 * 56) = 28 -> capped to 8 == N
+        self.assertEqual(int(pp.num_pairs(n, 0.5, "n", k)), n)
+        g_graph = tf.random.Generator.from_seed(0)
+
+        @tf.function(input_signature=[tf.TensorSpec([], tf.int32)])
+        def draw(nn):
+            return pp.sample_pairs(g_graph, nn, 0.5, "n", k)
+
+        for seed in range(50):
+            i, j = pp.sample_pairs(tf.random.Generator.from_seed(seed), n, 0.5, "n", k)
+            for a, b in ((i.numpy(), j.numpy()), tuple(x.numpy() for x in draw(tf.constant(n)))):
+                self.assertEqual(sorted(a.tolist()), list(range(n)))
+                self.assertEqual(sorted(b.tolist()), list(range(n)))
+                self.assertTrue(_is_single_cycle(a, b, n))
+
+    def test_postprocess_counts(self):
+        n = 8
+        images = np.zeros((n,) + P.LEVEL_SHAPE[4] + (1,), np.float32)
+        labels = np.zeros((n,) + P.LEVEL_SHAPE[4] + (1,), np.uint8)
+        out = pp.DeformPostprocess(4, p_pdice=0.5, seed=3, min_pairs="n", max_pairs=5)(images, labels)
+        self.assertEqual(len(out["pair_i"].numpy()), 5)
+        t, rt = random_dali_batch(np.random.default_rng(0), "rigid", 4, n)
+        out = pp.LinearPostprocess("rigid", 4, p_pair=0.5, seed=3, max_pairs=7)(images, t, rt)
+        self.assertEqual(out["pair_i"].shape[0], 7)
+        self.assertEqual(out["P_star"].shape[0], 7)
+
+
 class TestMinPairsPostprocess(unittest.TestCase):
     """T-P6: both postprocess classes with min_pairs='n' at N 4."""
 

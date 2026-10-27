@@ -1,0 +1,9 @@
+{
+  "verdict": "APPROVED",
+  "summary": "Review pass 2 of the whole retrain-prereqs diff: all five first-pass findings (1 MEDIUM summarizer incomplete runs, 4 NIT) are fixed; no HIGH or MEDIUM remains. Defaults bit-identical (goldens max |diff| 0, fixtures untouched, TestSkip unmodified and passing), full suite 647 tests / 0 failures / 4 skips after the last trainer/model edit; post-suite edits (docstring + TF-free helpers/scripts) re-verified: py_compile, ast (3, 6), bash -n, test_sweep_tools + test_slurm_scripts 60 OK without TF. Two cosmetic hand-off NITs remain.",
+  "findings": [
+    {"severity": "NIT", "location": "scripts/summarize_runs.py:331", "issue": "The 'LENGTH 20000 (new run; command: ...)' line hard-codes --time=30:00:00 instead of the binding F5 rule (smoke INFO step_time projection x 1.3).", "fix": "Print a --time placeholder derived from INFO step_time x 1.3, or scale --c-time by 20000/16000 and say so."},
+    {"severity": "NIT", "location": "slurm/r_level4.sh:111,113; slurm/r_level2.sh:95,97 vs slurm/m10_batch_memory_capped.sh:78-82", "issue": "TODO comments name records 'L4 linear' / 'L4 deform knobs' / 'L2 ...', but the capped job's step labels are '... capped' and appear only in its log; measure_level_memory records carry no label (the knob set is the real selector).", "fix": "Reword the TODOs to reference the capped records by level/task/knob set (job step 'L4 linear capped' etc.)."}
+  ],
+  "reviewDoc": "d:\\Research\\Brain_Registration_Projects\\brain-group-rad\\.agents\\tasks\\retrain-prereqs\\2026-10-27-185639-review.md"
+}

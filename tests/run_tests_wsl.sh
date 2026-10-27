@@ -13,12 +13,17 @@
 # 2. The full unittest suite in the tf_gpu env (TF 2.10, Python 3.9). That env crashes when the
 #    GPU is hidden, so CUDA_VISIBLE_DEVICES is left alone. Neither env has nvidia.dali, so the
 #    DALI-dependent tests skip. tests/gpu/ (DALI GPU verification) is not part of discovery.
+#    Every test module runs in its own process (GPU memory held over between modules filled the
+#    6 GB limit in one process); the GPU memory-measurement classes are skipped in their module
+#    (BGR_DEFER_MEMORY_TESTS=1) and run last, each in a fresh process.
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO"
 source ~/miniconda3/etc/profile.d/conda.sh
 export PYTHONDONTWRITEBYTECODE=1
 
-PYFILES="models/*.py data_loading/*.py runtime/*.py main.py tests/*.py tests/gpu/*.py scripts/memory_model.py scripts/step_times_from_metrics.py"
+PYFILES="models/*.py data_loading/*.py runtime/*.py main.py tests/*.py tests/gpu/*.py scripts/memory_model.py scripts/step_times_from_metrics.py slurm/sweep_level4.py scripts/summarize_runs.py"
+# Login-node helpers (retrain-prereqs design 7.4): Python 3.6 syntax, stdlib only.
+PY36FILES="slurm/sweep_level4.py scripts/summarize_runs.py"
 status=0
 echo "=== [1/2] py3.8 syntax check + numpy references (bgr_preproc38) ==="
 conda activate bgr_preproc38
@@ -31,18 +36,25 @@ for f in sorted(sys.argv[1:]):
     ast.parse(open(f).read(), f, feature_version=(3, 8))
 print("ast feature_version=(3, 8) OK (%d files)" % len(sys.argv[1:]))
 EOF
+python - $PY36FILES <<'EOF' || status=1
+import ast, sys
+for f in sorted(sys.argv[1:]):
+    ast.parse(open(f).read(), f, feature_version=(3, 6))
+print("ast feature_version=(3, 6) OK (%d login-node helpers)" % len(sys.argv[1:]))
+EOF
 python tests/np_reference.py || status=1
 python -c "import data_loading.params, data_loading.dali_loader as d; print('data_loading imports without TF/DALI; DALI_AVAILABLE =', d.DALI_AVAILABLE)" || status=1
 python -c "import runtime.args, runtime.schedulers, sys; assert 'tensorflow' not in sys.modules; print('runtime.args / runtime.schedulers import without TF')" || status=1
 python main.py --help >/dev/null && echo "main.py --help OK (no TF)" || status=1
-for s in tests/gpu/run_verify_glacier.sh tests/gpu/run_overfit_glacier.sh slurm/train_debug.sh slurm/m7_three_task.sh slurm/m8_memory.sh slurm/m8_level2_cascade.sh slurm/m9_memory.sh slurm/m9_level1_cascade.sh; do
+for s in tests/gpu/run_verify_glacier.sh tests/gpu/run_overfit_glacier.sh slurm/train_debug.sh slurm/m7_three_task.sh slurm/m8_memory.sh slurm/m8_level2_cascade.sh slurm/m9_memory.sh slurm/m9_level1_cascade.sh slurm/m10_batch_memory.sh slurm/m10_batch_memory_capped.sh slurm/r_level4.sh slurm/r_level2.sh slurm/r_level1.sh; do
     bash -n "$s" && echo "bash -n $s OK" || status=1
 done
 # TF-free unit tests (milestone 9: memory model, width presets, step times, SLURM scripts) in the
 # py3.8 env; TensorFlow must not be imported.
 python - <<'EOF' || status=1
 import sys, unittest
-names = ["tests.test_memory_model", "tests.test_width_presets", "tests.test_step_times", "tests.test_slurm_scripts"]
+names = ["tests.test_memory_model", "tests.test_width_presets", "tests.test_step_times", "tests.test_slurm_scripts",
+         "tests.test_sweep_tools"]
 result = unittest.TextTestRunner(verbosity=1).run(unittest.defaultTestLoader.loadTestsFromNames(names))
 assert "tensorflow" not in sys.modules, "tensorflow was imported by the TF-free tests"
 print("TF-free tests OK without TF (%d tests)" % result.testsRun if result.wasSuccessful() else "TF-free tests FAILED")
@@ -66,9 +78,38 @@ export BGR_TF_GPU_LIMIT_MB=6000
 export TF_CUDNN_USE_AUTOTUNE=0
 python -c "import sys, tensorflow as tf, numpy, scipy; print('python', sys.version.split()[0], '| tf', tf.__version__, '| numpy', numpy.__version__, '| scipy', scipy.__version__)" 2>&1 | grep -v "cuBLAS factory"
 start=$(date +%s)
-python -m unittest discover -s tests -t . -v 2>&1 | grep --line-buffered -v "cuBLAS factory"
-rc=${PIPESTATUS[0]}
-echo "unittest exit code: $rc, wall time: $(( $(date +%s) - start )) s"
-[ "$rc" -eq 0 ] || status=1
+# One process per test module (retrain-prereqs integration): in a single `discover` process the
+# GPU memory held over from earlier modules filled the 6000 MB limit after ~640 tests (OOMs on
+# 30 MB tensors in test_group_net, the level-2 validation-memory test, the pair-recompute growth
+# bound), while every module passes in a fresh process. The GPU memory-measurement classes are
+# also skipped inside their module (BGR_DEFER_MEMORY_TESTS=1, tests/tf_setup.py) and run last,
+# each in its own process, since their peaks depend on what ran before them in the process.
+outdir=$(mktemp -d)
+n_run=0; n_skip=0; n_bad=0; bad_mods=""
+run_one() {   # run_one <unittest name> <defer 0|1>
+    local name="$1" log="$outdir/$1.log" rc_one
+    if [ "$2" = "1" ]; then
+        BGR_DEFER_MEMORY_TESTS=1 python -m unittest "$name" -v > "$log" 2>&1
+    else
+        python -m unittest "$name" -v > "$log" 2>&1
+    fi
+    rc_one=$?
+    grep -v "cuBLAS factory" "$log"
+    local ran skip
+    ran=$(sed -n 's/^Ran \([0-9]*\) tests\{0,1\} in .*/\1/p' "$log" | tail -n 1)
+    skip=$(sed -n 's/.*skipped=\([0-9]*\).*/\1/p' "$log" | tail -n 1)
+    n_run=$((n_run + ${ran:-0})); n_skip=$((n_skip + ${skip:-0}))
+    echo "--- $name: exit code $rc_one, ${ran:-0} tests, ${skip:-0} skipped"
+    if [ "$rc_one" -ne 0 ]; then n_bad=$((n_bad + 1)); bad_mods="$bad_mods $name"; status=1; fi
+}
+for f in tests/test_*.py; do
+    m="${f%.py}"; run_one "${m//\//.}" 1
+done
+for t in tests.test_pair_recompute.TestPairRecomputeMemory tests.test_val_chunk.TestValidationMemory; do
+    run_one "$t" 0
+done
+rm -rf "$outdir"
+echo "unittest summary: $((n_run - 2)) tests ($((n_skip - 2)) skipped; the 2 deferred memory tests are counted once, as run in their own process), $n_bad failing invocation(s):${bad_mods:- none}"
+echo "suite status: $status, unittest wall time: $(( $(date +%s) - start )) s"
 find "$REPO/models" "$REPO/data_loading" "$REPO/runtime" "$REPO/tests" -name "__pycache__" -type d -prune -exec rm -rf {} +
 exit $status

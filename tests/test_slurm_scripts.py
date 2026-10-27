@@ -17,6 +17,7 @@ TRAIN = os.path.join(REPO, "slurm", "m8_level2_cascade.sh")
 M9 = os.path.join(REPO, "slurm", "m9_memory.sh")
 M9L1 = os.path.join(REPO, "slurm", "m9_level1_cascade.sh")
 SCRIPTS = (MEMORY, TRAIN, M9, M9L1)
+M10C = os.path.join(REPO, "slurm", "m10_batch_memory_capped.sh")
 M9_KNOBS = ["--lean-sampler", "true", "--lean-losses", "false", "--split-group-conv", "true"]
 LOGS = "/autofs/space/crater_001/users/jn85/BrainRegProjects/GroupwiseReg/logs"
 SIF = "/autofs/space/crater_001/users/jn85/Singularity_Files/tf10_nv.sif"
@@ -154,9 +155,28 @@ class TestStatic(unittest.TestCase):
         self.assertEqual(len(re.findall(r"</dev/null \|\| c?rc=\$\?", text)), 2)
         self.assertIn('CASCADE_FROM="${CASCADE_FROM:-$RESULTS/m8_level2_gradnorm/ckpt/best}"', text)
 
+    def test_m10_capped_script(self):
+        """Retrain-prereqs design 16.6 (FEAT-007): capped batch-size re-measurement header."""
+        text = _read(M10C)
+        self.assertNotIn("\r", text)
+        self.assertTrue(all(ord(c) < 128 for c in text))
+        for line in ("#SBATCH -A qtim\n", "#SBATCH -p rtx8000\n", "#SBATCH --gpus=1\n", "#SBATCH -N 1\n",
+                     "#SBATCH --ntasks-per-node=1\n", "#SBATCH --cpus-per-task=3\n", "#SBATCH --mem=64G\n",
+                     "#SBATCH --output=%s/%%x-%%j.out\n" % LOGS, "#SBATCH --error=%s/%%x-%%j.err\n" % LOGS):
+            self.assertIn(line, text)
+        self.assertRegex(text, r"(?m)^#SBATCH --time=\d\d:\d\d:\d\d$")
+        self.assertNotIn("entre", text.lower())
+        self.assertIn(SIF, text)
+        self.assertIn("DO NOT submit without Jay's approval", text)
+        self.assertNotIn("--pair-recompute", text)
+        for k in ("--isolate true", "--max-pairs 64", "--int32-check true", "memory_batch_capped.json",
+                  "timeout 2400", "</dev/null", "--n 48,64,80,96", "--n 128,144,160,192", "--n 32,36,40",
+                  "--val-pair-chunk 16", "--min-pairs n", "--gradient-checkpointing full"):
+            self.assertIn(k, text, k)
+
     @unittest.skipIf(BASH is None, "bash not available")
     def test_bash_syntax(self):
-        for path in SCRIPTS:
+        for path in SCRIPTS + (M10C,):
             r = subprocess.run([BASH, "-n", path], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                universal_newlines=True)
             self.assertEqual(r.returncode, 0, r.stderr)

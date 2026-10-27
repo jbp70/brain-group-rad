@@ -104,6 +104,46 @@ def lowres_np(img, f, roi="subpixel"):
     return low
 
 
+def _tent_down_axis(x, axis, m):
+    """Triangle-filtered downsample of `axis` (length n) to m cells: cell l = sum_o U[o, l] x[o]
+    / sum_o U[o, l], U the pixel-center linear-upsample weights m -> n (explicit loops)."""
+    n = x.shape[axis]
+    weights = [[] for _ in range(m)]                 # per low-res cell l: [(o, U[o, l])]
+    for o in range(n):
+        c = (o + 0.5) * float(m) / float(n) - 0.5
+        lo = int(np.floor(c))
+        w = c - lo
+        weights[min(max(lo, 0), m - 1)].append((o, 1.0 - w))
+        weights[min(max(lo + 1, 0), m - 1)].append((o, w))
+    out_shape = list(x.shape)
+    out_shape[axis] = m
+    out = np.zeros(out_shape, np.float64)
+    for l in range(m):
+        sl = [slice(None)] * x.ndim
+        sl[axis] = l
+        total = sum(wt for _, wt in weights[l])
+        if total <= 0.0:
+            continue
+        acc = np.zeros(out[tuple(sl)].shape, np.float64)
+        for o, wt in weights[l]:
+            acc += wt * np.take(x, o, axis=axis)
+        out[tuple(sl)] = acc / total
+    return out
+
+
+def lowres_tent_np(img, f):
+    """'tent' low-res reference (retrain-prereqs design 3.2): triangle-filtered downsample to
+    round(f n) per spatial axis (0, 1, 2), then the pixel-center linear upsample back to n."""
+    x = np.asarray(img, np.float64)
+    shape = x.shape[:3]
+    low = x
+    for a, n in enumerate(shape):
+        low = _tent_down_axis(low, a, lowres_size(n, f))
+    for a, n in enumerate(shape):
+        low = _linear_up_axis(low, a, n)
+    return low
+
+
 def contrast_np(img, factor):
     """(img - mean) factor + mean, clamped to the PRE-contrast [min, max]."""
     x = np.asarray(img, np.float64)

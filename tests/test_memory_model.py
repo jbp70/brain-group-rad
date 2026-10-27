@@ -199,6 +199,13 @@ class TestMinPairs(_Base):
         self.assertEqual([MM.num_pairs(n, 0.1) for n in (2, 4, 8, 11, 12, 16)], [1, 1, 6, 11, 13, 24])
         with self.assertRaises(ValueError):
             MM.num_pairs(4, 0.1, "x")
+        # --max-pairs K (retrain-prereqs 16.3): applied after the floor; 0 = no cap
+        self.assertEqual([MM.num_pairs(n, 0.1, "n", 64) for n in (16, 32, 48, 64)], [24, 64, 64, 64])
+        self.assertEqual([MM.num_pairs(n, 0.1, "n", 0) for n in (16, 32, 48, 64)], [24, 99, 226, 403])
+        self.assertEqual(MM.num_pairs(32, 0.1, "n", 16), 16)
+        for bad in (-1, 1.5, True):
+            with self.assertRaises(ValueError):
+                MM.num_pairs(8, 0.1, "n", bad)
 
     def test_level1_deform_n4(self):
         w1 = MM.level1_workload("default", 4, 7, LS)

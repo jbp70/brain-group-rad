@@ -149,16 +149,20 @@ def lean_bwd_moment(c, images_grad):
 MIN_PAIRS = ("1", "n")      # --min-pairs (mirrors `data_loading.postprocess.MIN_PAIRS`)
 
 
-def num_pairs(n, p_pair=0.1, min_pairs="1"):
+def num_pairs(n, p_pair=0.1, min_pairs="1", max_pairs=0):
     """min(max(m, round(p n (n - 1))), n (n - 1)), m = 1 ('1') or n ('n'), like
-    `data_loading.postprocess.num_pairs` (float32 product, half to even)."""
+    `data_loading.postprocess.num_pairs` (float32 product, half to even), then capped at
+    ``max_pairs`` K when K > 0 (--max-pairs, retrain-prereqs design 16.3)."""
     if min_pairs not in MIN_PAIRS:
         raise ValueError("min_pairs must be one of %s, got %r" % (MIN_PAIRS, min_pairs))
+    if isinstance(max_pairs, bool) or not isinstance(max_pairs, (int, np.integer)) or max_pairs < 0:
+        raise ValueError("max_pairs must be an int >= 0 (0 = no cap), got %r" % (max_pairs,))
     total = int(n) * (int(n) - 1)
     if total < 1:
         return 0
     k = int(np.round(np.float32(total) * np.float32(p_pair)))
-    return int(min(max(k, 1 if min_pairs == "1" else int(n)), total))
+    k = int(min(max(k, 1 if min_pairs == "1" else int(n)), total))
+    return min(k, int(max_pairs)) if max_pairs > 0 else k
 
 
 # --------------------------------------------------------------------- workload

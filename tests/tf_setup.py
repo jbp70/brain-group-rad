@@ -5,6 +5,13 @@ shared GPU). TF32 must be off on Ampere GPUs (A100): see models/precision.py.
 under WSL): use a fixed logical-device memory limit instead of memory growth. Under WSL, letting
 TF grow into the last GB of the card pages GPU memory to host RAM and full-width steps slow down
 from ~1 s to minutes (milestone-4 report). Unset on the cluster / glacier.
+
+``BGR_DEFER_MEMORY_TESTS=1`` (set by tests/run_tests_wsl.sh for its per-module runs): the GPU
+memory-measurement classes (``DEFER_MEMORY_TESTS`` skip) are skipped there and run afterwards,
+each in a fresh process. Their peaks depend on the allocator state left by earlier tests in the
+process: in one ~640-test process the level-2 validation-memory test OOMed at the 6000 MB limit
+and the pair-recompute growth bound failed (also after only test_postprocess in the same
+process), while both pass in a fresh process.
 """
 import os
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
@@ -22,3 +29,6 @@ if _LIMIT_MB > 0:
             pass  # already initialized
 else:
     configure_tf_precision(tf32=False, memory_growth=True)
+
+DEFER_MEMORY_TESTS = os.environ.get("BGR_DEFER_MEMORY_TESTS", "") == "1"
+DEFER_MEMORY_REASON = "GPU memory measurement: deferred to a fresh process (BGR_DEFER_MEMORY_TESTS=1)"
