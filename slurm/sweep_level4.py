@@ -130,8 +130,8 @@ def build_parser():
                    "(the B / C job indices start after the phase-A grid)")
     g.add_argument("--wds", default="0,1e-2,1e-1",
                    help="phase A AdamW weight decays (>= 0); same value in every phase (see --lrs)")
-    g.add_argument("--n", default="64", help="N_max, linear group size")
-    g.add_argument("--deform-n", default="32", help="DEFORM_N_max, deform group size")
+    g.add_argument("--n", default="128", help="N_max, linear group size")
+    g.add_argument("--deform-n", default="64", help="DEFORM_N_max, deform group size")
     g.add_argument("--n-small", default=None, help="phase B N_small (default N_max / 2)")
     g.add_argument("--deform-n-small", default=None, help="phase B DEFORM_N_small (default DEFORM_N_max / 2)")
     g.add_argument("--steps", default="8000", help="phases A / B run length")

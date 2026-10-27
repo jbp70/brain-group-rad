@@ -86,9 +86,9 @@ WARMUP="${WARMUP:-500}"
 LR="${LR:-3e-4}"
 WD="${WD:-0}"
 OPTIMIZER="${OPTIMIZER:-adamw}"
-# TODO(m10 memory job): N 8 is the int32 element limit at default widths (N >= 10 overflows the stem, job 10517266); no m10 linear record at level 1 (knobs: AMP, cascade, --split-group-conv true, --min-pairs n)
+# Group sizes (Jay, 2026-10-27): rigid/affine N = 2 x DEFORM_N at every level: 128/64 (level 4), 32/16 (level 2), 8/4 (level 1). Measured with --max-pairs 64 (job 10524450, scratch/m10/memory_batch_capped.json, RTX 8000 tool peaks): linear N 8 = the int32 element limit at default widths (N >= 10 overflows the stem, job 10517266).
 N="${N:-8}"
-# TODO(m10 memory job): from record "L1 deform N5 lean" (knobs: AMP, cascade, --gradient-checkpointing full --lean-sampler true --split-group-conv true --min-pairs n --pair-recompute true --lean-losses true, validation pass --val-pair-chunk 1); keep 4 (m9 long run) unless N 5 fits under TF_MEM_LIMIT_MB 40000
+# Deform N 4 (m9 long run 10518952: 37.8 GB peak under TF_MEM_LIMIT_MB 40000); N 5 aborted even with lean losses (job 10519893).
 DEFORM_N="${DEFORM_N:-4}"
 TASK_RATIO="${TASK_RATIO:-rigid:1,affine:1,deform:2}"
 CASCADE_FROM="${CASCADE_FROM:-}"

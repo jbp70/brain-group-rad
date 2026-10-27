@@ -108,10 +108,10 @@ WARMUP="${WARMUP:-1000}"
 LR="${LR:-3e-4}"
 WD="${WD:-0}"
 OPTIMIZER="${OPTIMIZER:-adamw}"
-# TODO(m10 memory job): from record "L4 linear" (knobs: AMP, --split-group-conv true, --min-pairs n, --max-pairs 64); largest N with fits(record, rtx8000) at level 4 (BUDGET 42000 MiB); needs the capped re-measurement slurm/m10_batch_memory_capped.sh (scratch/m10/memory_batch_capped.json)
-N="${N:-64}"
-# TODO(m10 memory job): from record "L4 deform knobs" (knobs: AMP, --gradient-checkpointing full --lean-sampler true --split-group-conv true --min-pairs n --max-pairs 64, NO pair recompute, LNCC 1/1, validation pass --val-pair-chunk 16); largest DEFORM_N with fits(record, rtx8000) at level 4 (BUDGET 42000 MiB); needs the capped re-measurement slurm/m10_batch_memory_capped.sh (scratch/m10/memory_batch_capped.json)
-DEFORM_N="${DEFORM_N:-32}"
+# Group sizes (Jay, 2026-10-27): rigid/affine N = 2 x DEFORM_N at every level: 128/64 (level 4), 32/16 (level 2), 8/4 (level 1). Measured with --max-pairs 64 (job 10524450, scratch/m10/memory_batch_capped.json, RTX 8000 tool peaks): linear N 128 35.3 GB 1.8-1.9 s (N 144 39.6 GB too tight, N 160 int32 limit).
+N="${N:-128}"
+# Deform N 64: 27.6 GB, 5.8 s (N 48 22.1 GB 4.4 s; N 80 34.3 GB 7.1 s; N 96 int32 limit).
+DEFORM_N="${DEFORM_N:-64}"
 TASK_RATIO="${TASK_RATIO:-rigid:1,affine:1,deform:2}"
 DEFORM_START="${DEFORM_START:-3000}"
 DEFORM_RAMP="${DEFORM_RAMP:-500}"

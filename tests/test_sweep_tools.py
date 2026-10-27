@@ -127,7 +127,7 @@ class TestSweepConfigs(unittest.TestCase):
         cfgs = sweep.configs(_grid())
         self.assertEqual([c["k"] for c in cfgs], list(range(9)))
         self.assertEqual([c["job"] for c in cfgs], ["r4sw%d" % k for k in range(9)])
-        want = ["r4sw_A_lr%s_wd%s_n64_d32" % (lr, wd) for wd in ("0", "1e-2", "1e-1")
+        want = ["r4sw_A_lr%s_wd%s_n128_d64" % (lr, wd) for wd in ("0", "1e-2", "1e-1")
                 for lr in ("3e-4", "1e-4", "1e-3")]
         self.assertEqual([c["run"] for c in cfgs], want)
         for c in cfgs:
@@ -136,7 +136,7 @@ class TestSweepConfigs(unittest.TestCase):
             self.assertEqual(env["RUN_NAME"], c["run"])
             for k, v in (("STEPS", "8000"), ("DEFORM_START", "2000"), ("DEFORM_RAMP", "500"),
                          ("CURRICULUM_RAMP", "2000"), ("G_START", "2000"), ("G_RAMP", "2000"), ("WARMUP", "1000"),
-                         ("VAL_EVERY", "500"), ("VAL_GROUP_SIZE", "16"), ("N", "64"), ("DEFORM_N", "32")):
+                         ("VAL_EVERY", "500"), ("VAL_GROUP_SIZE", "16"), ("N", "128"), ("DEFORM_N", "64")):
                 self.assertEqual(env[k], v, k)
             self.assertEqual(c["time"], "14:00:00")
             self.assertTrue(all(isinstance(v, str) for v in env.values()))
@@ -148,12 +148,12 @@ class TestSweepConfigs(unittest.TestCase):
         b = sweep.configs(_grid("--phase", "B", "--best-lr", "3e-4", "--best-wd", "1e-2"))
         self.assertEqual([c["k"] for c in b], [9, 10])
         self.assertEqual([c["job"] for c in b], ["r4sw9", "r4sw10"])
-        self.assertEqual([c["run"] for c in b], ["r4sw_B_lr3e-4_wd1e-2_n32_d32", "r4sw_B_lr3e-4_wd1e-2_n64_d16"])
-        self.assertEqual([(c["env"]["N"], c["env"]["DEFORM_N"]) for c in b], [("32", "32"), ("64", "16")])
+        self.assertEqual([c["run"] for c in b], ["r4sw_B_lr3e-4_wd1e-2_n64_d64", "r4sw_B_lr3e-4_wd1e-2_n128_d32"])
+        self.assertEqual([(c["env"]["N"], c["env"]["DEFORM_N"]) for c in b], [("64", "64"), ("128", "32")])
         self.assertTrue(all(c["env"]["STEPS"] == "8000" and c["env"]["DEFORM_START"] == "2000" for c in b))
         c = sweep.configs(_grid("--phase", "C", "--best-lr", "1e-4", "--best-wd", "0", "--best-n", "32"))
         self.assertEqual([x["k"] for x in c], [11, 12])
-        self.assertEqual([x["run"] for x in c], ["r4sw_C_s12000_lr1e-4_wd0_n32_d32", "r4sw_C_s16000_lr1e-4_wd0_n32_d32"])
+        self.assertEqual([x["run"] for x in c], ["r4sw_C_s12000_lr1e-4_wd0_n32_d64", "r4sw_C_s16000_lr1e-4_wd0_n32_d64"])
         for x, steps in zip(c, ("12000", "16000")):
             env = x["env"]
             self.assertEqual(set(env), set(sweep.CFG_KEYS))
@@ -195,9 +195,9 @@ class TestSweepConfigs(unittest.TestCase):
         with contextlib.redirect_stdout(out):
             self.assertEqual(sweep.main(["list"]), 0)
         text = out.getvalue()
-        self.assertIn("0 r4sw0 r4sw_A_lr3e-4_wd0_n64_d32\n", text)
+        self.assertIn("0 r4sw0 r4sw_A_lr3e-4_wd0_n128_d64\n", text)
         self.assertEqual(text.count("sbatch -A qtim -p rtx8000 --job-name r4sw"), 9)
-        self.assertIn("RUN_NAME=r4sw_A_lr3e-4_wd0_n64_d32 LR=3e-4 WD=0 N=64 DEFORM_N=32 STEPS=8000", text)
+        self.assertIn("RUN_NAME=r4sw_A_lr3e-4_wd0_n128_d64 LR=3e-4 WD=0 N=128 DEFORM_N=64 STEPS=8000", text)
         self.assertNotIn("entre", text)
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
@@ -645,7 +645,7 @@ class TestScriptsStatic(unittest.TestCase):
                 self.assertNotIn("46000", text)
                 self.assertEqual(len(re.findall(r"</dev/null \|\| c?rc=\$\?", text)), 2)
                 for var in ("N", "DEFORM_N"):
-                    m = re.search(r"(?m)^# TODO\(m10 memory job\): .*\n%s=\"\$\{%s:-" % (var, var), text)
+                    m = re.search(r"(?m)^# (Group sizes|Deform N) .*\n%s=\"\$\{%s:-" % (var, var), text)
                     self.assertIsNotNone(m, var)
                 self.assertIn("set --time from the smoke's 'INFO step_time' projection x 1.3", header)
                 self.assertIn("resubmit with the same RUN_NAME", header)
@@ -751,7 +751,7 @@ class TestScriptsDryRun(unittest.TestCase):
 
     def test_r4_default(self):
         main, chk, _ = self.dry(R4)
-        self.assert_seqs(main, (["--level", "4"], ["--group-size", "64"], ["--deform-group-size", "32"],
+        self.assert_seqs(main, (["--level", "4"], ["--group-size", "128"], ["--deform-group-size", "64"],
                                 ["--task-ratio", "rigid:1,affine:1,deform:2"], ["--steps", "16000"],
                                 ["--gradient-checkpointing", "full", "--lean-sampler", "true", "--pair-recompute",
                                  "false"],
