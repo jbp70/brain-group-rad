@@ -844,6 +844,57 @@ class TestScriptsDryRun(unittest.TestCase):
             self.assertIn("ERROR", r.stderr)
             self.assertNotIn("MAIN: ", r.stdout)
 
+    # ------------------------------------------------------------------ nonfinite-fixes (plan D11)
+    MITIG_FLAGS = ("--fp16-act-clip", "--fp16-act-clip-scope", "--deform-decoder-dtype", "--bn-epsilon-override",
+                   "--nonfinite-patience-task")
+
+    def test_mitigations_default_off(self):
+        for path, env in ((R4, {}), (R2, self.l2()), (R1, self.l2())):
+            with self.subTest(os.path.basename(path)):
+                main, chk, _ = self.dry(path, **env)
+                for flag in self.MITIG_FLAGS:
+                    self.assertNotIn(flag, main)
+                self.assert_seqs(chk, (["--max-nonfinite-frac", "0.06", "--max-window-nonfinite-frac", "0.05"],))
+
+    def test_mitigations_env_overrides(self):
+        env = dict(FP16_ACT_CLIP="30000", FP16_ACT_CLIP_SCOPE="all", DEFORM_DECODER_DTYPE="float32",
+                   BN_EPSILON_OVERRIDE="1e-3", EXTRA_ARGS="--seed 3")
+        for path, base in ((R4, {}), (R2, self.l2()), (R1, self.l2())):
+            with self.subTest(os.path.basename(path)):
+                main, _, out = self.dry(path, **dict(base, **env))
+                self.assert_seqs(main, (["--fp16-act-clip", "30000", "--fp16-act-clip-scope", "all",
+                                         "--deform-decoder-dtype", "float32", "--bn-epsilon-override", "1e-3",
+                                         "--seed", "3"],))
+                self.assertIn("fp16 act clip", _read(path))
+                self.check_parses(main)
+        main, _, _ = self.dry(R4, FP16_ACT_CLIP="30000")             # default scope
+        self.assert_seqs(main, (["--fp16-act-clip", "30000", "--fp16-act-clip-scope", "deform_decoder"],))
+        self.assertNotIn("--deform-decoder-dtype", main)
+        self.check_parses(main)
+
+    def test_mitigations_linear_only_r4(self):
+        main, _, out = self.dry(R4, TASK_RATIO="rigid:1,affine:1", FP16_ACT_CLIP="30000",
+                                DEFORM_DECODER_DTYPE="float32", BN_EPSILON_OVERRIDE="1e-3")
+        self.assertIn("NOTE: linear-only ratio, deform-scoped FP16_ACT_CLIP dropped", out)
+        self.assertIn("NOTE: linear-only ratio, DEFORM_DECODER_DTYPE dropped", out)
+        for flag in ("--fp16-act-clip", "--deform-decoder-dtype"):
+            self.assertNotIn(flag, main)
+        self.assert_seqs(main, (["--bn-epsilon-override", "1e-3"],))
+        self.check_parses(main)
+        main, _, _ = self.dry(R4, TASK_RATIO="rigid:1,affine:1", FP16_ACT_CLIP="30000", FP16_ACT_CLIP_SCOPE="all")
+        self.assert_seqs(main, (["--fp16-act-clip", "30000", "--fp16-act-clip-scope", "all"],))
+        self.check_parses(main)
+
+    def test_mitigations_invalid_env(self):
+        for env in (dict(FP16_ACT_CLIP="abc"), dict(FP16_ACT_CLIP="-1"), dict(FP16_ACT_CLIP="40000"),
+                    dict(FP16_ACT_CLIP_SCOPE="encoder"), dict(DEFORM_DECODER_DTYPE="bfloat16"),
+                    dict(BN_EPSILON_OVERRIDE="x")):
+            for path, base in ((R4, {}), (R2, self.l2()), (R1, self.l2())):
+                r = self.run_script(path, **dict(base, **env))
+                self.assertEqual(r.returncode, 2, (path, env, r.stdout, r.stderr))
+                self.assertIn("ERROR", r.stderr)
+                self.assertNotIn("MAIN: ", r.stdout)
+
     def test_r2_default(self):
         main, chk, _ = self.dry(R2, **self.l2())
         self.assert_seqs(main, (["--level", "2"], ["--cascade-from", self.ckpt], ["--group-size", "32"],

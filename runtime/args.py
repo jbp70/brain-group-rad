@@ -61,6 +61,11 @@ Pattern from the rigid project's ``runtime/args.py`` (argparse + ``str2bool``). 
   graph construction ran ~2 h at 99 % CPU (cluster job 10519650).
 * delayed task start (retrain-prereqs design section 5.2): --task-start-step 'task:step' (default
   None = every task from step 0, today) and --task-start-ramp-steps W (default 0 = no LR ramp).
+* non-finite robustness (`.agents/tasks/nonfinite-fixes/plan.md`): --nonfinite-patience-task 20
+  (per-task streak guard, 0 = off; --nonfinite-patience unchanged). Opt-in float16 overflow
+  mitigations, all off by default (no op added): --fp16-act-clip 0 (C in (0, 32000], needs --amp)
+  with --fp16-act-clip-scope deform_decoder | all, --deform-decoder-dtype policy | float16 |
+  float32 (needs --amp), --bn-epsilon-override 0. None is a ModelConfig field.
 """
 import argparse
 import collections
@@ -385,6 +390,26 @@ def build_parser():
     g.add_argument("--split-group-conv", type=str2bool, default=False,
                    help="memory knob (milestone 9): group blocks compute conv(x) + conv(group mean) "
                    "instead of conv(concat(x, mean)); same variables and checkpoints")
+    g.add_argument("--fp16-act-clip", type=float, default=0.0,
+                   help="float16 overflow mitigation a1 (nonfinite-fixes; 0 = off): clip the float16 "
+                   "outputs of the group conv blocks (both split-conv terms and their sum) and the "
+                   "BatchNorm layers to [-C, C], C in (0, 32000] (two clipped terms stay < 65504). "
+                   "Needs --amp true. Clipped voxels get zero gradient (symptom treatment; the m9 "
+                   "level-1 deform NaN was an fp16 overflow, .agents/tasks/m9-level1-nan/report.md)")
+    g.add_argument("--fp16-act-clip-scope", default="deform_decoder", choices=["deform_decoder", "all"],
+                   help="where --fp16-act-clip acts: deform_decoder (default: d5..d1, svf_norm_act and "
+                   "their BN; needs 'deform' in --task-ratio; linear tasks unchanged) or all (also "
+                   "the encoder and linear decoder, so the linear tasks change too)")
+    g.add_argument("--deform-decoder-dtype", default="policy", choices=["policy", "float16", "float32"],
+                   help="float16 overflow mitigation a2: compute dtype of the deform decoder. policy "
+                   "(default) = the global policy; float32 runs the decoder in float32 under --amp "
+                   "(fp16 skips cast up; same variables and checkpoints; ~2x decoder activation "
+                   "memory). float16 / float32 need --amp true; float32 needs 'deform' in --task-ratio")
+    g.add_argument("--bn-epsilon-override", type=float, default=0.0,
+                   help="float16 overflow mitigation a3 (0 = off): epsilon of every BatchNorm of the "
+                   "trainable model (not LayerNorm / InstanceNorm, not frozen cascade stages, not a "
+                   "ModelConfig field). Bounds the frozen-BN gain 1/sqrt(var + eps) when a "
+                   "recalibrated variance is ~0. Pass it again on resume")
     g.add_argument("--overfit-dice-threshold", type=float, default=0.9,
                    help="overfit stop for deform: window mean soft template Dice >= this ...")
     g.add_argument("--overfit-fold-max", type=float, default=0.001,
@@ -523,6 +548,11 @@ def build_parser():
     g = p.add_argument_group("misc and modes")
     g.add_argument("--seed", type=int, default=0)
     g.add_argument("--nonfinite-patience", type=int, default=20, help="raise after this many consecutive skipped steps")
+    g.add_argument("--nonfinite-patience-task", type=int, default=20,
+                   help="per-task non-finite guard (nonfinite-fixes): raise after this many consecutive "
+                   "non-finite steps of ONE task; only a finite step of the same task resets the count "
+                   "(in mixed runs finite linear steps reset --nonfinite-patience, so that guard never "
+                   "tripped in job 10518952). 0 = off")
     g.add_argument("--quiet", type=str2bool, default=False)
     g.add_argument("--log-backend", default="auto", choices=["auto", "dllogger", "jsonl"])
     g.add_argument("--dry-run", action="store_true", help="build everything, run 2 steps + 1 validation group, exit")
@@ -604,6 +634,25 @@ def parse_args(argv=None):
         parser.error("--val-pair-chunk must be >= 1, got %d" % args.val_pair_chunk)
     if args.val_image_chunk < 0:
         parser.error("--val-image-chunk must be >= 0 (0 = unchunked), got %d" % args.val_image_chunk)
+    # Non-finite guard and opt-in float16 overflow mitigations (nonfinite-fixes plan D1, D8-D10).
+    if args.nonfinite_patience_task < 0:
+        parser.error("--nonfinite-patience-task must be >= 0 (0 = off), got %d"
+                     % args.nonfinite_patience_task)
+    clip = args.fp16_act_clip
+    if not (math.isfinite(clip) and (clip == 0 or 0 < clip <= 32000)):
+        parser.error("--fp16-act-clip must be 0 (off) or in (0, 32000], got %r" % clip)
+    if clip > 0 and not args.amp:
+        parser.error("--fp16-act-clip > 0 needs --amp true (it clips float16 activations only)")
+    if clip > 0 and args.fp16_act_clip_scope == "deform_decoder" and not deform:
+        parser.error("--fp16-act-clip with --fp16-act-clip-scope deform_decoder needs 'deform' in "
+                     "--task-ratio")
+    if args.deform_decoder_dtype != "policy" and not args.amp:
+        parser.error("--deform-decoder-dtype %s needs --amp true" % args.deform_decoder_dtype)
+    if args.deform_decoder_dtype == "float32" and not deform:
+        parser.error("--deform-decoder-dtype float32 needs 'deform' in --task-ratio")
+    eps = args.bn_epsilon_override
+    if not (math.isfinite(eps) and eps >= 0):
+        parser.error("--bn-epsilon-override must be finite and >= 0 (0 = off), got %r" % eps)
     # Level cascade (milestone 8, design §10). Resolution of the --cascade-from path, the source
     # level and the config equality are checked in main.py (fresh runs only).
     cascade = args.cascade_from is not None
@@ -824,7 +873,9 @@ def train_config_from_args(args):
                        flip_prob=0.0 if args.overfit_one_group else args.flip_prob,
                        target_iters=args.target_iters, amp=args.amp, seed=args.seed,
                        schedule=schedule_config_from_args(args),
-                       nonfinite_patience=args.nonfinite_patience, best_metric=args.best_metric,
+                       nonfinite_patience=args.nonfinite_patience,
+                       nonfinite_patience_task=args.nonfinite_patience_task,
+                       best_metric=args.best_metric,
                        overfit=args.overfit_one_group,
                        overfit_threshold_mm=args.overfit_threshold_mm,
                        val_png_k=args.val_png_k, val_png_group=args.val_png_group,

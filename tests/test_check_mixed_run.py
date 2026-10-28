@@ -63,14 +63,15 @@ BN_EVENT = {"event": "bn_recalibration", "num_batches": 8, "planned": {"rigid": 
 
 def make_run(root, tasks, val_overrides=None, drop_pngs=(), best_dirs=None, trace=None, init_weights=None,
              enc_grad=False, enc_grad_bad=None, grad_norm_keys=False, steps=STEPS, every=5, eff=None,
-             config=None, events=(), train_extra=None):
+             config=None, events=(), train_extra=None, train_fn=None):
     """Fabricated run dir: metrics.jsonl with train/val records, fit_summary.json, PNGs, ckpts;
     optional config.json init_weights record and train_<task>/diag_enc_grad_norm_* keys
     (``enc_grad_bad``: a task whose _eff values are NaN); ``grad_norm_keys``: the v3.10
     --task-grad-norm keys train_<task>/grad_norm_scale 0.5 and grad_norm_gated_frac 0.
     Milestone 8: train records at every..steps (window ends), ``eff(task, step)`` overrides the
     _eff value, ``config`` extra config.json blocks, ``events`` records logged at step 0,
-    ``train_extra`` extra keys of every train record."""
+    ``train_extra`` extra keys of every train record; ``train_fn(step)`` (nonfinite-fixes) extra
+    keys of the train record at that step."""
     os.makedirs(os.path.join(root, "logs"))
     os.makedirs(os.path.join(root, "val_png"))
     recs = [{"step": 0, "data": dict(ev)} for ev in events]
@@ -87,6 +88,8 @@ def make_run(root, tasks, val_overrides=None, drop_pngs=(), best_dirs=None, trac
             for t in tasks:
                 data.update({"train_%s/grad_norm_scale" % t: 0.5, "train_%s/grad_norm_gated_frac" % t: 0.0})
         data.update(train_extra or {})
+        if train_fn is not None:
+            data.update(train_fn(step))
         recs.append({"step": step, "data": data})
     if init_weights is not None or config is not None:
         cfg = dict(config or {})
@@ -138,6 +141,117 @@ class CheckMixedRunCase(unittest.TestCase):
 
     def failed(self, res):
         return [n for n, p, _ in res if not p]
+
+
+def window_fn(bad_deform=None, bad_rigid=None, scale=None):
+    """train_fn for 25-step log windows of a rigid:1,deform:1 run: 13 rigid + 12 deform steps per
+    window; ``bad_<task>(step)`` = non-finite steps of that task in the window ending at step;
+    ``scale(step)`` = logged optimizer/loss_scale (None = not logged)."""
+    def fn(step):
+        d = {}
+        for t, n, bad in (("rigid", 13, bad_rigid), ("deform", 12, bad_deform)):
+            b = bad(step) if bad else 0
+            d.update({"train_%s/window_steps" % t: n, "train_%s/nonfinite_steps" % t: b,
+                      "train_%s/nonfinite_frac" % t: b / float(n)})
+        if scale is not None:
+            d[cmr.LOSS_SCALE_KEY] = scale(step)
+        return d
+    return fn
+
+
+class TestNonfiniteWindows(CheckMixedRunCase):
+    """nonfinite-fixes D7: per-task, per-window non-finite check (off by default) and the INFO
+    loss-scale line."""
+
+    TASKS = ["rigid", "deform"]
+
+    def make(self, name, steps=1500, **kw):
+        return self.run_dir(name, self.TASKS, steps=steps, every=25, train_fn=window_fn(**kw))
+
+    def details(self, res):
+        return dict((n, (p, x)) for n, p, x in res)
+
+    def test_off_by_default(self):
+        d = self.make("off", bad_deform=lambda s: 4 if 500 < s <= 1000 else 0)
+        ok, res = cmr.check(d, self.TASKS, 1500)
+        self.assertTrue(ok, self.failed(res))
+        self.assertFalse([n for n, _, _ in res if n.startswith("nonfinite_window")])
+        self.assertNotIn("loss_scale", self.details(res))
+
+    def test_window_fail_and_first_step(self):
+        d = self.make("bad", bad_deform=lambda s: 4 if 500 < s <= 1000 else 0)
+        ok, res = cmr.check(d, self.TASKS, 1500, max_window_nonfinite_frac=0.05)
+        self.assertFalse(ok)
+        self.assertEqual(self.failed(res), ["nonfinite_window_deform"])
+        passed, x = self.details(res)["nonfinite_window_deform"]
+        self.assertIn("80 of 240 steps non-finite (33.3 % > 5.0 %) in window steps 501-1000", x)
+        self.assertIn("first logged at step 525", x)
+        self.assertTrue(self.details(res)["nonfinite_window_rigid"][0])
+
+    def test_before_from_step_isolated_and_trailing(self):
+        # 33 % in the windows ending at steps 25..100: ignored (<= --nonfinite-from-step 100)
+        d = self.make("early", bad_deform=lambda s: 4 if s <= 100 else 0)
+        ok, res = cmr.check(d, self.TASKS, 1500, max_window_nonfinite_frac=0.05)
+        self.assertTrue(ok, self.failed(res))
+        # isolated: 1 rigid step in a 500-step window (1 of 260 = 0.4 %)
+        d = self.make("iso", bad_rigid=lambda s: 1 if s == 700 else 0)
+        ok, res = cmr.check(d, self.TASKS, 1500, max_window_nonfinite_frac=0.05)
+        self.assertTrue(ok, self.failed(res))
+        self.assertIn("max non-finite 0.4 %", self.details(res)["nonfinite_window_rigid"][1])
+        # trailing bucket 1501-1525 holds 12 deform steps (< 20): not judged
+        d = self.make("tail", steps=1525, bad_deform=lambda s: 6 if s > 1500 else 0)
+        ok, res = cmr.check(d, self.TASKS, 1525, max_window_nonfinite_frac=0.05)
+        self.assertTrue(ok, self.failed(res))
+        self.assertIn("3 windows", self.details(res)["nonfinite_window_deform"][1])
+        # a different window length / start reach the check
+        d = self.make("w", bad_deform=lambda s: 4 if 500 < s <= 1000 else 0)
+        ok, _ = cmr.check(d, self.TASKS, 1500, max_window_nonfinite_frac=0.05, nonfinite_from_step=1000)
+        self.assertTrue(ok)
+
+    def test_keys_missing_skipped(self):
+        d = self.run_dir("old", self.TASKS, steps=1500, every=25)
+        ok, res = cmr.check(d, self.TASKS, 1500, max_window_nonfinite_frac=0.05)
+        self.assertTrue(ok, self.failed(res))
+        for t in self.TASKS:
+            self.assertEqual(self.details(res)["nonfinite_window_%s" % t][1],
+                             "skipped: no train_%s/nonfinite_steps logged" % t)
+
+    def test_loss_scale_info(self):
+        d = self.make("ls", scale=lambda s: 32768.0 if s < 1000 else 1.0)
+        ok, res = cmr.check(d, self.TASKS, 1500)
+        self.assertTrue(ok, self.failed(res))
+        passed, x = self.details(res)["loss_scale"]
+        self.assertTrue(passed)
+        self.assertTrue(x.startswith("INFO WARN loss scale at the floor (1)"), x)
+        self.assertIn("last 1, min 1 (step 1000), 21 of 60 log windows at the floor (<= 1)", x)
+        d = self.make("ls2", scale=lambda s: 2.0 ** 15)
+        ok, res = cmr.check(d, self.TASKS, 1500)
+        x = self.details(res)["loss_scale"][1]
+        self.assertTrue(ok)
+        self.assertEqual(x, "INFO last 32768, min 32768 (step 25), 0 of 60 log windows at the floor (<= 1)")
+
+    def test_cli(self):
+        d = self.make("cli", bad_deform=lambda s: 4 if 500 < s <= 1000 else 0)
+        base = [d, "--tasks", "rigid,deform", "--steps", "1500"]
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(cmr.main(base), 0)
+            self.assertEqual(cmr.main(base + ["--max-window-nonfinite-frac", "0.05"]), 1)
+            self.assertEqual(cmr.main(base + ["--max-window-nonfinite-frac", "0.05", "--nonfinite-from-step",
+                                              "1000"]), 0)
+            self.assertEqual(cmr.main(base + ["--max-window-nonfinite-frac", "0.4"]), 0)      # 33 % < 40 %
+            # one 1500-step bucket (steps 125-1500): 80 of 672 = 11.9 % > 10 %
+            self.assertEqual(cmr.main(base + ["--max-window-nonfinite-frac", "0.1", "--nonfinite-window-steps",
+                                              "1500"]), 1)
+            self.assertEqual(cmr.main(base + ["--max-window-nonfinite-frac", "0.12", "--nonfinite-window-steps",
+                                              "1500"]), 0)
+        self.assertIn("FAIL nonfinite_window_deform", out.getvalue())
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            for bad in (["--max-window-nonfinite-frac", "2"], ["--nonfinite-window-steps", "0"],
+                        ["--nonfinite-from-step", "-1"]):
+                with self.assertRaises(SystemExit):
+                    cmr.main(base + bad)
 
 
 class TestLinear(CheckMixedRunCase):

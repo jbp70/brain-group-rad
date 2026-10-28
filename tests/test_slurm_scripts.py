@@ -28,7 +28,8 @@ RECIPE_ENV = ("GRAD_BALANCE", "BN_RECAL_BATCHES", "BN_RECAL_FREEZE", "SKIP_PROB"
               "CASCADE_FROM", "PROJ", "REPO", "RESULTS", "DATA", "SIF", "SCRATCH_ROOT", "TMPDIR", "SLURM_CPUS_PER_TASK",
               "WIDTHS", "KNOBS", "MIN_PAIRS", "LEAN_LOSSES", "PREFETCH", "CKPT_EVERY",
               "INTENSITY_AUG_DEVICE", "TF_MEM_LIMIT_MB", "PAIR_RECOMPUTE", "VAL_IMAGE_CHUNK", "VAL_PAIR_CHUNK",
-              "BN_RECAL_VALIDATE")
+              "BN_RECAL_VALIDATE", "FP16_ACT_CLIP", "FP16_ACT_CLIP_SCOPE", "DEFORM_DECODER_DTYPE",
+              "BN_EPSILON_OVERRIDE")
 
 
 def _read(path):
@@ -305,13 +306,15 @@ class TestStubRuns(unittest.TestCase):
                     ["--pair-recompute", "true"]):
             self.assertTrue(self._has_seq(main, seq), seq)
         for flag in ("--filters", "--decoder-widths", "--integration-steps", "--task-loss-weights",
-                     "--val-group-size"):
+                     "--val-group-size", "--fp16-act-clip", "--fp16-act-clip-scope", "--deform-decoder-dtype",
+                     "--bn-epsilon-override", "--nonfinite-patience-task"):
             self.assertNotIn(flag, main)
         self.assertEqual(chk[1], "tests/gpu/check_mixed_run.py")
         for seq in (["--expect-cascade-stages", "2"], ["--expect-min-pairs", "n"], ["--expect-bn-recal", "true"],
                     ["--memory-budget-mb", "36864"], ["--project-steps", "8000"],
                     ["--project-val-every", "500"], ["--expect-cascade", "true"],
-                    ["--max-nonfinite-frac", "0.06"], ["--tasks", "rigid,affine,deform"]):
+                    ["--max-nonfinite-frac", "0.06", "--max-window-nonfinite-frac", "0.05"],
+                    ["--tasks", "rigid,affine,deform"]):
             self.assertTrue(self._has_seq(chk, seq), seq)
         # BN_RECAL_BATCHES 0 -> no --expect-bn-recal
         r, calls = self.run_script(M9L1, **self.l1_env(BN_RECAL_BATCHES="0"))
@@ -350,6 +353,29 @@ class TestStubRuns(unittest.TestCase):
         for env in (dict(INTENSITY_AUG_DEVICE="dali"), dict(INTENSITY_AUG_DEVICE="gpu"),
                     dict(TF_MEM_LIMIT_MB="4e4"), dict(PAIR_RECOMPUTE="yes"), dict(VAL_IMAGE_CHUNK="-1"),
                     dict(VAL_PAIR_CHUNK="0"), dict(BN_RECAL_VALIDATE="no")):
+            r, calls = self.run_script(M9L1, **self.l1_env(**env))
+            self.assertEqual(r.returncode, 2, (env, r.stderr))
+            self.assertIsNone(calls)
+
+    def test_m9_level1_mitigations(self):
+        """nonfinite-fixes D11: env overrides emit their flags before EXTRA_ARGS; invalid values exit 2."""
+        self._m9_stub()
+        r, calls = self.run_script(M9L1, **self.l1_env(FP16_ACT_CLIP="30000", DEFORM_DECODER_DTYPE="float32",
+                                                       BN_EPSILON_OVERRIDE="1e-3", EXTRA_ARGS="--seed 3"))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        main = self._args(calls[0])
+        self.assertTrue(self._has_seq(main, ["--fp16-act-clip", "30000", "--fp16-act-clip-scope", "deform_decoder",
+                                             "--deform-decoder-dtype", "float32", "--bn-epsilon-override", "1e-3",
+                                             "--seed", "3"]), main)
+        self.assertIn("fp16 act clip 30000 (deform_decoder)", r.stdout)
+        r, calls = self.run_script(M9L1, **self.l1_env(FP16_ACT_CLIP="20000", FP16_ACT_CLIP_SCOPE="all"))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        main = self._args(calls[0])
+        self.assertTrue(self._has_seq(main, ["--fp16-act-clip", "20000", "--fp16-act-clip-scope", "all"]))
+        for flag in ("--deform-decoder-dtype", "--bn-epsilon-override"):
+            self.assertNotIn(flag, main)
+        for env in (dict(FP16_ACT_CLIP="abc"), dict(FP16_ACT_CLIP="40000"), dict(FP16_ACT_CLIP_SCOPE="enc"),
+                    dict(DEFORM_DECODER_DTYPE="half"), dict(BN_EPSILON_OVERRIDE="-1")):
             r, calls = self.run_script(M9L1, **self.l1_env(**env))
             self.assertEqual(r.returncode, 2, (env, r.stderr))
             self.assertIsNone(calls)

@@ -72,6 +72,16 @@ Tasks: rigid, affine (linear) and deform. Passes (exit 0) when:
     1.3 x (S x mean step + (S / val_every) x median val/wall_s + recal elapsed_s); missing keys
     print n/a; ``--project-val-every V`` > 0 uses V instead of the run's val_every, e.g. 500
     for the long run when analysing a VAL_EVERY 100 smoke). Never failures.
+* nonfinite-fixes (`.agents/tasks/nonfinite-fixes/plan.md` D7), optional and off by default:
+  - ``--max-window-nonfinite-frac F`` (> 0; scripts pass 0.05) with ``--nonfinite-window-steps W``
+    (500) and ``--nonfinite-from-step S`` (100): per task one ``nonfinite_window_<task>`` result.
+    The logged ``train_<task>/nonfinite_steps`` / ``window_steps`` of records with step > S are
+    summed into W-step buckets; buckets with < 20 task steps are skipped; FAIL if a bucket's
+    fraction > F (detail: first such bucket, counts, the first record step with a non-finite
+    step). Runs without these keys (older code) PASS as "skipped".
+  - ``loss_scale`` INFO line whenever ``optimizer/loss_scale`` is logged (AMP): last / min value
+    and the number of log windows at the floor (<= 1); "WARN" in the text when the last value is
+    at the floor. Never a failure.
 INFO lines carry passed=True and the detail prefix 'INFO', so they never change the PASS/FAIL
 tally; they are printed with the label INFO.
 Prints one line per criterion and writes nothing.
@@ -109,6 +119,10 @@ DEFORM_EXTRA_KEYS = ("neg_jac_pct", "inv_consistency_mm", "ncc_template", "ncc_p
 VAL_WALL_KEY = "val/wall_s"
 GPU_PEAK_KEY = "gpu_peak_mb"
 PROJECT_MARGIN = 1.3
+# nonfinite-fixes (plan D7): per-task, per-window non-finite rate and the AMP loss scale.
+LOSS_SCALE_KEY = "optimizer/loss_scale"
+MIN_WINDOW_TASK_STEPS = 20       # buckets with fewer steps of the task are not judged
+LOSS_SCALE_FLOOR = 1.0
 
 
 def _f32(x):
@@ -544,10 +558,67 @@ def _step_time(recs, tasks, args, project_steps, project_val_every=0):
                  _fmt(first_wall), len(walls), recal, project_steps, PROJECT_MARGIN, n_val, proj))]
 
 
+def _check_nonfinite_windows(recs, tasks, max_frac, window_steps, from_step):
+    """Per task: aggregate the logged ``train_<t>/nonfinite_steps`` / ``window_steps`` of the train
+    records with step > from_step into buckets (step - 1) // window_steps; FAIL if any bucket with
+    >= MIN_WINDOW_TASK_STEPS task steps has a non-finite fraction > max_frac (detail: the first
+    such bucket and the first record step in it with non-finite steps)."""
+    res = []
+    for t in tasks:
+        nk, wk = "train_%s/nonfinite_steps" % t, "train_%s/window_steps" % t
+        rows = [(r["step"], r["data"][nk], r["data"][wk]) for r in recs
+                if nk in r["data"] and wk in r["data"]]
+        name = "nonfinite_window_%s" % t
+        if not rows:
+            res.append((name, True, "skipped: no %s logged" % nk))
+            continue
+        buckets = {}
+        for step, bad, n in rows:
+            if step <= from_step:
+                continue
+            b = buckets.setdefault((step - 1) // window_steps, [0, 0, None])
+            b[0] += int(bad)
+            b[1] += int(n)
+            if int(bad) > 0 and b[2] is None:
+                b[2] = step
+        judged = [(k, v) for k, v in sorted(buckets.items()) if v[1] >= MIN_WINDOW_TASK_STEPS]
+        failing = [(k, v) for k, v in judged if v[0] > max_frac * v[1]]
+        if failing:
+            k, (bad, n, first) = failing[0]
+            res.append((name, False, "task %s: %d of %d steps non-finite (%.1f %% > %.1f %%) in window "
+                        "steps %d-%d (first logged at step %s); %d of %d windows over the limit"
+                        % (t, bad, n, 100.0 * bad / n, 100.0 * max_frac, k * window_steps + 1,
+                           (k + 1) * window_steps, first, len(failing), len(judged))))
+        else:
+            worst = max((v[0] / float(v[1]) for _, v in judged), default=0.0)
+            res.append((name, True, "task %s: %d windows of %d steps after step %d judged, max "
+                        "non-finite %.1f %% (limit %.1f %%)" % (t, len(judged), window_steps, from_step,
+                                                                100.0 * worst, 100.0 * max_frac)))
+    return res
+
+
+def _loss_scale_info(recs):
+    """INFO loss_scale line when ``optimizer/loss_scale`` is logged (never a failure)."""
+    vals = [(r["step"], float(r["data"][LOSS_SCALE_KEY])) for r in recs
+            if _finite(r["data"].get(LOSS_SCALE_KEY))]
+    if not vals:
+        return []
+    last = vals[-1][1]
+    lo_step, lo = min(vals, key=lambda sv: sv[1])
+    floor = sum(1 for _, v in vals if v <= LOSS_SCALE_FLOOR)
+    detail = "INFO last %g, min %g (step %d), %d of %d log windows at the floor (<= 1)" % (
+        last, lo, lo_step, floor, len(vals))
+    if last <= LOSS_SCALE_FLOOR:
+        detail = ("INFO WARN loss scale at the floor (1): healthy tasks train with fp16 gradient "
+                  "underflow risk; " + detail[len("INFO "):])
+    return [("loss_scale", True, detail)]
+
+
 def check(run_dir, tasks, steps, expect_best=True, expect_init_weights=None, expect_enc_grad=False,
           expect_cascade=False, expect_bn_recal=False, expect_skip=False, grad_balance_rule=False,
           grad_balance_from_step=GRAD_BALANCE_FROM_STEP, max_nonfinite_frac=0.0, expect_cascade_stages=1,
-          expect_min_pairs=None, memory_budget_mb=0, project_steps=0, project_val_every=0):
+          expect_min_pairs=None, memory_budget_mb=0, project_steps=0, project_val_every=0,
+          max_window_nonfinite_frac=0.0, nonfinite_window_steps=500, nonfinite_from_step=100):
     """Returns (ok, [(name, passed, detail)]). ``expect_init_weights`` None (not checked) |
     'none' (not checked) | 'full' | 'partial'; ``expect_enc_grad``: check the milestone-7
     encoder grad-norm diagnostics. Milestone 8 (module docstring): ``expect_cascade``,
@@ -555,8 +626,11 @@ def check(run_dir, tasks, steps, expect_best=True, expect_init_weights=None, exp
     the verdict is INFO only) with ``grad_balance_from_step``. Milestone 9 phase 2:
     ``expect_cascade_stages`` 1 | 2 (2 implies ``expect_cascade``), ``expect_min_pairs`` None /
     'none' (not checked) | '1' | 'n', ``memory_budget_mb`` and ``project_steps`` (INFO only,
-    0 = off; ``project_val_every`` > 0 overrides the run's val_every in the projection). The
-    defaults reproduce the milestone-8 checks."""
+    0 = off; ``project_val_every`` > 0 overrides the run's val_every in the projection).
+    nonfinite-fixes: ``max_window_nonfinite_frac`` F > 0 (default 0 = off) adds one
+    ``nonfinite_window_<task>`` result per task (``nonfinite_window_steps`` W, records with step >
+    ``nonfinite_from_step``); a ``loss_scale`` INFO line is added whenever
+    ``optimizer/loss_scale`` is logged. The defaults reproduce the milestone-8 checks."""
     if expect_cascade_stages not in (1, 2):
         raise ValueError("expect_cascade_stages must be 1 or 2, got %r" % (expect_cascade_stages,))
     res = []
@@ -613,6 +687,10 @@ def check(run_dir, tasks, steps, expect_best=True, expect_init_weights=None, exp
                     "steps, AMP loss-scale overflows)" % (nf, limit, 100.0 * max_nonfinite_frac, int(steps))))
     else:
         res.append(("finite_steps", nf == 0, "non-finite steps: %s" % nf))
+    if max_window_nonfinite_frac > 0:
+        res += _check_nonfinite_windows(recs, tasks, max_window_nonfinite_frac,
+                                        nonfinite_window_steps, nonfinite_from_step)
+    res += _loss_scale_info(recs)
     pngs = ["%s_step%07d.png" % (t, final) for t in tasks]
     have = set(os.listdir(os.path.join(run_dir, "val_png"))) if os.path.isdir(os.path.join(run_dir, "val_png")) else set()
     res.append(("val_png", all(p in have for p in pngs), "PNGs %s present: %s" % (pngs, [p in have for p in pngs])))
@@ -687,9 +765,22 @@ def main(argv=None):
     ap.add_argument("--project-val-every", type=int, default=0,
                     help="validation cadence of the projected run in the step_time line (e.g. 500 for "
                     "the long run when analysing a VAL_EVERY 100 smoke); 0 = the analysed run's val_every")
+    ap.add_argument("--max-window-nonfinite-frac", type=float, default=0.0,
+                    help="nonfinite-fixes: FAIL if any task's non-finite fraction in a window of "
+                    "--nonfinite-window-steps steps (after --nonfinite-from-step) exceeds this; "
+                    "0 = off (default). The scripts pass 0.05")
+    ap.add_argument("--nonfinite-window-steps", type=int, default=500,
+                    help="window length in steps for --max-window-nonfinite-frac (default %(default)s)")
+    ap.add_argument("--nonfinite-from-step", type=int, default=100,
+                    help="--max-window-nonfinite-frac ignores log records with step <= this (early AMP "
+                    "loss-scale overflows; default %(default)s)")
     a = ap.parse_args(argv)
     if a.project_val_every < 0:
         ap.error("--project-val-every must be >= 0, got %d" % a.project_val_every)
+    if not (math.isfinite(a.max_window_nonfinite_frac) and 0 <= a.max_window_nonfinite_frac <= 1):
+        ap.error("--max-window-nonfinite-frac must be in [0, 1], got %r" % a.max_window_nonfinite_frac)
+    if a.nonfinite_window_steps < 1 or a.nonfinite_from_step < 0:
+        ap.error("--nonfinite-window-steps must be >= 1 and --nonfinite-from-step >= 0")
     tasks = [t for t in a.tasks.split(",") if t]
     unknown = [t for t in tasks if t not in LINEAR_TASKS + (DEFORM_TASK,)]
     if unknown:
@@ -701,7 +792,10 @@ def main(argv=None):
                     grad_balance_from_step=a.grad_balance_from_step,
                     max_nonfinite_frac=a.max_nonfinite_frac, expect_cascade_stages=a.expect_cascade_stages,
                     expect_min_pairs=a.expect_min_pairs, memory_budget_mb=a.memory_budget_mb,
-                    project_steps=a.project_steps, project_val_every=a.project_val_every)
+                    project_steps=a.project_steps, project_val_every=a.project_val_every,
+                    max_window_nonfinite_frac=a.max_window_nonfinite_frac,
+                    nonfinite_window_steps=a.nonfinite_window_steps,
+                    nonfinite_from_step=a.nonfinite_from_step)
     for name, passed, detail in res:
         label = "INFO" if passed and detail.startswith("INFO") else ("PASS" if passed else "FAIL")
         print("%s %-22s %s" % (label, name, detail))

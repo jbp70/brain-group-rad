@@ -91,6 +91,19 @@
 # it exceeds the limit, resubmit with the same RUN_NAME (resumable).
 # Resume plan: --resume (default true) restores ckpt/last (every CKPT_EVERY steps) and the RNGs;
 # resubmit the identical line with the same RUN_NAME (Jay's approval; at most two active jobs).
+#
+# Non-finite mitigations (nonfinite-fixes, default off; decide after the m9 NaN probe; report
+# .agents/tasks/nonfinite-fixes/report.md). No flag is emitted while a value is at its default.
+#   FP16_ACT_CLIP (default 0 = off; 0 < C <= 32000, e.g. 30000) -> --fp16-act-clip C with
+#     FP16_ACT_CLIP_SCOPE (deform_decoder | all, default deform_decoder) -> --fp16-act-clip-scope.
+#   DEFORM_DECODER_DTYPE (policy | float16 | float32, default policy) -> --deform-decoder-dtype
+#     (float32 = deform decoder in float32 under AMP, ~2x decoder activation memory).
+#   BN_EPSILON_OVERRIDE (default 0 = off) -> --bn-epsilon-override (pass it again on resume: the
+#     same env line does).
+#   Linear-only ratio: the deform-scoped clip and the decoder dtype are dropped with a NOTE.
+# The per-task non-finite guard (--nonfinite-patience-task, default 20) is always on; override
+# with EXTRA_ARGS. The checker also fails a task with > 5 % non-finite steps in any 500-step
+# window after step 100 (--max-window-nonfinite-frac 0.05).
 set -euo pipefail
 
 PROJ="${PROJ:-/autofs/space/crater_001/users/jn85/BrainRegProjects/GroupwiseReg}"
@@ -192,6 +205,34 @@ HAS_LINEAR=false
 case ",$TASKS," in *,deform,*) HAS_DEFORM=true ;; esac
 case ",$TASKS," in *,rigid,*|*,affine,*) HAS_LINEAR=true ;; esac
 
+# Non-finite mitigations (nonfinite-fixes; all default off, no flag emitted when off).
+FP16_ACT_CLIP="${FP16_ACT_CLIP:-0}"
+FP16_ACT_CLIP_SCOPE="${FP16_ACT_CLIP_SCOPE:-deform_decoder}"
+DEFORM_DECODER_DTYPE="${DEFORM_DECODER_DTYPE:-policy}"
+BN_EPSILON_OVERRIDE="${BN_EPSILON_OVERRIDE:-0}"
+need_float FP16_ACT_CLIP "$FP16_ACT_CLIP"
+need_float BN_EPSILON_OVERRIDE "$BN_EPSILON_OVERRIDE"
+need_choice FP16_ACT_CLIP_SCOPE "$FP16_ACT_CLIP_SCOPE" deform_decoder all
+need_choice DEFORM_DECODER_DTYPE "$DEFORM_DECODER_DTYPE" policy float16 float32
+is_pos() { awk -v x="$1" 'BEGIN { exit !(x + 0 > 0) }'; }
+MITIG_ARGS=""
+if is_pos "$FP16_ACT_CLIP"; then
+    awk -v x="$FP16_ACT_CLIP" 'BEGIN { exit !(x + 0 <= 32000) }' || die "FP16_ACT_CLIP must be <= 32000, got '$FP16_ACT_CLIP'"
+    if [ "$FP16_ACT_CLIP_SCOPE" = deform_decoder ] && [ "$HAS_DEFORM" = false ]; then
+        echo "NOTE: linear-only ratio, deform-scoped FP16_ACT_CLIP dropped"
+    else
+        MITIG_ARGS="--fp16-act-clip $FP16_ACT_CLIP --fp16-act-clip-scope $FP16_ACT_CLIP_SCOPE"
+    fi
+fi
+if [ "$DEFORM_DECODER_DTYPE" != policy ]; then
+    if [ "$DEFORM_DECODER_DTYPE" = float32 ] && [ "$HAS_DEFORM" = false ]; then
+        echo "NOTE: linear-only ratio, DEFORM_DECODER_DTYPE dropped"
+    else
+        MITIG_ARGS="$MITIG_ARGS --deform-decoder-dtype $DEFORM_DECODER_DTYPE"
+    fi
+fi
+if is_pos "$BN_EPSILON_OVERRIDE"; then MITIG_ARGS="$MITIG_ARGS --bn-epsilon-override $BN_EPSILON_OVERRIDE"; fi
+
 DEFORM_LOSSES="--lambda-dice-template 1 --lambda-pdice 1 --lambda-ncc-template 1 --lambda-ncc-pair 1 --lambda-smooth 0.5 --p-pdice 0.1"
 if [ "$HAS_DEFORM" = true ]; then
     if [ "$GRAD_CKPT" = none ]; then
@@ -242,11 +283,13 @@ MAIN=(main.py --data "$DATA" --results "$RESULTS" --run-name "$RUN_NAME" --level
       --deform-decoder "$DEFORM_DECODER" $START_ARGS $LIN_ARGS $INIT_ARGS
       --val-pair-chunk "$VAL_PAIR_CHUNK" --val-png true
       --num-threads "${SLURM_CPUS_PER_TASK:-3}" --log-every 25 --log-backend jsonl
-      $VAL_ARGS $DEFORM_ARGS $MEM_ARGS $EXTRA_ARGS)
+      $VAL_ARGS $DEFORM_ARGS $MEM_ARGS $MITIG_ARGS $EXTRA_ARGS)
 # AMP: the dynamic loss scale overflows a few times early on (m8: 10-11 of 8000), hence 0.06.
+# Per task: FAIL if > 5 % of a task's steps in any 500-step window after step 100 are non-finite.
 # shellcheck disable=SC2206
 CHECK=(tests/gpu/check_mixed_run.py "$RESULTS/$RUN_NAME" --tasks "$TASKS" --steps "$STEPS"
-       --expect-min-pairs "$MIN_PAIRS" --max-nonfinite-frac 0.06 --memory-budget-mb 36864
+       --expect-min-pairs "$MIN_PAIRS" --max-nonfinite-frac 0.06 --max-window-nonfinite-frac 0.05
+       --memory-budget-mb 36864
        --project-steps "$PROJECT_STEPS" --project-val-every "$PROJECT_VAL_EVERY" --expect-enc-grad true
        $BALANCE_CHECK $LEVEL_CHECK_ARGS)
 
@@ -275,6 +318,7 @@ echo "run $RUN_NAME | level 4 | ratio $TASK_RATIO | steps $STEPS | val every $VA
 echo "optimizer $OPTIMIZER | lr $LR | wd $WD | grad balance $GRAD_BALANCE ($BAL_ARGS) | lowres $LOWRES_METHOD | min pairs $MIN_PAIRS | max pairs $MAX_PAIRS"
 echo "deform start $DEFORM_START (ramp $DEFORM_RAMP) | curriculum $CURRICULUM ($CURRICULUM_RAMP) | G $G_ROT deg / $G_TRANS mm from $G_START (ramp $G_RAMP) | init ${INIT:-none}"
 echo "memory: grad ckpt $GRAD_CKPT | pair recompute $PAIR_RECOMPUTE | lean losses $LEAN_LOSSES | tf memory limit ${TF_MEM_LIMIT_MB} MB (0 = growth) | val group ${VAL_GROUP_SIZE:-default} | val pair chunk $VAL_PAIR_CHUNK"
+echo "fp16 act clip $FP16_ACT_CLIP ($FP16_ACT_CLIP_SCOPE) | deform decoder dtype $DEFORM_DECODER_DTYPE | bn epsilon override $BN_EPSILON_OVERRIDE (0 = off)"
 
 rc=0
 singularity exec --nv -B /scratch -B /autofs -B /cluster -B /space -B /vast "$SIF" \

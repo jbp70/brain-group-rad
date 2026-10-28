@@ -1,0 +1,10 @@
+{
+  "verdict": "APPROVED",
+  "findings": [
+    "NIT (likely): lso_flag uses consecutive_task, which counts gradient-only AMP warm-up overflows, so a forward NaN right after a same-task warm-up overflow is LSO-skipped; harmless, but it contradicts the docstring/report claim that isolated forward NaNs always reach the LSO. Base the flag on save_streak or reword.",
+    "NIT (possible): with --nonfinite-patience-task 0 a task in a permanent hard-failure streak defers ckpt/last (and the final save) for the rest of the run; document it or bound the deferral.",
+    "NIT (possible): a2 warm start / --cascade-from with --deform-decoder-dtype float32 is not directly tested (copy_weights_from and checkpoint round trips are); low risk because variable names, shapes and dtypes are identical.",
+    "SCOPE (confirmed): Jay's float32_fine option (fp32 only for d1/d2/svf) and slurm/m11_fp32_width_memory.sh are not in this diff (the report defers them); the orchestrator must schedule them before submitting the pre-approved m11 memory job."
+  ],
+  "reviewDoc": "d:\\Research\\Brain_Registration_Projects\\brain-group-rad\\.agents\\tasks\\nonfinite-fixes/review.md"
+}

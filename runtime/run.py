@@ -19,8 +19,10 @@ of the level, `data_loading.dali_loader.linear_output_signature`)::
       optional --task-grad-norm (design 5.2 v3.10; default off = no op): grads *= target /
         max(g, eps) when the raw norm g >= min (else 1), then * w_task (w not in the objective)
       enc_diag = diag_enc_grad_norm_raw / _eff (encoder-only gradient norms, read-only)
-      tf.cond(finite, apply_gradients, skip); if not finite: restore BN statistics
-      step += 1;  returns loss terms, diag_*, grad_norm, finite, n_vars_updated
+      tf.cond(finite, apply_gradients, skip)   (under AMP: tf.cond(in_finite & ~lso_skipped, ...),
+        see "Non-finite guard"); if not finite: restore BN statistics
+      step += 1;  returns loss terms, diag_*, grad_norm, finite, n_vars_updated (+ lso_skipped
+        under AMP)
 
 Task balance diagnostics (milestone 7, logged for every task as window means):
 ``train_<task>/diag_enc_grad_norm_raw`` = encoder-only gradient norm of the unscaled task loss
@@ -42,8 +44,37 @@ the count as ``train/collapse_suspect`` and warns (stderr + a ``collapse_suspect
 reaches ``collapse_patience``.
 
 Images stay float32 (DALI cannot warp float16); the model casts them to its compute dtype.
-Under --amp the LossScaleOptimizer is always called (it skips non-finite updates itself and
-lowers its scale); the BN rollback and the logs use our finite flag.
+Under --amp the LossScaleOptimizer is called for every step with finite inputs (it skips
+non-finite updates itself and lowers its scale), except LSO-skipped steps (below); the BN
+rollback and the logs use our finite flag.
+
+Non-finite guard (`.agents/tasks/nonfinite-fixes/plan.md` D1-D6; motivated by job 10518952, where
+the deform task went NaN at ~5500 while the 1:1:2 linear steps kept resetting the global counter):
+* ``nonfinite_patience`` (old, global): consecutive non-finite steps of ANY task; checked first.
+* ``nonfinite_patience_task`` K (default 20, 0 = off): ``fit`` keeps a streak per task, reset only
+  by a finite step of the SAME task, and raises on the (K+1)-th consecutive non-finite step of
+  one task. Before either raise it logs a ``nonfinite_abort`` event and flushes the logs. No
+  automatic recovery.
+* ckpt/last protection: ``save_last`` is not called while any task has a streak >=
+  ``SAVE_LAST_MAX_STREAK`` (2; a single non-finite step changed no weights). AMP loss-scale
+  warm-up overflows (finite loss, non-finite gradients) are not counted in this streak, so the
+  warm-up never shifts the cadence (found by tests.test_main T-E1: a warm-up streak at step 3
+  had deferred the save, and the resume then repeated the BN recalibration). A blocked due save logs ``ckpt_last_deferred`` and is done at
+  the first later step without such a streak; the final save logs ``ckpt_last_skipped_final``
+  instead when blocked. Caveat: "pre-failure" means no open streak >= 2 at save time; with an
+  intermittent onset the weights just before the streak may already be close to failing, so
+  ckpt/best_deform (ckpt/best* saving is unchanged) is the safer restart point.
+* LSO skip (AMP only): a step of task t does not call the LSO (no scale halving, no counter reset,
+  no ``iterations`` increment) iff the previous step of t was non-finite AND its forward loss is
+  non-finite. Gradient-only overflows (finite loss) are the normal loss-scale warm-up and always
+  reach the LSO; so do isolated forward NaNs. A streaking task therefore halves the shared scale
+  once instead of driving it to 1 for the healthy tasks. The flag is a captured tf.Variable per
+  task (``Trainer._lso_skip``), so nothing re-traces.
+* Window logs: ``train_<task>/{window_steps, nonfinite_steps, nonfinite_frac}`` per log window and
+  ``optimizer/loss_scale`` under an LSO; stderr WARNING when a task's fraction > 0.1.
+* NOT implemented (possible future mode): keep a ``ckpt/good`` manager saved only when no task
+  had a non-finite step in the last window; on a trip restore model + optimizer + LSO + RNG
+  states from it, multiply the failing task's lr by 0.5 and allow at most 2 recoveries.
 
 Validation PNGs (`runtime.val_png`, when ``val_png_dir`` is set): every `validate()` writes
 ``<val_png_dir>/<task>_step<step:07d>.png`` from the eval-mode matrices of group
@@ -218,6 +249,19 @@ DEFORM_NCC_KEYS = ("ncc_tmpl", "ncc_pair", "ncc_tmpl_loss", "ncc_pair_loss")
 # Per-task encoder gradient norms (milestone 7, `Trainer._enc_grad_diagnostics`), logged as
 # train_<task>/<key> window means next to train_<task>/grad_norm (the task's pre-clip norm).
 ENC_GRAD_KEYS = ("diag_enc_grad_norm_raw", "diag_enc_grad_norm_eff")
+# Non-finite guard (nonfinite-fixes plan D1-D6; module docstring "Non-finite guard").
+# Per log window and task: train_<task>/<key> for key in NONFINITE_WINDOW_KEYS (steps of the task
+# in the window, its non-finite steps, their ratio), plus LOSS_SCALE_KEY under an LSO.
+NONFINITE_WINDOW_KEYS = ("window_steps", "nonfinite_steps", "nonfinite_frac")
+LOSS_SCALE_KEY = "optimizer/loss_scale"
+NONFINITE_WARN_FRAC = 0.1       # stderr WARNING above this window fraction of a task
+# A step of task t skips the LSO call iff AMP, the previous step of t was non-finite (streak >= 1
+# before the step, so this step would be the 2nd+ of a streak) and its forward loss is non-finite.
+LSO_SKIP_STREAK = 2
+# ckpt/last is not written while any task has a streak of >= this many non-finite steps. AMP
+# loss-scale warm-up overflows (finite loss, non-finite gradient norm; weights unchanged) do not
+# count towards this streak, so the warm-up never delays ckpt/last.
+SAVE_LAST_MAX_STREAK = 2
 DEFORM_DIAG_KEYS = ("diag_feat_spread", "diag_feat_rel_spread", "diag_dead_frac", "diag_v_rms_vox",
                     "diag_v_raw_mean_rms_vox", "diag_u_max_vox", "diag_fold_frac")
 # Per-task gradient normalisation (design 5.2 v3.10, `task_grad_norm_scale`): eps of the
@@ -463,6 +507,9 @@ class TrainConfig:
     seed: int = 0
     schedule: ScheduleConfig = dataclasses.field(default_factory=ScheduleConfig)
     nonfinite_patience: int = 20
+    # Per-task guard (nonfinite-fixes D1; 0 = off): raise when one task has more than this many
+    # consecutive non-finite steps of its own (finite steps of other tasks do not reset it).
+    nonfinite_patience_task: int = 20
     # None: val/mean_pair_rms_mm with more than one task, else val_<task>/pair_rms_mm
     # (`resolve_best_metric`; 'mean_pair_rms_mm' is accepted as an alias).
     best_metric: Optional[str] = None
@@ -706,6 +753,14 @@ class Trainer:
         self.history = []
         self.val_history = []
         self.reached = False
+        k_task = cfg.nonfinite_patience_task
+        if isinstance(k_task, bool) or not isinstance(k_task, (int, np.integer)) or k_task < 0:
+            raise ValueError("nonfinite_patience_task must be an int >= 0 (0 = off), got %r" % (k_task,))
+        # LSO skip flags (AMP only; nonfinite-fixes D5): read by the traced steps as captured
+        # variables (no retrace), set by `train_step`. Trainer attributes, not model variables,
+        # so they are in no checkpoint and not in the BN backup / restore.
+        self._lso_skip = ({t: tf.Variable(False, dtype=tf.bool, trainable=False, name="lso_skip_%s" % t)
+                           for t in self.sources} if cfg.amp else {})
         O.build_optimizer(self.optimizer, self.model.trainable_variables)
         self.rebuild_steps()
 
@@ -724,6 +779,20 @@ class Trainer:
         self._steps = {t: self._make_deform_step() if t == DEFORM else self._make_train_step(t)
                        for t in self.sources}
         self._val_fns = {}
+
+    def _apply_gate(self, task, amp, in_finite, finite, loss):
+        """(gate of the apply_gradients tf.cond, lso_skipped tensor or None) of a traced step.
+
+        Without AMP: (finite, None), today's graph. Under AMP (nonfinite-fixes D4 / D5): the LSO
+        is called iff the input is finite and the step is not LSO-skipped, where lso_skipped =
+        the captured flag ``self._lso_skip[task]`` (set by `fit` when the previous step of the
+        task was non-finite) AND a non-finite forward loss. Gradient-only overflows (finite
+        loss: the normal loss-scale warm-up) and isolated forward NaNs always reach the LSO."""
+        if not amp:
+            return finite, None
+        lso_skipped = tf.logical_and(tf.convert_to_tensor(self._lso_skip[task]),
+                                     tf.logical_not(tf.math.is_finite(loss)))
+        return tf.logical_and(in_finite, tf.logical_not(lso_skipped)), lso_skipped
 
     def _task_weight(self, task):
         """Objective multiplier of `task` (``cfg.task_loss_weights``, default 1.0)."""
@@ -888,7 +957,8 @@ class Trainer:
                 opt.apply_gradients(zip(gs_applied, vs))
                 return tf.constant(True)
 
-            tf.cond(in_finite if amp else finite, apply, lambda: tf.constant(False))
+            gate, lso_skipped = self._apply_gate(task, amp, in_finite, finite, terms["loss"])
+            tf.cond(gate, apply, lambda: tf.constant(False))
 
             def restore():
                 for v, b in zip(stats, backup):
@@ -905,6 +975,8 @@ class Trainer:
             if pairs_on:
                 res[PAIR_COUNT_KEY] = tf.size(batch["pair_i"])
             res.update(grad_norm=gnorm, finite=finite, n_vars_updated=tf.constant(len(pairs)))
+            if lso_skipped is not None:
+                res["lso_skipped"] = lso_skipped
             return res
 
         if cascade is not None:                   # residual affine excluded (Trainer.__init__)
@@ -1002,7 +1074,9 @@ class Trainer:
 
             # Under AMP the LSO must see non-finite gradients (it skips them itself and lowers
             # its scale); zeroed non-finite inputs give finite gradients, so they are gated here.
-            tf.cond(in_finite if amp else finite, apply, lambda: tf.constant(False))
+            # A task in a forward-NaN streak is kept away from the LSO (`_apply_gate`).
+            gate, lso_skipped = self._apply_gate(task, amp, in_finite, finite, terms["loss"])
+            tf.cond(gate, apply, lambda: tf.constant(False))
 
             def restore():
                 for v, b in zip(stats, backup):
@@ -1019,6 +1093,8 @@ class Trainer:
             if pairs_on:
                 res[PAIR_COUNT_KEY] = tf.size(batch["pair_i"])
             res.update(grad_norm=gnorm, finite=finite, n_vars_updated=tf.constant(len(pairs)))
+            if lso_skipped is not None:
+                res["lso_skipped"] = lso_skipped
             return res
 
         if cascade is not None:                   # one extra trailing input: skip bool[] (design section 6)
@@ -1059,13 +1135,18 @@ class Trainer:
             out["control_version_lag"] = float(writer.version - ver.min()) if writer is not None else 0.0
         return out
 
-    def train_step(self, task, batch_tuple, skip=False):
+    def train_step(self, task, batch_tuple, skip=False, lso_skip=False):
         """Run one step of `task` on a DALI-format tuple (control extras are ignored). Returns
         Python scalars. ``skip`` (cascade only, design section 6): skip the frozen stage in this step
         (passed as the step's trailing bool input; ignored without a cascade). In stage mode
         (retrain-prereqs design 4.3) ``skip`` is a tuple / list of n_stages bools in the order of
-        ``self._frozen_levels`` (a bare bool raises TypeError)."""
+        ``self._frozen_levels`` (a bare bool raises TypeError). ``lso_skip`` (AMP only, ignored
+        otherwise; nonfinite-fixes D4): do not call the LossScaleOptimizer if this step's forward
+        loss is non-finite (`fit` sets it while the task is in a non-finite streak); the result
+        then has ``lso_skipped`` True."""
         batch_tuple, _ = self.split_batch(task, batch_tuple)
+        if self._lso_skip:
+            self._lso_skip[task].assign(bool(lso_skip))
         if self.cascade is None:
             out = self._steps[task](*batch_tuple)
         elif self._skip_mode == "stage":
@@ -1075,8 +1156,11 @@ class Trainer:
             out = self._steps[task](*batch_tuple, tf.constant([bool(s) for s in skip], tf.bool))
         else:
             out = self._steps[task](*batch_tuple, tf.constant(bool(skip)))
-        res = {k: float(v.numpy()) for k, v in out.items() if k not in ("finite", "n_vars_updated")}
+        res = {k: float(v.numpy()) for k, v in out.items()
+               if k not in ("finite", "n_vars_updated", "lso_skipped")}
         res["finite"] = bool(out["finite"].numpy())
+        if "lso_skipped" in out:
+            res["lso_skipped"] = bool(out["lso_skipped"].numpy())
         res["n_vars_updated"] = int(out["n_vars_updated"].numpy())
         return res
 
@@ -1778,6 +1862,34 @@ class Trainer:
                 self.checkpoint.maybe_save_best(val[key], name=name)
         return val
 
+    def _nonfinite_window_metrics(self, step, m, win_steps, win_nonfinite):
+        """D6: add train_<task>/{window_steps, nonfinite_steps, nonfinite_frac} for every task with
+        a step in the log window, and LOSS_SCALE_KEY under a LossScaleOptimizer, to the record `m`;
+        stderr WARNING when a task's window fraction exceeds NONFINITE_WARN_FRAC."""
+        for t, n in win_steps.items():
+            if n <= 0:
+                continue
+            bad = win_nonfinite[t]
+            frac = bad / float(n)
+            pre = "train_%s/" % t
+            m[pre + "window_steps"] = n
+            m[pre + "nonfinite_steps"] = bad
+            m[pre + "nonfinite_frac"] = frac
+            if frac > NONFINITE_WARN_FRAC:
+                print("WARNING step %d: task %s non-finite in %d of %d steps of the last log window "
+                      "(%.0f %%)" % (step, t, bad, n, 100.0 * frac), file=sys.stderr, flush=True)
+        if isinstance(self.optimizer, tf.keras.mixed_precision.LossScaleOptimizer):
+            m[LOSS_SCALE_KEY] = float(self.optimizer.loss_scale.numpy())
+
+    def _nonfinite_abort(self, step, task, streak, first_step, last_ckpt_step):
+        """D2: log the ``nonfinite_abort`` event and flush the logs before a guard raises."""
+        if self.logger is None:
+            return
+        self.logger.log_event(step, {"event": "nonfinite_abort", "task": task, "streak": streak,
+                                     "first_step": first_step, "last_step": step,
+                                     "last_ckpt_step": last_ckpt_step})
+        self.logger.flush()
+
     def _update_collapse(self, step, task, res):
         """Count consecutive collapse-suspect finite steps; warn once per streak at the patience."""
         cfg = self.cfg
@@ -1861,6 +1973,19 @@ class Trainer:
         acc = M.MeanAccumulator()
         timing = M.MeanAccumulator()
         consecutive = 0
+        # Per-task guard (D1): streak length and first step of the current streak, per task;
+        # reset only by a finite step of the same task. Window counters for D6.
+        consecutive_task = {t: 0 for t in self.sources}
+        streak_first = {t: None for t in self.sources}
+        # ckpt/last blocking (D3) counts only "hard" failures: AMP loss-scale warm-up overflows
+        # (finite loss, non-finite gradient norm) change no weights and do not block a save.
+        save_streak = {t: 0 for t in self.sources}
+        win_steps = {t: 0 for t in self.sources}
+        win_nonfinite = {t: 0 for t in self.sources}
+        k_task = int(cfg.nonfinite_patience_task)
+        amp = bool(cfg.amp)
+        pending_save = False            # a due ckpt/last save deferred by an open streak (D3)
+        last_saved_step = None
         saved_at = None
         last_val = {}
         best_window = None
@@ -1889,7 +2014,8 @@ class Trainer:
                              for lv in self._frozen_levels)
             else:
                 skip = cascade_skip_draw(cfg.seed, s, p_skip) if p_skip > 0 else False
-            res = self.train_step(task, batch, skip=skip)
+            lso_flag = amp and consecutive_task[task] >= LSO_SKIP_STREAK - 1
+            res = self.train_step(task, batch, skip=skip, lso_skip=lso_flag)
             t2 = time.perf_counter()
             done = s + 1
             rec = {"step": done, "task": task, "lr": lr, "data_ms": 1e3 * (t1 - t0),
@@ -1912,18 +2038,46 @@ class Trainer:
                 acc.update({"train_%s/%s" % (task, k): v for k, v in cm.items()})
             self.history.append(rec)
             timing.update({"time/data_ms": rec["data_ms"], "time/compute_ms": rec["compute_ms"]})
+            win_steps[task] += 1
             if not res["finite"]:
                 self.nonfinite_total += 1
                 consecutive += 1
+                consecutive_task[task] += 1
+                if consecutive_task[task] == 1:
+                    streak_first[task] = done
+                win_nonfinite[task] += 1
+                if not (amp and math.isfinite(res["loss"]) and not math.isfinite(res["grad_norm"])):
+                    save_streak[task] += 1
                 if self.logger is not None:
-                    self.logger.log_event(done, {"event": "nonfinite_step_skipped", "task": task,
-                                                 "loss": res["loss"], "grad_norm": res["grad_norm"],
-                                                 "nonfinite_total": self.nonfinite_total})
+                    ev = {"event": "nonfinite_step_skipped", "task": task,
+                          "loss": res["loss"], "grad_norm": res["grad_norm"],
+                          "nonfinite_total": self.nonfinite_total,
+                          "task_streak": consecutive_task[task]}
+                    if "lso_skipped" in res:
+                        ev["lso_skipped"] = res["lso_skipped"]
+                    self.logger.log_event(done, ev)
                 if consecutive > int(cfg.nonfinite_patience):
+                    self._nonfinite_abort(done, task, consecutive_task[task], streak_first[task],
+                                          last_saved_step)
                     raise RuntimeError("%d consecutive non-finite steps (last at step %d); stopping"
                                        % (consecutive, done))
+                if k_task and consecutive_task[task] > k_task:
+                    self._nonfinite_abort(done, task, consecutive_task[task], streak_first[task],
+                                          last_saved_step)
+                    raise RuntimeError(
+                        "task %s: %d consecutive non-finite steps of this task (first at step %d, "
+                        "last at step %d; finite steps of other tasks do not reset this count); "
+                        "stopping. ckpt/last was not written during the streak (last save at step "
+                        "%s); restart from ckpt/last or ckpt/best*, e.g. with a lower --lr, "
+                        "--fp16-act-clip or --deform-decoder-dtype float32"
+                        % (task, consecutive_task[task], streak_first[task], done,
+                           last_saved_step if last_saved_step is not None
+                           else "none since this fit() started"))
             else:
                 consecutive = 0
+                consecutive_task[task] = 0
+                save_streak[task] = 0
+                streak_first[task] = None
                 pre = "train_%s/" % task
                 acc.update({pre + k: res[k] for k in ENC_GRAD_KEYS})
                 acc.update({pre + "grad_norm": res["grad_norm"]})
@@ -1955,15 +2109,31 @@ class Trainer:
                 peak = _peak_gpu_mb()
                 if peak is not None:
                     m["gpu_peak_mb"] = peak
+                self._nonfinite_window_metrics(done, m, win_steps, win_nonfinite)
                 self._log(done, m)
                 acc.reset()
                 timing.reset()
+                for t in win_steps:
+                    win_steps[t] = win_nonfinite[t] = 0
             if self.val_sets and cfg.val_every and done % int(cfg.val_every) == 0:
                 last_val = self._validate_and_log(done)
             ckpt_every = cfg.ckpt_every if cfg.ckpt_every is not None else cfg.val_every
-            if self.checkpoint is not None and ckpt_every and done % int(ckpt_every) == 0:
-                self.checkpoint.save_last()
-                saved_at = done
+            due = bool(self.checkpoint is not None and ckpt_every and done % int(ckpt_every) == 0)
+            if due or pending_save:
+                # D3: never write ckpt/last while a task is in a streak >= SAVE_LAST_MAX_STREAK
+                # (the file on disk stays pre-failure); a blocked save is done at the first later
+                # step without such a streak.
+                streaks = {t: c for t, c in save_streak.items() if c >= SAVE_LAST_MAX_STREAK}
+                if streaks:
+                    if due:
+                        pending_save = True
+                        if self.logger is not None:
+                            self.logger.log_event(done, {"event": "ckpt_last_deferred",
+                                                         "streaks": dict(streaks)})
+                else:
+                    self.checkpoint.save_last()
+                    saved_at = last_saved_step = done
+                    pending_save = False
             if cfg.overfit:
                 w = self._window_center_rms()
                 if w is not None:
@@ -1982,7 +2152,13 @@ class Trainer:
                 and not (self.val_history and self.val_history[-1]["step"] == final)):
             last_val = self._validate_and_log(final)
         if self.checkpoint is not None and saved_at != final and final > start:
-            self.checkpoint.save_last()
+            streaks = {t: c for t, c in save_streak.items() if c >= SAVE_LAST_MAX_STREAK}
+            if streaks:
+                if self.logger is not None:
+                    self.logger.log_event(final, {"event": "ckpt_last_skipped_final",
+                                                  "streaks": dict(streaks)})
+            else:
+                self.checkpoint.save_last()
         if self.logger is not None:
             self.logger.flush()
         return {"start_step": start, "end_step": final, "nonfinite_total": self.nonfinite_total,

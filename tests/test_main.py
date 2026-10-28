@@ -143,6 +143,38 @@ class TestDeformMain(MainCase):
         self.assertEqual(os.listdir(os.path.join(d, "val_png")), ["deform_step0000002.png"])
         self.assertFalse(os.path.exists(os.path.join(d, "control")))
 
+    def test_fp16_mitigation_flags_reach_model(self):
+        # nonfinite-fixes a1 / a2 / a3 through main.py under --amp (overfit dry run, 2 steps).
+        import tensorflow as tf
+        self.addCleanup(tf.keras.mixed_precision.set_global_policy, "float32")       # --amp true
+        from models import group_net                             # main() imports the class lazily
+        seen = {}
+        real_init = group_net.GroupRegLevelModel.__init__
+
+        def spy(model, *a, **kw):
+            real_init(model, *a, **kw)
+            seen.setdefault("model", model)
+
+        group_net.GroupRegLevelModel.__init__ = spy
+        self.addCleanup(setattr, group_net.GroupRegLevelModel, "__init__", real_init)
+        rc = M.main(["--overfit-one-group", "--overfit-synthetic", "--dry-run", "--group-size", "4",
+                     "--task-ratio", "deform:1", "--results", os.path.join(self.tmp, "results"),
+                     "--run-name", "dfp16", "--amp", "true", "--fp16-act-clip", "30000",
+                     "--deform-decoder-dtype", "float32", "--bn-epsilon-override", "1e-3",
+                     "--nonfinite-patience-task", "5"] + NARROW_ARGS + COMMON)
+        self.assertEqual(rc, 0)
+        model = seen["model"]
+        self.assertEqual((model.fp16_act_clip, model.fp16_act_clip_scope, model.deform_decoder_dtype,
+                          model.bn_epsilon_override), (30000.0, "deform_decoder", "float32", 1e-3))
+        self.assertEqual(model.deform_decoder.d1.conv.compute_dtype, "float32")
+        self.assertEqual(model.encoder.l3.conv.compute_dtype, "float16")
+        self.assertEqual(model.deform_decoder.d1.fp16_act_clip, 30000.0)
+        with open(os.path.join(self.run_dir("dfp16"), "config.json")) as f:
+            args = json.load(f)["args"]
+        self.assertEqual((args["fp16_act_clip"], args["fp16_act_clip_scope"], args["deform_decoder_dtype"],
+                          args["bn_epsilon_override"], args["nonfinite_patience_task"]),
+                         (30000.0, "deform_decoder", "float32", 1e-3, 5))
+
     def test_synthetic_deform_ncc_dry_run(self):
         # v3.9: Dice + LNCC through main.py.
         rc = M.main(["--overfit-one-group", "--overfit-synthetic", "--dry-run", "--group-size", "4",

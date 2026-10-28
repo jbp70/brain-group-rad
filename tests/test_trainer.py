@@ -11,6 +11,8 @@ validation (identity baseline, PNG) and the deform best checkpoints.
 Narrow model, level 4, N = 4, synthetic phantom groups (tests.runtime_helpers) and the synthetic
 deform group (`fd.synthetic_deform_group`).
 """
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -32,8 +34,8 @@ from runtime import metrics as M
 from runtime import optimizers as O
 from runtime.logging import RunLogger, make_run_dir
 from runtime.run import (DEFORM_BEST_METRIC, DEFORM_DIAG_KEYS, DEFORM_LOSS_KEYS, DEFORM_NCC_KEYS, DIAG_KEYS,
-                         ENC_GRAD_KEYS, PAIR_COUNT_KEY, POSTPROCESS_SEED_OFFSET, TASK_GRAD_NORM_EPS, TASK_GRAD_NORM_KEYS,
-                         TaskSchedule, Trainer, TrainConfig, collapse_diagnostics, scale_gradients,
+                         ENC_GRAD_KEYS, LOSS_SCALE_KEY, NONFINITE_WINDOW_KEYS, PAIR_COUNT_KEY,
+                         POSTPROCESS_SEED_OFFSET, TASK_GRAD_NORM_EPS, TASK_GRAD_NORM_KEYS, TaskSchedule, Trainer, TrainConfig, collapse_diagnostics, scale_gradients,
                          task_grad_norm_scale)
 from runtime.schedulers import ScheduleConfig
 
@@ -1634,6 +1636,358 @@ class TestTaskGradNorm(DeformCase):
         for r in recs["off"]:
             for k in r:
                 self.assertFalse(any(k.endswith("/" + key) for key in TASK_GRAD_NORM_KEYS), k)
+
+
+# ============================================================ non-finite guard (nonfinite-fixes)
+def _find_seed(ratio, pred, n=64):
+    """A schedule seed whose first n draws (0-based step indices) satisfy pred(draws)."""
+    for seed in range(5000):
+        s = TaskSchedule(ratio, seed)
+        draws = [s.draw(i) for i in range(n)]
+        if pred(draws):
+            return seed, draws
+    raise AssertionError("no seed found")
+
+
+def _positions(draws, task):
+    return [i for i, t in enumerate(draws) if t == task]
+
+
+def _open_streaks(history):
+    """{step: largest per-task non-finite streak open after that step} from Trainer.history."""
+    cur, out = {}, {}
+    for h in history:
+        cur[h["task"]] = 0 if h["finite"] else cur.get(h["task"], 0) + 1
+        out[h["step"]] = max(cur.values())
+    return out
+
+
+class _SwitchSource:
+    """Yields `bad` for the first n_bad calls, then `good` (iterator, like FixedGroupSource)."""
+
+    def __init__(self, bad, good, n_bad):
+        self.bad, self.good, self.n_bad, self.calls = tuple(bad), tuple(good), int(n_bad), 0
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        self.calls += 1
+        return self.bad if self.calls <= self.n_bad else self.good
+
+
+class _KernelSwitchSource:
+    """Always yields `batch`; before call i (1-based) sets `kernel` to `bad` if i in bad_calls,
+    else to `good` (a forward-NaN deform decoder for exactly those steps, within one fit)."""
+
+    def __init__(self, batch, kernel, good, bad, bad_calls):
+        self.batch, self.kernel, self.good, self.bad = tuple(batch), kernel, good, bad
+        self.bad_calls, self.calls = set(bad_calls), 0
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        self.calls += 1
+        self.kernel.assign(self.bad if self.calls in self.bad_calls else self.good)
+        return self.batch
+
+
+class TestNonfiniteGuard(DeformCase):
+    """nonfinite-fixes D1-D6: per-task streak guard, ckpt/last protection, LSO skip, window logs."""
+
+    RATIO = {"rigid": 1.0, "deform": 1.0}
+
+    def nan_deform_batch(self):
+        imgs = self.dgroup["images"].copy()
+        imgs[0, 3, 4, 5, 0] = np.nan
+        return fd.to_deform_batch(imgs, self.dgroup["labels"], level=4)
+
+    def sources(self, deform_source):
+        return {"rigid": fd.FixedGroupSource(self.groups["rigid"]["batch"]), "deform": deform_source}
+
+    def logger(self, name):
+        return RunLogger(make_run_dir(self.tmp, name), backend="jsonl", tensorboard=False, quiet=True)
+
+    @staticmethod
+    def records(logger):
+        with open(logger.metrics_path) as f:
+            return [json.loads(line) for line in f]
+
+    def interleaved_seed(self, n_deform=4):
+        """Seed with a finite-task (rigid) step between the 1st and the n_deform-th deform step."""
+        def pred(d):
+            p = _positions(d, "deform")
+            return len(p) >= n_deform and "rigid" in d[p[0]:p[n_deform - 1]]
+        return _find_seed(self.RATIO, pred)
+
+    def attach_checkpoint(self, tr, name):
+        paths = make_run_dir(self.tmp, name)
+        tr.checkpoint = C.RunCheckpoint(paths["ckpt_last"], paths["ckpt_best"], tr.model, tr.optimizer,
+                                        tr.step, extra=tr.checkpoint_variables())
+        saves, orig = [], tr.checkpoint.save_last
+
+        def spy():
+            saves.append(int(tr.step.numpy()))
+            return orig()
+
+        tr.checkpoint.save_last = spy
+        return saves
+
+    def test_per_task_guard_trips_in_mixed_run(self):
+        seed, draws = self.interleaved_seed()
+        dpos = _positions(draws, "deform")[:4]
+        first, last = dpos[0] + 1, dpos[3] + 1
+        logger = self.logger("trip")
+        tr = self.make_deform(config(task_ratio=dict(self.RATIO), seed=seed, nonfinite_patience_task=3),
+                              sources=self.sources(fd.FixedGroupSource(self.nan_deform_batch())), logger=logger)
+        self.assertEqual(tr.cfg.nonfinite_patience, 20)
+        with self.assertRaises(RuntimeError) as cm:
+            tr.fit(60)
+        logger.close()
+        msg = str(cm.exception)
+        for part in ("task deform", "4 consecutive non-finite steps of this task", "first at step %d" % first,
+                     "last at step %d" % last, "finite steps of other tasks do not reset"):
+            self.assertIn(part, msg)
+        self.assertEqual(tr.history[-1]["step"], last)
+        self.assertTrue(all(not h["finite"] for h in tr.history if h["task"] == "deform"))
+        # finite rigid steps inside the streak: they reset the old global counter
+        self.assertTrue(any(h["task"] == "rigid" and h["finite"] and first < h["step"] < last for h in tr.history))
+        events = [r["data"] for r in self.records(logger) if "event" in r["data"]]
+        abort = [e for e in events if e["event"] == "nonfinite_abort"]
+        self.assertEqual(len(abort), 1)
+        self.assertEqual((abort[0]["task"], abort[0]["streak"], abort[0]["first_step"], abort[0]["last_step"]),
+                         ("deform", 4, first, last))
+        skipped = [e for e in events if e["event"] == "nonfinite_step_skipped"]
+        self.assertEqual([e["task_streak"] for e in skipped], [1, 2, 3, 4])
+        self.assertTrue(all("lso_skipped" not in e for e in skipped))           # no AMP
+        free_memory()
+        tr2 = self.make_deform(config(task_ratio=dict(self.RATIO), seed=seed, nonfinite_patience_task=0),
+                               sources=self.sources(fd.FixedGroupSource(self.nan_deform_batch())))
+        tr2.fit(30)                                                              # 0 = off: no raise
+        self.assertGreater(sum(1 for h in tr2.history if h["task"] == "deform"), 4)
+
+    def test_validation_of_patience(self):
+        for bad in (-1, 1.5, True):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                self.make_deform(config(task_ratio=dict(self.RATIO), nonfinite_patience_task=bad))
+
+    def test_ckpt_last_not_written_during_streak(self):
+        ckpt_every, n_bad = 4, 4
+
+        def pred(d):
+            p = _positions(d, "deform")
+            if len(p) < 5 or p[4] + 1 >= 22:
+                return False
+            blocked = range(p[1] + 1, p[4] + 1)                 # done values with an open streak >= 2
+            return any(s % ckpt_every == 0 for s in blocked) and (p[4] + 1) % ckpt_every != 0
+        seed, draws = _find_seed(self.RATIO, pred)
+        logger = self.logger("protect")
+        src = self.sources(_SwitchSource(self.nan_deform_batch(), self.dgroup["batch"], n_bad))
+        tr = self.make_deform(config(task_ratio=dict(self.RATIO), seed=seed, ckpt_every=ckpt_every,
+                                     nonfinite_patience_task=6), sources=src, logger=logger)
+        saves = self.attach_checkpoint(tr, "protect_ckpt")
+        tr.fit(24)
+        logger.close()
+        streaks = _open_streaks(tr.history)
+        blocked = {s for s, v in streaks.items() if v >= 2}
+        self.assertTrue(blocked)
+        self.assertFalse(set(saves) & blocked, (saves, sorted(blocked)))
+        deferred = [r for r in self.records(logger) if r["data"].get("event") == "ckpt_last_deferred"]
+        self.assertTrue(deferred)
+        for r in deferred:
+            self.assertEqual(r["step"] % ckpt_every, 0)
+            self.assertEqual(r["data"]["streaks"], {"deform": streaks[r["step"]]})
+            after = min(s for s in streaks if s > r["step"] and s not in blocked)
+            self.assertIn(after, saves)                          # the deferred save, off the cadence
+        self.assertTrue(any(s % ckpt_every for s in saves))
+        regular = [s for s in streaks if s % ckpt_every == 0 and s not in blocked]
+        self.assertTrue(set(regular) <= set(saves))              # finite cadence unchanged
+        free_memory()
+        # Raising variant: the last ckpt/last on disk predates the 2nd failing deform step.
+        seed, draws = self.interleaved_seed()
+        dpos = _positions(draws, "deform")
+        tr = self.make_deform(config(task_ratio=dict(self.RATIO), seed=seed, ckpt_every=1, nonfinite_patience_task=3),
+                              sources=self.sources(fd.FixedGroupSource(self.nan_deform_batch())))
+        saves = self.attach_checkpoint(tr, "protect_raise")
+        with self.assertRaises(RuntimeError):
+            tr.fit(60)
+        self.assertIn(dpos[0] + 1, saves)                        # a single failure does not block
+        self.assertLess(max(saves), dpos[1] + 1)
+        self.assertTrue(tr.checkpoint.latest_last.endswith("last-%d" % max(saves)), tr.checkpoint.latest_last)
+
+    def amp_model(self):
+        model = GroupRegLevelModel(4, narrow_config(dropout=0.0, seed=1, deform_decoder=True)).build_model(N)
+        _random_head_kernel(model)
+        return model
+
+    def test_lso_not_halved_by_streaking_task(self):
+        def pred(d):
+            p = _positions(d, "deform")
+            return len(p) >= 6 and p[5] < 20 and "rigid" in d[p[0]:p[4]]
+        seed, draws = _find_seed(self.RATIO, pred)
+        dpos = _positions(draws, "deform")
+        n_steps = dpos[5] + 1
+        try:
+            tf.keras.mixed_precision.set_global_policy("mixed_float16")
+            model = self.amp_model()
+            inner = O.make_optimizer("adam", lr=1e-3, clipnorm=None)
+            opt = tf.keras.mixed_precision.LossScaleOptimizer(inner, initial_scale=2.0 ** 4)
+            kern = model.deform_decoder.d1.conv.kernel
+            good = kern.numpy().copy()
+            bad = good.copy()
+            bad.flat[0] = np.nan
+            src = self.sources(_KernelSwitchSource(self.dgroup["batch"], kern, good, bad, range(1, 6)))
+            logger = self.logger("lso")
+            tr = Trainer(model, opt, src, self.groups["rigid"]["S"],
+                         config(task_ratio=dict(self.RATIO), seed=seed, amp=True, nonfinite_patience_task=50),
+                         logger=logger)
+            head0 = model.linear_decoder.rigid_head.kernel.numpy().copy()
+            tr.fit(n_steps)
+            logger.close()
+            dh = [h for h in tr.history if h["task"] == "deform"]
+            rh = [h for h in tr.history if h["task"] == "rigid"]
+            self.assertEqual([h["finite"] for h in dh], [False] * 5 + [True])
+            self.assertEqual([h["lso_skipped"] for h in dh], [False, True, True, True, True, False])
+            self.assertTrue(all(not np.isfinite(h["loss"]) for h in dh[:5]))
+            self.assertTrue(rh and all(h["finite"] and not h["lso_skipped"] for h in rh))
+            self.assertFalse(np.array_equal(head0, model.linear_decoder.rigid_head.kernel.numpy()))
+            self.assertEqual(float(opt.loss_scale.numpy()), 2.0 ** 3)        # halved once, not 5 times
+            # LSO calls: every rigid step, the first deform failure and the finite deform step
+            self.assertEqual(int(inner.iterations.numpy()), len(rh) + 2)
+            self.assertEqual(tr.trace_counts, {"rigid": 1, "deform": 1})
+            recs = [r["data"] for r in self.records(logger) if LOSS_SCALE_KEY in r["data"]]
+            self.assertEqual(len(recs), n_steps)
+            self.assertEqual(recs[-1][LOSS_SCALE_KEY], float(opt.loss_scale.numpy()))
+            # Control: the same forward-NaN step without the flag halves every time; with it, never.
+            kern.assign(bad)
+            scale = float(opt.loss_scale.numpy())
+            for i in range(3):
+                res = tr.train_step("deform", self.dgroup["batch"], lso_skip=False)
+                self.assertFalse(res["finite"] or res["lso_skipped"])
+                self.assertEqual(float(opt.loss_scale.numpy()), scale / 2.0 ** (i + 1))
+            scale = float(opt.loss_scale.numpy())
+            res = tr.train_step("deform", self.dgroup["batch"], lso_skip=True)
+            self.assertTrue(res["lso_skipped"])
+            self.assertEqual(float(opt.loss_scale.numpy()), scale)
+            self.assertEqual(tr.trace_counts, {"rigid": 1, "deform": 1})
+            self.assertNotIn("lso_skip_deform", [v.name.split(":")[0] for v in model.variables])
+        finally:
+            tf.keras.mixed_precision.set_global_policy("float32")
+
+    def test_gradient_overflow_and_isolated_nan_unchanged(self):
+        """Gradient-only overflows (finite loss) keep halving exactly as with plain train_step
+        calls; an isolated forward-NaN step halves once, as today."""
+        try:
+            tf.keras.mixed_precision.set_global_policy("mixed_float16")
+            with _OpDeterminism():
+                models, opts, trs = [], [], []
+                for i in range(2):
+                    m = GroupRegLevelModel(4, narrow_config(dropout=0.0, seed=1)).build_model(N)
+                    _random_head_kernel(m)
+                    if models:
+                        m.set_weights(models[0].get_weights())
+                    o = tf.keras.mixed_precision.LossScaleOptimizer(O.make_optimizer("adam", lr=1e-3),
+                                                                    initial_scale=2.0 ** 40)
+                    logger = self.logger("ovf%d" % i) if i == 0 else None
+                    trs.append(Trainer(m, o, {"rigid": fd.FixedGroupSource(self.groups["rigid"]["batch"])},
+                                       self.groups["rigid"]["S"],
+                                       config(amp=True, nonfinite_patience=60, nonfinite_patience_task=60,
+                                              ckpt_every=1),
+                                       logger=logger))
+                    models.append(m)
+                    opts.append(o)
+                k = 45
+                saves = self.attach_checkpoint(trs[0], "ovf_ckpt")
+                trs[0].fit(k)
+                # warm-up overflows (finite loss) change no weights: they never block ckpt/last
+                self.assertEqual(saves, list(range(1, k + 1)))
+                trs[0].logger.close()
+                scales_fit = [r["data"][LOSS_SCALE_KEY] for r in self.records(trs[0].logger)
+                              if LOSS_SCALE_KEY in r["data"]]
+                scales_step, finite_step = [], []
+                for _ in range(k):
+                    res = trs[1].train_step("rigid", self.groups["rigid"]["batch"])
+                    scales_step.append(float(opts[1].loss_scale.numpy()))
+                    finite_step.append(res["finite"])
+                self.assertGreater(finite_step.count(False), 1)              # consecutive overflows
+                self.assertTrue(all(np.isfinite(h["loss"]) for h in trs[0].history))
+                self.assertEqual([h["finite"] for h in trs[0].history], finite_step)
+                self.assertFalse(any(h["lso_skipped"] for h in trs[0].history))
+                self.assertEqual(scales_fit, scales_step)
+                self.assertEqual(int(O.inner_optimizer(opts[0]).iterations.numpy()),
+                                 int(O.inner_optimizer(opts[1]).iterations.numpy()))
+                for a, b in zip(models[0].variables, models[1].variables):
+                    self.assertTrue(np.array_equal(a.numpy(), b.numpy()), a.name)
+            free_memory()
+            tf.keras.mixed_precision.set_global_policy("mixed_float16")
+            # Isolated forward NaN in a mixed run: reaches the LSO (one halving), next step fine.
+            def pred(d):
+                p = _positions(d, "deform")
+                return len(p) >= 2 and p[1] < 16
+            seed, draws = _find_seed(self.RATIO, pred)
+            dpos = _positions(draws, "deform")
+            model = self.amp_model()
+            inner = O.make_optimizer("adam", lr=1e-3, clipnorm=None)
+            opt = tf.keras.mixed_precision.LossScaleOptimizer(inner, initial_scale=2.0 ** 4)
+            kern = model.deform_decoder.d1.conv.kernel
+            good = kern.numpy().copy()
+            bad = good.copy()
+            bad.flat[0] = np.nan
+            src = self.sources(_KernelSwitchSource(self.dgroup["batch"], kern, good, bad, [1]))
+            tr = Trainer(model, opt, src, self.groups["rigid"]["S"],
+                         config(task_ratio=dict(self.RATIO), seed=seed, amp=True))
+            tr.fit(dpos[1] + 1)
+            dh = [h for h in tr.history if h["task"] == "deform"]
+            self.assertEqual([(h["finite"], h["lso_skipped"]) for h in dh], [(False, False), (True, False)])
+            self.assertEqual(float(opt.loss_scale.numpy()), 2.0 ** 3)
+        finally:
+            tf.keras.mixed_precision.set_global_policy("float32")
+
+    def test_window_log_keys_and_warning(self):
+        seed, draws = self.interleaved_seed()
+        logger = self.logger("win")
+        src = self.sources(_SwitchSource(self.nan_deform_batch(), self.dgroup["batch"], 3))
+        tr = self.make_deform(config(task_ratio=dict(self.RATIO), seed=seed, log_every=4), sources=src,
+                              logger=logger)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            tr.fit(16)
+        logger.close()
+        recs = [r for r in self.records(logger) if "lr" in r["data"]]
+        self.assertEqual([r["step"] for r in recs], [4, 8, 12, 16])
+        warned = []
+        for r in recs:
+            window = [h for h in tr.history if r["step"] - 4 < h["step"] <= r["step"]]
+            for t in ("rigid", "deform"):
+                hs = [h for h in window if h["task"] == t]
+                keys = ["train_%s/%s" % (t, k) for k in NONFINITE_WINDOW_KEYS]
+                if not hs:
+                    for k in keys:
+                        self.assertNotIn(k, r["data"])
+                    continue
+                bad = sum(1 for h in hs if not h["finite"])
+                self.assertEqual([r["data"][k] for k in keys], [len(hs), bad, bad / float(len(hs))])
+                if bad / float(len(hs)) > 0.1:
+                    warned.append("WARNING step %d: task %s non-finite in %d of %d steps" % (r["step"], t, bad, len(hs)))
+            self.assertNotIn(LOSS_SCALE_KEY, r["data"])                       # no AMP
+        self.assertTrue(warned)
+        for w in warned:
+            self.assertIn(w, err.getvalue())
+        self.assertEqual(err.getvalue().count("non-finite in"), len(warned))
+        free_memory()
+        logger = self.logger("win_ok")
+        tr = self.make_deform(config(task_ratio=dict(self.RATIO), seed=seed, log_every=4), logger=logger)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            tr.fit(8)
+        logger.close()
+        recs = [r["data"] for r in self.records(logger) if "lr" in r["data"]]
+        for r in recs:
+            for t in ("rigid", "deform"):
+                if "train_%s/window_steps" % t in r:
+                    self.assertEqual((r["train_%s/nonfinite_steps" % t], r["train_%s/nonfinite_frac" % t]), (0, 0.0))
+        self.assertNotIn("non-finite in", err.getvalue())
 
 
 class TestTaskGradNormClipEquivalence(unittest.TestCase):

@@ -33,6 +33,7 @@ in central space already (A = I). Milestone-8 cascade hook: `models.diffeo.compo
 the previous level's fields upsampled by `diffeo.upsample_displacement`.
 """
 import collections
+import contextlib
 
 import numpy as np
 import tensorflow as tf
@@ -41,6 +42,7 @@ from data_loading import params as P
 from models import checkpointing
 from models import diffeo
 from models import layers as L
+from models import precision
 from models import transforms as tfm
 from models.config import ModelConfig
 
@@ -50,6 +52,9 @@ ALL_TASKS = TASKS + (DEFORM_TASK,)
 ENCODER_LAYERS = ("stem", "l2", "l3", "l4", "l5", "l6")
 DECODER_STAGES = ("d5", "d4", "d3", "d2", "d1")
 GRADIENT_CHECKPOINTING = ("none", "integrator", "decoder", "both", "full")
+FP16_ACT_CLIP_SCOPES = ("deform_decoder", "all")          # nonfinite-fixes a1
+FP16_ACT_CLIP_MAX = 32000.0     # two clipped split-conv terms sum to <= 64000 < 65504
+DEFORM_DECODER_DTYPES = ("policy", "float16", "float32")  # nonfinite-fixes a2
 BOTTLENECK_SHAPE = (5, 7, 6)
 
 
@@ -221,7 +226,8 @@ class DeformDecoder(tf.keras.layers.Layer):
         if len(skips) != len(ENCODER_LAYERS):
             raise ValueError("expected {} encoder skips, got {}".format(len(ENCODER_LAYERS),
                                                                         len(skips)))
-        x = skips[5]
+        # No-op when the dtypes match (default); float32 under --deform-decoder-dtype float32.
+        x = tf.cast(skips[5], self.compute_dtype)
         for name, skip in zip(DECODER_STAGES, (skips[4], skips[3], skips[2], skips[1], skips[0])):
             up, block = getattr(self, "up_" + name), getattr(self, name)
             if up is not None:
@@ -269,31 +275,84 @@ class GroupRegLevelModel(tf.keras.Model):
     checkpointing mode. split_group_conv (default False; design 3.5): `layers.set_split_group_conv`
     on every pre-activation group block (same variables). Neither is part of ModelConfig.
 
+    Opt-in float16 overflow mitigations (nonfinite-fixes; Python attributes, NOT ModelConfig
+    fields, so warm-start / cascade config checks are unaffected; defaults add no op):
+      fp16_act_clip C (0 = off, else (0, 32000]): `layers.set_fp16_act_clip` clips the float16
+        outputs of every GroupConvBlock (both split-conv terms and their sum) and
+        BatchNormWithSeparateAffine to [-C, C]. fp16_act_clip_scope 'deform_decoder' (default:
+        d5..d1 + svf_norm_act + the blocks' BN) or 'all' (every such layer of this model, encoder
+        and linear decoder too; this also changes the linear tasks). No-op under float32.
+      deform_decoder_dtype 'policy' (default) | 'float16' | 'float32': 'float32' constructs the
+        DeformDecoder (and so all its sublayers) under a float32 policy while the global policy is
+        mixed_float16; the fp16 skips are cast to float32, the encoder stays float16. Variables
+        are float32 with the same names/order in every mode, so checkpoints, warm start,
+        `copy_weights_from` and resume are compatible across dtypes. Costs ~2x decoder activation
+        memory (fine at levels 4/2; not expected to fit level 1 at 4 pairs under 40000 MB).
+      bn_epsilon_override E (0 = off): `layers.set_bn_epsilon` on every BatchNormWithSeparateAffine
+        of this model (LayerNorm / InstanceNorm untouched; config.bn_epsilon unchanged).
+
     Hooks: the linear cascade (design 4.7, milestone 8) warps the inputs by the previous level's
     A^-1 and composes Center(R A_prev) outside this single-level model; the deformable cascade
     composes fields with `models.diffeo.compose_cascade`.
     """
 
     def __init__(self, level, config=None, gradient_checkpointing="none", lean_sampler=False,
-                 split_group_conv=False, **kwargs):
+                 split_group_conv=False, fp16_act_clip=0.0, fp16_act_clip_scope="deform_decoder",
+                 deform_decoder_dtype="policy", bn_epsilon_override=0.0, **kwargs):
         super().__init__(**kwargs)
         self.level = P.check_level(level)
         self.config = config or ModelConfig()
         if gradient_checkpointing not in GRADIENT_CHECKPOINTING:
             raise ValueError("gradient_checkpointing must be one of {}, got {!r}".format(
                 GRADIENT_CHECKPOINTING, gradient_checkpointing))
+        fp16_act_clip = float(fp16_act_clip)
+        if not (fp16_act_clip == 0.0 or 0.0 < fp16_act_clip <= FP16_ACT_CLIP_MAX):
+            raise ValueError("fp16_act_clip must be 0 (off) or in (0, {:g}], got {!r}".format(
+                FP16_ACT_CLIP_MAX, fp16_act_clip))
+        if fp16_act_clip_scope not in FP16_ACT_CLIP_SCOPES:
+            raise ValueError("fp16_act_clip_scope must be one of {}, got {!r}".format(
+                FP16_ACT_CLIP_SCOPES, fp16_act_clip_scope))
+        if deform_decoder_dtype not in DEFORM_DECODER_DTYPES:
+            raise ValueError("deform_decoder_dtype must be one of {}, got {!r}".format(
+                DEFORM_DECODER_DTYPES, deform_decoder_dtype))
+        global_compute = tf.keras.mixed_precision.global_policy().compute_dtype
+        if deform_decoder_dtype == "float16" and global_compute != "float16":
+            raise ValueError("deform_decoder_dtype 'float16' needs a float16 global policy "
+                             "(mixed_float16), got compute dtype {}".format(global_compute))
+        bn_epsilon_override = float(bn_epsilon_override)
+        if not (bn_epsilon_override == 0.0 or (np.isfinite(bn_epsilon_override)
+                                               and bn_epsilon_override > 0.0)):
+            raise ValueError("bn_epsilon_override must be 0 (off) or finite > 0, got {!r}".format(
+                bn_epsilon_override))
+        if fp16_act_clip > 0 and fp16_act_clip_scope == "deform_decoder" \
+                and not self.config.deform_decoder:
+            raise ValueError("fp16_act_clip_scope 'deform_decoder' needs "
+                             "ModelConfig(deform_decoder=True)")
         self.gradient_checkpointing = gradient_checkpointing
         self.lean_sampler = bool(lean_sampler)
         self.split_group_conv = bool(split_group_conv)
+        self.fp16_act_clip = fp16_act_clip
+        self.fp16_act_clip_scope = fp16_act_clip_scope
+        self.deform_decoder_dtype = deform_decoder_dtype
+        self.bn_epsilon_override = bn_epsilon_override
         self.input_shape_level = tuple(P.LEVEL_SHAPE[self.level])
         self.spacing = P.LEVEL_SPACING[self.level]
         self.encoder = GroupEncoder(self.level, self.config, name="encoder")
         self.linear_decoder = LinearDecoder(self.config, name="linear_decoder")
         self.centering = tfm.GroupCentering(iters=self.config.centering_iters, name="centering")
-        self.deform_decoder = (DeformDecoder(self.level, self.config, name="deform_decoder")
-                               if self.config.deform_decoder else None)
+        decoder_scope = (precision.policy_scope("float32")
+                         if deform_decoder_dtype == "float32" and global_compute != "float32"
+                         else contextlib.nullcontext())
+        with decoder_scope:
+            self.deform_decoder = (DeformDecoder(self.level, self.config, name="deform_decoder")
+                                   if self.config.deform_decoder else None)
         if self.split_group_conv:
             L.set_split_group_conv(self, True)
+        if fp16_act_clip > 0:
+            L.set_fp16_act_clip(self.deform_decoder if fp16_act_clip_scope == "deform_decoder"
+                                else self, fp16_act_clip)
+        if bn_epsilon_override > 0:
+            L.set_bn_epsilon(self, bn_epsilon_override)
 
     def call(self, images, task="rigid", training=None, return_warped=False):
         if task == DEFORM_TASK:

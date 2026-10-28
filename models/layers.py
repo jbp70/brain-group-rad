@@ -477,6 +477,8 @@ class BatchNormWithSeparateAffine(tf.keras.layers.Layer):
     Python attribute read at trace time: re-trace tf.functions after changing it.
     Statistics are over every axis except the last, i.e. over the N images of the one group
     (and their voxels). Under mixed_float16 Keras computes BN in float32 internally.
+    ``fp16_act_clip`` (Python attribute, default 0 = off, read at trace time; nonfinite-fixes a1):
+    C > 0 clips the float16 output (after the affine) to [-C, C]; no op when 0 or not float16.
     """
 
     def __init__(self, momentum=0.99, epsilon=1e-5, stats_frozen=False, **kwargs):
@@ -485,10 +487,11 @@ class BatchNormWithSeparateAffine(tf.keras.layers.Layer):
                                                      center=False, scale=False, name="bn")
         self.affine = AffineParams(name="affine")
         self.stats_frozen = bool(stats_frozen)
+        self.fp16_act_clip = 0.0
 
     def call(self, x, training=None):
         bn_training = False if self.stats_frozen else training
-        return self.affine(self.bn(x, training=bn_training))
+        return clip_fp16(self.affine(self.bn(x, training=bn_training)), self.fp16_act_clip)
 
 
 class InstanceNormWithAffine(tf.keras.layers.Layer):
@@ -581,6 +584,38 @@ def set_split_group_conv(layer, on=True):
     return count
 
 
+def clip_fp16(x, clip):
+    """``tf.clip_by_value(x, -clip, clip)`` iff ``clip > 0`` and x is float16, else x unchanged
+    (trace-time Python check: no op is added otherwise; nonfinite-fixes a1)."""
+    if clip > 0 and x.dtype == tf.float16:
+        c = tf.constant(float(clip), dtype=x.dtype)
+        return tf.clip_by_value(x, -c, c)
+    return x
+
+
+def set_fp16_act_clip(layer, clip):
+    """Set `fp16_act_clip` on every `GroupConvBlock` and `BatchNormWithSeparateAffine` inside
+    `layer` (nonfinite-fixes a1; 0 = off adds no op). Read at trace time: re-trace tf.functions
+    after changing it. Clipped voxels get zero gradient (symptom treatment). Returns the count."""
+    count = 0
+    for m in [layer] + list(layer.submodules):
+        if isinstance(m, (GroupConvBlock, BatchNormWithSeparateAffine)):
+            m.fp16_act_clip = float(clip)
+            count += 1
+    return count
+
+
+def set_bn_epsilon(layer, eps):
+    """Set the Keras BN ``epsilon`` of every `BatchNormWithSeparateAffine` inside `layer`
+    (nonfinite-fixes a3; call before the first build/trace). LayerNorm / InstanceNorm epsilons are
+    not touched. Returns the count."""
+    count = 0
+    for m in batch_norm_layers(layer):
+        m.bn.epsilon = float(eps)
+        count += 1
+    return count
+
+
 def group_mean_concat(x):
     """concat(x_i, mean_j x_j) on the last axis; mean over the group (batch) axis 0, N dynamic."""
     mean = tf.reduce_mean(x, axis=0, keepdims=True)
@@ -630,6 +665,10 @@ class GroupConvBlock(_PreActivation):
     block computes conv(x, K[..., :C, :]) + conv(mean, K[..., C:, :]) + bias instead of
     conv(concat(x, mean)), so the doubled-channel tensor is never built. Same variables (the
     first call always takes the standard path); equal up to float rounding.
+
+    ``fp16_act_clip`` (Python attribute, default 0 = off, read at trace time; set with
+    `set_fp16_act_clip`; nonfinite-fixes a1): C > 0 clips the float16 conv output to [-C, C]
+    (no op when 0 or when the compute dtype is not float16).
     """
 
     def __init__(self, filters, kernel_size=3, strides=1, group=True, norm="batch",
@@ -639,6 +678,7 @@ class GroupConvBlock(_PreActivation):
         self._init_pre(norm, negative_slope, bn_momentum, bn_epsilon, group, pre_activation)
         self.strides = int(strides)
         self.split_group = False
+        self.fp16_act_clip = 0.0
         self.conv = tf.keras.layers.Conv3D(
             filters, kernel_size, strides=strides, padding="same", use_bias=True,
             kernel_initializer=KaimingNormal(negative_slope, seed), name="conv")
@@ -646,19 +686,21 @@ class GroupConvBlock(_PreActivation):
     def call(self, x, training=None):
         if self.split_group and self.group and self.conv.built:
             return self._split_call(x, training)
-        return self.conv(self._pre(x, training))
+        return clip_fp16(self.conv(self._pre(x, training)), self.fp16_act_clip)
 
     def _split_call(self, x, training):
         """conv(concat(x, mean)) as conv_a(x) + conv_b(mean): compute dtype, the layer's strides,
-        'SAME' padding, NDHWC."""
+        'SAME' padding, NDHWC. With ``fp16_act_clip`` C > 0 under float16 each conv term and the
+        bias-added sum are clipped to [-C, C] (two clipped terms sum to <= 2C <= 64000 < 65504)."""
         x = self._pre(x, training, concat=False)
         channels = int(x.shape[-1])
         mean = tf.reduce_mean(x, axis=0, keepdims=True)
         k = tf.cast(self.conv.kernel, x.dtype)
         strides = [1, self.strides, self.strides, self.strides, 1]
-        y = (tf.nn.conv3d(x, k[..., :channels, :], strides, "SAME")
-             + tf.nn.conv3d(mean, k[..., channels:, :], strides, "SAME"))
-        return tf.nn.bias_add(y, tf.cast(self.conv.bias, x.dtype))
+        c = self.fp16_act_clip
+        y = (clip_fp16(tf.nn.conv3d(x, k[..., :channels, :], strides, "SAME"), c)
+             + clip_fp16(tf.nn.conv3d(mean, k[..., channels:, :], strides, "SAME"), c))
+        return clip_fp16(tf.nn.bias_add(y, tf.cast(self.conv.bias, x.dtype)), c)
 
     def group_overhead_params(self):
         return self._overhead(self.conv.kernel)

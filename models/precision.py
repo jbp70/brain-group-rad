@@ -12,7 +12,25 @@ Turning TF32 off costs little for training because the model uses the `mixed_flo
 policy: convolutions then run in float16 on tensor cores regardless of the TF32 setting.
 Pre-Ampere GPUs (Quadro RTX 8000/6000, V100, GTX 1080) have no TF32, so this is a no-op there.
 """
+import contextlib
+
 import tensorflow as tf
+
+
+@contextlib.contextmanager
+def policy_scope(name):
+    """Temporarily set the global Keras dtype policy to ``name`` (restored in ``finally``).
+
+    Keras layers capture the global policy in ``__init__``, so every layer constructed inside the
+    scope (including sublayers created in the constructor) keeps that policy afterwards.
+    """
+    mp = tf.keras.mixed_precision
+    saved = mp.global_policy()
+    mp.set_global_policy(name)
+    try:
+        yield
+    finally:
+        mp.set_global_policy(saved)
 
 
 def configure_tf_precision(tf32=False, memory_growth=True):

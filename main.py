@@ -275,7 +275,11 @@ def main(argv=None):
 
     model_cfg = A.model_config_from_args(args)
     model = GroupRegLevelModel(level, model_cfg, gradient_checkpointing=args.gradient_checkpointing,
-                               lean_sampler=args.lean_sampler, split_group_conv=args.split_group_conv
+                               lean_sampler=args.lean_sampler, split_group_conv=args.split_group_conv,
+                               fp16_act_clip=args.fp16_act_clip,
+                               fp16_act_clip_scope=args.fp16_act_clip_scope,
+                               deform_decoder_dtype=args.deform_decoder_dtype,
+                               bn_epsilon_override=args.bn_epsilon_override
                                ).build_model(_build_n(args))
     counts = model.count_params_by_part()
     init_info = None

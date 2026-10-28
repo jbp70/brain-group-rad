@@ -111,6 +111,16 @@
 # approval; at most two active jobs): --resume (default true) restores ckpt/last, both frozen
 # stages and the RNGs, checks both fingerprints, re-applies the saved BN freeze and never repeats
 # the recalibration; at most 250 steps are lost.
+#
+# Non-finite mitigations (nonfinite-fixes, default off; decide after the m9 NaN probe; report
+# .agents/tasks/nonfinite-fixes/report.md). No flag is emitted while a value is at its default.
+#   FP16_ACT_CLIP (default 0 = off; 0 < C <= 32000, e.g. 30000) -> --fp16-act-clip C with
+#     FP16_ACT_CLIP_SCOPE (deform_decoder | all, default deform_decoder) -> --fp16-act-clip-scope.
+#   DEFORM_DECODER_DTYPE (policy | float16 | float32, default policy) -> --deform-decoder-dtype.
+#     float32 is NOT expected to fit 4 pairs under TF_MEM_LIMIT_MB 40000 (the 4-pair smoke peaked
+#     at 37.6 GiB in fp16); use FP16_ACT_CLIP / BN_EPSILON_OVERRIDE at level 1.
+#   BN_EPSILON_OVERRIDE (default 0 = off) -> --bn-epsilon-override (pass it again on resume).
+# The per-task non-finite guard (--nonfinite-patience-task, default 20) is always on.
 set -euo pipefail
 
 PROJ="${PROJ:-/autofs/space/crater_001/users/jn85/BrainRegProjects/GroupwiseReg}"
@@ -145,6 +155,10 @@ PAIR_RECOMPUTE="${PAIR_RECOMPUTE:-true}"
 VAL_IMAGE_CHUNK="${VAL_IMAGE_CHUNK:-1}"
 VAL_PAIR_CHUNK="${VAL_PAIR_CHUNK:-1}"
 BN_RECAL_VALIDATE="${BN_RECAL_VALIDATE:-false}"
+FP16_ACT_CLIP="${FP16_ACT_CLIP:-0}"
+FP16_ACT_CLIP_SCOPE="${FP16_ACT_CLIP_SCOPE:-deform_decoder}"
+DEFORM_DECODER_DTYPE="${DEFORM_DECODER_DTYPE:-policy}"
+BN_EPSILON_OVERRIDE="${BN_EPSILON_OVERRIDE:-0}"
 EXTRA_ARGS="${EXTRA_ARGS:-}"
 
 case "$INTENSITY_AUG_DEVICE" in
@@ -190,6 +204,30 @@ case "$GRAD_BALANCE" in
 esac
 RECAL_CHECK=""
 if [ "$BN_RECAL_BATCHES" -gt 0 ]; then RECAL_CHECK="--expect-bn-recal true"; fi
+# Non-finite mitigations (nonfinite-fixes; all default off, no flag emitted when off).
+FLOAT_RE='^[0-9]*\.?[0-9]+([eE][-+]?[0-9]+)?$'
+for v in FP16_ACT_CLIP BN_EPSILON_OVERRIDE; do
+    [[ "${!v}" =~ $FLOAT_RE ]] || { echo "ERROR: $v must be a non-negative number, got '${!v}'" >&2; exit 2; }
+done
+case "$FP16_ACT_CLIP_SCOPE" in
+    deform_decoder|all) ;;
+    *) echo "ERROR: FP16_ACT_CLIP_SCOPE must be deform_decoder or all, got '$FP16_ACT_CLIP_SCOPE'" >&2; exit 2 ;;
+esac
+case "$DEFORM_DECODER_DTYPE" in
+    policy|float16|float32) ;;
+    *) echo "ERROR: DEFORM_DECODER_DTYPE must be policy, float16 or float32, got '$DEFORM_DECODER_DTYPE'" >&2; exit 2 ;;
+esac
+is_pos() { awk -v x="$1" 'BEGIN { exit !(x + 0 > 0) }'; }
+MITIG_ARGS=""
+if is_pos "$FP16_ACT_CLIP"; then
+    if ! awk -v x="$FP16_ACT_CLIP" 'BEGIN { exit !(x + 0 <= 32000) }'; then
+        echo "ERROR: FP16_ACT_CLIP must be <= 32000, got '$FP16_ACT_CLIP'" >&2
+        exit 2
+    fi
+    MITIG_ARGS="--fp16-act-clip $FP16_ACT_CLIP --fp16-act-clip-scope $FP16_ACT_CLIP_SCOPE"
+fi
+if [ "$DEFORM_DECODER_DTYPE" != policy ]; then MITIG_ARGS="$MITIG_ARGS --deform-decoder-dtype $DEFORM_DECODER_DTYPE"; fi
+if is_pos "$BN_EPSILON_OVERRIDE"; then MITIG_ARGS="$MITIG_ARGS --bn-epsilon-override $BN_EPSILON_OVERRIDE"; fi
 
 SCRATCH="$PROJ/scratch"
 mkdir -p "$RESULTS" "$SCRATCH/keras" "$SCRATCH/cuda_cache"
@@ -210,6 +248,7 @@ echo "run $RUN_NAME | level 1 | steps $STEPS | val every $VAL_EVERY | ckpt every
 echo "cascade from $CASCADE_FROM | grad balance $GRAD_BALANCE ($BAL_ARGS) | bn recal $BN_RECAL_BATCHES (freeze $BN_RECAL_FREEZE) | skip $SKIP_PROB | min pairs $MIN_PAIRS | lean losses $LEAN_LOSSES | prefetch $PREFETCH"
 echo "intensity aug device $INTENSITY_AUG_DEVICE | tf memory limit ${TF_MEM_LIMIT_MB} MB (0 = growth) | pair recompute $PAIR_RECOMPUTE"
 echo "val image chunk $VAL_IMAGE_CHUNK | val pair chunk $VAL_PAIR_CHUNK | bn recal validate $BN_RECAL_VALIDATE"
+echo "fp16 act clip $FP16_ACT_CLIP ($FP16_ACT_CLIP_SCOPE) | deform decoder dtype $DEFORM_DECODER_DTYPE | bn epsilon override $BN_EPSILON_OVERRIDE (0 = off)"
 
 rc=0
 # shellcheck disable=SC2086  # BAL_ARGS / EXTRA_ARGS are split on purpose
@@ -228,19 +267,20 @@ singularity exec --nv -B /scratch -B /autofs -B /cluster -B /space -B /vast "$SI
     --global-start-step 0 --global-ramp-steps 0 --curriculum false --val-png true \
     --num-threads "${SLURM_CPUS_PER_TASK:-3}" --prefetch "$PREFETCH" --log-every 25 --log-backend jsonl \
     --intensity-aug-device "$INTENSITY_AUG_DEVICE" --pair-recompute "$PAIR_RECOMPUTE" $MEM_ARGS \
-    $EXTRA_ARGS </dev/null || rc=$?
+    $MITIG_ARGS $EXTRA_ARGS </dev/null || rc=$?
 echo "main.py exit code $rc $(date -Is)"
 if [ "$rc" -ne 0 ]; then
     exit "$rc"
 fi
 crc=0
 # AMP: the dynamic loss scale overflows a few times early on (m8: 10-11 skipped steps of 200 /
-# 8000, all linear), hence --max-nonfinite-frac 0.06.
+# 8000, all linear), hence --max-nonfinite-frac 0.06. Per task: FAIL if > 5 % of a task's steps in
+# any 500-step window after step 100 are non-finite (--max-window-nonfinite-frac 0.05).
 # shellcheck disable=SC2086  # RECAL_CHECK is split on purpose
 singularity exec -B /autofs -B /cluster -B /space "$SIF" \
     python tests/gpu/check_mixed_run.py "$RESULTS/$RUN_NAME" --tasks rigid,affine,deform --steps "$STEPS" \
     --expect-init-weights full --expect-enc-grad true --expect-cascade true --expect-cascade-stages 2 \
-    --grad-balance-rule true $RECAL_CHECK --max-nonfinite-frac 0.06 \
+    --grad-balance-rule true $RECAL_CHECK --max-nonfinite-frac 0.06 --max-window-nonfinite-frac 0.05 \
     --expect-min-pairs "$MIN_PAIRS" --memory-budget-mb 36864 --project-steps 8000 \
     --project-val-every 500 </dev/null || crc=$?
 echo "finished check_mixed_run exit code $crc $(date -Is)"

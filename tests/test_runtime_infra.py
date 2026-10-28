@@ -231,6 +231,49 @@ class TestArgs(unittest.TestCase):
                     with self.assertRaises(SystemExit, msg="%s %s" % (flag, bad)):
                         A.parse_args(["--data", "x", flag, bad])
 
+    def test_nonfinite_flags(self):
+        # nonfinite-fixes (plan D1, D8-D11): per-task guard on (20), every mitigation off.
+        import contextlib
+        import io
+        a = A.parse_args(["--data", "x"])
+        self.assertEqual((a.nonfinite_patience, a.nonfinite_patience_task, a.fp16_act_clip, a.fp16_act_clip_scope,
+                          a.deform_decoder_dtype, a.bn_epsilon_override), (20, 20, 0.0, "deform_decoder", "policy", 0.0))
+        tc = A.train_config_from_args(a)
+        self.assertEqual((tc.nonfinite_patience, tc.nonfinite_patience_task), (20, 20))
+        d = A.args_to_dict(a)
+        for k in ("nonfinite_patience_task", "fp16_act_clip", "fp16_act_clip_scope", "deform_decoder_dtype",
+                  "bn_epsilon_override"):
+            self.assertIn(k, d)
+        ok = ["--data", "x", "--task-ratio", "rigid:1,deform:1", "--amp", "true", "--fp16-act-clip", "30000",
+              "--deform-decoder-dtype", "float32", "--bn-epsilon-override", "1e-3", "--nonfinite-patience-task", "0"]
+        a = A.parse_args(ok)
+        self.assertEqual((a.fp16_act_clip, a.deform_decoder_dtype, a.bn_epsilon_override), (30000.0, "float32", 1e-3))
+        self.assertEqual(A.train_config_from_args(a).nonfinite_patience_task, 0)
+        self.assertEqual(A.model_config_from_args(a), A.model_config_from_args(A.parse_args(ok[:4])))  # no field
+        A.parse_args(["--data", "x", "--amp", "true", "--fp16-act-clip", "32000", "--fp16-act-clip-scope", "all"])
+        A.parse_args(["--data", "x", "--amp", "true", "--deform-decoder-dtype", "float16"])
+        A.parse_args(["--data", "x", "--bn-epsilon-override", "1e-2"])        # also without AMP
+        amp_d = ["--amp", "true", "--task-ratio", "deform:1"]
+        cases = ((["--nonfinite-patience-task", "-1"], "--nonfinite-patience-task must be >= 0"),
+                 (amp_d + ["--fp16-act-clip", "-1"], "--fp16-act-clip must be 0 (off) or in (0, 32000]"),
+                 (amp_d + ["--fp16-act-clip", "40000"], "--fp16-act-clip must be 0 (off) or in (0, 32000]"),
+                 (amp_d + ["--fp16-act-clip", "nan"], "--fp16-act-clip must be 0 (off) or in (0, 32000]"),
+                 (["--task-ratio", "deform:1", "--fp16-act-clip", "30000"], "--fp16-act-clip > 0 needs --amp true"),
+                 (["--amp", "true", "--fp16-act-clip", "30000"], "needs 'deform' in --task-ratio"),
+                 (["--task-ratio", "deform:1", "--deform-decoder-dtype", "float32"], "needs --amp true"),
+                 (["--deform-decoder-dtype", "float16"], "needs --amp true"),
+                 (["--amp", "true", "--deform-decoder-dtype", "float32"],
+                  "--deform-decoder-dtype float32 needs 'deform' in --task-ratio"),
+                 (amp_d + ["--fp16-act-clip-scope", "encoder"], "invalid choice"),
+                 (["--bn-epsilon-override", "-1"], "--bn-epsilon-override must be finite and >= 0"),
+                 (["--bn-epsilon-override", "inf"], "--bn-epsilon-override must be finite and >= 0"))
+        for bad, msg in cases:
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                with self.assertRaises(SystemExit, msg=str(bad)):
+                    A.parse_args(["--data", "x"] + bad)
+            self.assertIn(msg, err.getvalue(), bad)
+
     def test_cascade_flags(self):
         # Milestone 8 (design §10, §16 T11 / T16): defaults off; every cross-flag rule is a parser error.
         a = A.parse_args(["--data", "x"])

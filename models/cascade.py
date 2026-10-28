@@ -19,13 +19,12 @@ Conventions (binding; design 2 / 4.6 / 4.7 of `.agents/tasks/network-design/desi
 | Float32 | Every `FrozenStage` model is constructed AND built inside `_float32_policy()` (Keras layers capture the dtype policy in ``__init__``), with ``gradient_checkpointing='none'``, so the frozen outputs never depend on --amp. |
 | Inference only | `FrozenStage.linear` / `.deform` always call the model with ``training=False`` (BN moving statistics = the level-4 values, never recalibrated) and wrap the outputs in `tf.stop_gradient`; callers run them outside the GradientTape and never give the frozen variables to the optimizer. |
 """
-import contextlib
-
 import tensorflow as tf
 
 from data_loading import params as P
 from models import diffeo
 from models import layers as L
+from models import precision
 from models import transforms as tfm
 from models.group_net import DEFORM_TASK, GroupRegLevelModel
 
@@ -40,16 +39,9 @@ def pool_to_coarser(images):
     return tf.nn.avg_pool3d(tf.cast(images, tf.float32), 2, 2, "VALID")
 
 
-@contextlib.contextmanager
 def _float32_policy():
     """Temporarily set the global Keras policy to 'float32' (restored in ``finally``)."""
-    mp = tf.keras.mixed_precision
-    saved = mp.global_policy()
-    mp.set_global_policy("float32")
-    try:
-        yield
-    finally:
-        mp.set_global_policy(saved)
+    return precision.policy_scope("float32")
 
 
 def _build_frozen_model(cfg, level=FROZEN_LEVEL):
