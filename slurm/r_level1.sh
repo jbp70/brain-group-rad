@@ -74,8 +74,9 @@
 # .agents/tasks/nonfinite-fixes/report.md). No flag is emitted while a value is at its default.
 #   FP16_ACT_CLIP (default 0 = off; 0 < C <= 32000, e.g. 30000) -> --fp16-act-clip C with
 #     FP16_ACT_CLIP_SCOPE (deform_decoder | all, default deform_decoder) -> --fp16-act-clip-scope.
-#   DEFORM_DECODER_DTYPE (policy | float16 | float32, default policy) -> --deform-decoder-dtype
-#     (float32 = deform decoder in float32 under AMP, ~2x decoder activation memory).
+#   DEFORM_DECODER_DTYPE (policy | float16 | float32 | float32_fine, default policy) ->
+#     --deform-decoder-dtype (float32 = deform decoder in float32 under AMP, ~2x decoder
+#     activation memory; float32_fine = fp32 only d2/d1/svf, d5..d3 stay float16).
 #   BN_EPSILON_OVERRIDE (default 0 = off) -> --bn-epsilon-override (pass it again on resume: the
 #     same env line does).
 #   Level 1: DEFORM_DECODER_DTYPE=float32 is NOT expected to fit 4 pairs under TF_MEM_LIMIT_MB
@@ -206,7 +207,7 @@ BN_EPSILON_OVERRIDE="${BN_EPSILON_OVERRIDE:-0}"
 need_float FP16_ACT_CLIP "$FP16_ACT_CLIP"
 need_float BN_EPSILON_OVERRIDE "$BN_EPSILON_OVERRIDE"
 need_choice FP16_ACT_CLIP_SCOPE "$FP16_ACT_CLIP_SCOPE" deform_decoder all
-need_choice DEFORM_DECODER_DTYPE "$DEFORM_DECODER_DTYPE" policy float16 float32
+need_choice DEFORM_DECODER_DTYPE "$DEFORM_DECODER_DTYPE" policy float16 float32 float32_fine
 is_pos() { awk -v x="$1" 'BEGIN { exit !(x + 0 > 0) }'; }
 MITIG_ARGS=""
 if is_pos "$FP16_ACT_CLIP"; then
@@ -218,7 +219,8 @@ if is_pos "$FP16_ACT_CLIP"; then
     fi
 fi
 if [ "$DEFORM_DECODER_DTYPE" != policy ]; then
-    if [ "$DEFORM_DECODER_DTYPE" = float32 ] && [ "$HAS_DEFORM" = false ]; then
+    if { [ "$DEFORM_DECODER_DTYPE" = float32 ] || [ "$DEFORM_DECODER_DTYPE" = float32_fine ]; } \
+            && [ "$HAS_DEFORM" = false ]; then
         echo "NOTE: linear-only ratio, DEFORM_DECODER_DTYPE dropped"
     else
         MITIG_ARGS="$MITIG_ARGS --deform-decoder-dtype $DEFORM_DECODER_DTYPE"

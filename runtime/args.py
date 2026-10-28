@@ -43,6 +43,14 @@ Pattern from the rigid project's ``runtime/args.py`` (argparse + ``str2bool``). 
   'full' and the two lean flags need 'deform' in --task-ratio. --filters (6 entries),
   --reductions and --dense (>= 1 entries) must be >= 1; `models.width_presets` has named width
   presets that expand to --filters / --decoder-widths.
+* per-block widths (fp32-decoder-width; no extra width flags): --filters = stem, L2..L6 (the
+  stem = the full-resolution encoder stage), --decoder-widths = D5..D1 (D1 full resolution, D2
+  half resolution at level 1; the SVF norm-act follows D1, the SVF head always outputs 3). Both
+  are ModelConfig fields: warm start and --cascade-from compare them, so every level of a
+  cascade needs the same lists. The default --decoder-widths is None (half the encoder widths);
+  an explicit 128,96,64,32,16 builds the same model but is NOT config-equal, so never pass it to
+  a cascade from a default-width run. Narrow-width cascade sources for memory measurements are
+  random-weight level-4 / level-2 main.py runs (slurm/m11_random_sources.sh).
 * minimum pair count (milestone 9 phase 2, `.agents/tasks/milestone-9-phase2/design-m9-phase2.md`
   section 5): --min-pairs 1 (today: at least 1 sampled training pair per step); 'n' raises the
   floor to the group size N. --p-pair and --p-pdice must be in (0, 1].
@@ -62,10 +70,14 @@ Pattern from the rigid project's ``runtime/args.py`` (argparse + ``str2bool``). 
 * delayed task start (retrain-prereqs design section 5.2): --task-start-step 'task:step' (default
   None = every task from step 0, today) and --task-start-ramp-steps W (default 0 = no LR ramp).
 * non-finite robustness (`.agents/tasks/nonfinite-fixes/plan.md`): --nonfinite-patience-task 20
-  (per-task streak guard, 0 = off; --nonfinite-patience unchanged). Opt-in float16 overflow
+  (per-task streak guard, 0 = off; --nonfinite-patience unchanged; with 0 a task in a permanent
+  hard-failure streak defers every ckpt/last save, incl. the final one, for the rest of the run:
+  ``ckpt_last_deferred`` / ``ckpt_last_skipped_final`` events). Opt-in float16 overflow
   mitigations, all off by default (no op added): --fp16-act-clip 0 (C in (0, 32000], needs --amp)
   with --fp16-act-clip-scope deform_decoder | all, --deform-decoder-dtype policy | float16 |
-  float32 (needs --amp), --bn-epsilon-override 0. None is a ModelConfig field.
+  float32 | float32_fine (needs --amp; float32 / float32_fine need 'deform' in --task-ratio;
+  float32_fine = only the decoder stages d2, d1 and the SVF norm/head in float32,
+  fp32-decoder-width), --bn-epsilon-override 0. None is a ModelConfig field.
 """
 import argparse
 import collections
@@ -361,7 +373,11 @@ def build_parser():
     g.add_argument("--integration-steps", type=int, default=_MC.integration_steps,
                    help="scaling-and-squaring steps of the SVF integration (ModelConfig)")
     g.add_argument("--decoder-widths", type=int_list, default=None,
-                   help="deform decoder widths D5..D1 (5 values; default half the matching encoder widths)")
+                   help="deform decoder widths D5..D1 (5 values; default half the matching encoder widths, "
+                   "128,96,64,32,16 with the default --filters). D1 = the full-resolution stage, D2 = half "
+                   "resolution at level 1; the SVF norm-act follows D1 (no width of its own). Do not pass "
+                   "the explicit default list to a cascade from a run that used the default: config.json "
+                   "stores None, which is not equal to the explicit list (see models/width_presets.py)")
     g.add_argument("--deform-decoder", default="auto", choices=["auto", "true", "false"],
                    help="build the deform decoder: auto = iff 'deform' is in --task-ratio; true also "
                    "for linear runs that will warm-start a deform run")
@@ -400,11 +416,15 @@ def build_parser():
                    help="where --fp16-act-clip acts: deform_decoder (default: d5..d1, svf_norm_act and "
                    "their BN; needs 'deform' in --task-ratio; linear tasks unchanged) or all (also "
                    "the encoder and linear decoder, so the linear tasks change too)")
-    g.add_argument("--deform-decoder-dtype", default="policy", choices=["policy", "float16", "float32"],
+    g.add_argument("--deform-decoder-dtype", default="policy",
+                   choices=["policy", "float16", "float32", "float32_fine"],
                    help="float16 overflow mitigation a2: compute dtype of the deform decoder. policy "
                    "(default) = the global policy; float32 runs the decoder in float32 under --amp "
                    "(fp16 skips cast up; same variables and checkpoints; ~2x decoder activation "
-                   "memory). float16 / float32 need --amp true; float32 needs 'deform' in --task-ratio")
+                   "memory); float32_fine = only the full- and half-resolution decoder stages d2, d1 "
+                   "(+ upsamples) and the SVF norm/head in float32, d5..d3 stay float16. Frozen "
+                   "cascade stages are always float32. float16 / float32 / float32_fine need --amp "
+                   "true; float32 / float32_fine need 'deform' in --task-ratio")
     g.add_argument("--bn-epsilon-override", type=float, default=0.0,
                    help="float16 overflow mitigation a3 (0 = off): epsilon of every BatchNorm of the "
                    "trainable model (not LayerNorm / InstanceNorm, not frozen cascade stages, not a "
@@ -536,7 +556,10 @@ def build_parser():
     g.add_argument("--head-activation", default=_MC.head_activation, choices=["relu", "none"],
                    help="activation of the pre-head norm-act: 'relu' (default, follows "
                    "--negative-slope) or 'none' (norm only)")
-    g.add_argument("--filters", type=int_list, default=_MC.filters)
+    g.add_argument("--filters", type=int_list, default=_MC.filters,
+                   help="encoder widths, 6 values: stem, L2..L6 (default 32,64,128,192,256,384); the stem "
+                   "width is the full-resolution encoder stage. Named width presets (flag lines): "
+                   "models/width_presets.py")
     g.add_argument("--reductions", type=int_list, default=_MC.reductions)
     g.add_argument("--dense", type=int_list, default=_MC.dense)
     g.add_argument("--dropout", type=float, default=None, help="default 0.15, or 0.0 with --overfit-one-group")
@@ -552,7 +575,10 @@ def build_parser():
                    help="per-task non-finite guard (nonfinite-fixes): raise after this many consecutive "
                    "non-finite steps of ONE task; only a finite step of the same task resets the count "
                    "(in mixed runs finite linear steps reset --nonfinite-patience, so that guard never "
-                   "tripped in job 10518952). 0 = off")
+                   "tripped in job 10518952). 0 = off; then a task stuck in a permanent hard-failure "
+                   "streak defers every ckpt/last save, including the final one, for the rest of the "
+                   "run (ckpt_last_deferred / ckpt_last_skipped_final events) and a resume rewinds to "
+                   "the pre-streak state: keep the guard on or restart from ckpt/best*")
     g.add_argument("--quiet", type=str2bool, default=False)
     g.add_argument("--log-backend", default="auto", choices=["auto", "dllogger", "jsonl"])
     g.add_argument("--dry-run", action="store_true", help="build everything, run 2 steps + 1 validation group, exit")
@@ -648,8 +674,9 @@ def parse_args(argv=None):
                      "--task-ratio")
     if args.deform_decoder_dtype != "policy" and not args.amp:
         parser.error("--deform-decoder-dtype %s needs --amp true" % args.deform_decoder_dtype)
-    if args.deform_decoder_dtype == "float32" and not deform:
-        parser.error("--deform-decoder-dtype float32 needs 'deform' in --task-ratio")
+    if args.deform_decoder_dtype in ("float32", "float32_fine") and not deform:
+        parser.error("--deform-decoder-dtype %s needs 'deform' in --task-ratio"
+                     % args.deform_decoder_dtype)
     eps = args.bn_epsilon_override
     if not (math.isfinite(eps) and eps >= 0):
         parser.error("--bn-epsilon-override must be finite and >= 0 (0 = off), got %r" % eps)

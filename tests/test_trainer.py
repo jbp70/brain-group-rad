@@ -1944,6 +1944,57 @@ class TestNonfiniteGuard(DeformCase):
         finally:
             tf.keras.mixed_precision.set_global_policy("float32")
 
+    def test_lso_flag_ignores_gradient_only_overflow(self):
+        """fp32-decoder-width (review NIT 1): the LSO-skip flag follows the hard-failure streak. A
+        gradient-only overflow (finite loss) followed by a forward NaN of the same task: the NaN
+        step still reaches the LSO (lso_skipped False), and the scale halves at both steps."""
+        def pred(d):
+            p = _positions(d, "deform")
+            return len(p) >= 2 and p[1] < 16
+        seed, draws = _find_seed(self.RATIO, pred)
+        dpos = _positions(draws, "deform")
+        n_steps = dpos[1] + 1
+        try:
+            tf.keras.mixed_precision.set_global_policy("mixed_float16")
+            model = self.amp_model()
+            inner = O.make_optimizer("adam", lr=1e-3, clipnorm=None)
+            # A non-zero SVF head (zero-init would give zero float16 decoder gradients) and a scale
+            # of 2**100: every non-zero float16 activation gradient overflows, while the float32
+            # scaled loss stays finite.
+            svf = model.deform_decoder.svf_head
+            svf.kernel.assign(np.random.default_rng(0).normal(0, 1e-3, svf.kernel.shape).astype(np.float32))
+            opt = tf.keras.mixed_precision.LossScaleOptimizer(inner, initial_scale=2.0 ** 100)
+            kern = model.deform_decoder.d1.conv.kernel
+            good = kern.numpy().copy()
+            bad = good.copy()
+            bad.flat[0] = np.nan
+            # 1-based source calls: only the 2nd deform step runs the NaN kernel
+            src = self.sources(_KernelSwitchSource(self.dgroup["batch"], kern, good, bad, [2]))
+            logger = self.logger("lso_nit1")
+            tr = Trainer(model, opt, src, self.groups["rigid"]["S"],
+                         config(task_ratio=dict(self.RATIO), seed=seed, amp=True, nonfinite_patience=60,
+                                nonfinite_patience_task=60), logger=logger)
+            tr.fit(n_steps)
+            logger.close()
+            dh = [h for h in tr.history if h["task"] == "deform"]
+            self.assertEqual(len(dh), 2)
+            if dh[0]["finite"]:
+                self.skipTest("loss scale 2**100 did not overflow the 1st deform step's gradients")
+            self.assertTrue(np.isfinite(dh[0]["loss"]))            # gradient-only overflow
+            self.assertFalse(dh[0]["lso_skipped"])
+            self.assertFalse(dh[1]["finite"])
+            self.assertFalse(np.isfinite(dh[1]["loss"]))           # forward NaN
+            self.assertFalse(dh[1]["lso_skipped"])                 # was True before the fix
+            scales = {r["step"]: r["data"][LOSS_SCALE_KEY] for r in self.records(logger)
+                      if LOSS_SCALE_KEY in r["data"]}
+            self.assertEqual(sorted(scales), list(range(1, n_steps + 1)))
+            for p in dpos[:2]:
+                before = scales[p] if p > 0 else 2.0 ** 100
+                self.assertEqual(scales[p + 1], before / 2.0, p + 1)
+            self.assertEqual(tr.trace_counts.get("deform"), 1)
+        finally:
+            tf.keras.mixed_precision.set_global_policy("float32")
+
     def test_window_log_keys_and_warning(self):
         seed, draws = self.interleaved_seed()
         logger = self.logger("win")

@@ -116,9 +116,10 @@
 # .agents/tasks/nonfinite-fixes/report.md). No flag is emitted while a value is at its default.
 #   FP16_ACT_CLIP (default 0 = off; 0 < C <= 32000, e.g. 30000) -> --fp16-act-clip C with
 #     FP16_ACT_CLIP_SCOPE (deform_decoder | all, default deform_decoder) -> --fp16-act-clip-scope.
-#   DEFORM_DECODER_DTYPE (policy | float16 | float32, default policy) -> --deform-decoder-dtype.
-#     float32 is NOT expected to fit 4 pairs under TF_MEM_LIMIT_MB 40000 (the 4-pair smoke peaked
-#     at 37.6 GiB in fp16); use FP16_ACT_CLIP / BN_EPSILON_OVERRIDE at level 1.
+#   DEFORM_DECODER_DTYPE (policy | float16 | float32 | float32_fine, default policy) ->
+#     --deform-decoder-dtype. float32 is NOT expected to fit 4 pairs under TF_MEM_LIMIT_MB 40000
+#     (the 4-pair smoke peaked at 37.6 GiB in fp16); use FP16_ACT_CLIP / BN_EPSILON_OVERRIDE at
+#     level 1. float32_fine = fp32 only d2/d1/svf (d5..d3 stay float16; memory: m11 job).
 #   BN_EPSILON_OVERRIDE (default 0 = off) -> --bn-epsilon-override (pass it again on resume).
 # The per-task non-finite guard (--nonfinite-patience-task, default 20) is always on.
 set -euo pipefail
@@ -214,8 +215,8 @@ case "$FP16_ACT_CLIP_SCOPE" in
     *) echo "ERROR: FP16_ACT_CLIP_SCOPE must be deform_decoder or all, got '$FP16_ACT_CLIP_SCOPE'" >&2; exit 2 ;;
 esac
 case "$DEFORM_DECODER_DTYPE" in
-    policy|float16|float32) ;;
-    *) echo "ERROR: DEFORM_DECODER_DTYPE must be policy, float16 or float32, got '$DEFORM_DECODER_DTYPE'" >&2; exit 2 ;;
+    policy|float16|float32|float32_fine) ;;
+    *) echo "ERROR: DEFORM_DECODER_DTYPE must be policy, float16, float32 or float32_fine, got '$DEFORM_DECODER_DTYPE'" >&2; exit 2 ;;
 esac
 is_pos() { awk -v x="$1" 'BEGIN { exit !(x + 0 > 0) }'; }
 MITIG_ARGS=""

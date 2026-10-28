@@ -63,11 +63,17 @@ the deform task went NaN at ~5500 while the 1:1:2 linear steps kept resetting th
   the first later step without such a streak; the final save logs ``ckpt_last_skipped_final``
   instead when blocked. Caveat: "pre-failure" means no open streak >= 2 at save time; with an
   intermittent onset the weights just before the streak may already be close to failing, so
-  ckpt/best_deform (ckpt/best* saving is unchanged) is the safer restart point.
+  ckpt/best_deform (ckpt/best* saving is unchanged) is the safer restart point. With
+  ``nonfinite_patience_task`` 0 (guard off) a task stuck in a permanent hard-failure streak defers
+  every ckpt/last save, including the final one, for the rest of the run (visible as
+  ``ckpt_last_deferred`` / ``ckpt_last_skipped_final`` events); a resume then rewinds to the
+  pre-streak state. Keep the guard on, or restart from ckpt/best*.
 * LSO skip (AMP only): a step of task t does not call the LSO (no scale halving, no counter reset,
-  no ``iterations`` increment) iff the previous step of t was non-finite AND its forward loss is
-  non-finite. Gradient-only overflows (finite loss) are the normal loss-scale warm-up and always
-  reach the LSO; so do isolated forward NaNs. A streaking task therefore halves the shared scale
+  no ``iterations`` increment) iff the current streak of t already holds a hard failure
+  (non-finite forward loss; the same count as the ckpt/last streak) AND its forward loss is
+  non-finite. Gradient-only overflows (finite loss) are the normal loss-scale warm-up: they always
+  reach the LSO and never arm the flag, so isolated forward NaNs and the first forward NaN after
+  gradient-only overflows reach the LSO too. A streaking task therefore halves the shared scale
   once instead of driving it to 1 for the healthy tasks. The flag is a captured tf.Variable per
   task (``Trainer._lso_skip``), so nothing re-traces.
 * Window logs: ``train_<task>/{window_steps, nonfinite_steps, nonfinite_frac}`` per log window and
@@ -255,8 +261,11 @@ ENC_GRAD_KEYS = ("diag_enc_grad_norm_raw", "diag_enc_grad_norm_eff")
 NONFINITE_WINDOW_KEYS = ("window_steps", "nonfinite_steps", "nonfinite_frac")
 LOSS_SCALE_KEY = "optimizer/loss_scale"
 NONFINITE_WARN_FRAC = 0.1       # stderr WARNING above this window fraction of a task
-# A step of task t skips the LSO call iff AMP, the previous step of t was non-finite (streak >= 1
-# before the step, so this step would be the 2nd+ of a streak) and its forward loss is non-finite.
+# A step of task t skips the LSO call iff AMP, the current streak of t already holds a HARD failure
+# (non-finite forward loss; hard-failure streak >= 1 before the step, so this step would be the
+# 2nd+ hard failure of the streak) and its forward loss is non-finite. Gradient-only overflows
+# (finite loss) never arm the flag (fp32-decoder-width, review NIT 1), so the first forward NaN
+# after them always reaches the LSO.
 LSO_SKIP_STREAK = 2
 # ckpt/last is not written while any task has a streak of >= this many non-finite steps. AMP
 # loss-scale warm-up overflows (finite loss, non-finite gradient norm; weights unchanged) do not
@@ -785,9 +794,11 @@ class Trainer:
 
         Without AMP: (finite, None), today's graph. Under AMP (nonfinite-fixes D4 / D5): the LSO
         is called iff the input is finite and the step is not LSO-skipped, where lso_skipped =
-        the captured flag ``self._lso_skip[task]`` (set by `fit` when the previous step of the
-        task was non-finite) AND a non-finite forward loss. Gradient-only overflows (finite
-        loss: the normal loss-scale warm-up) and isolated forward NaNs always reach the LSO."""
+        the captured flag ``self._lso_skip[task]`` (set by `fit` when the task's current streak
+        already holds a hard failure, i.e. a non-finite forward loss) AND a non-finite forward
+        loss. Gradient-only overflows (finite loss: the normal loss-scale warm-up) always reach
+        the LSO and never arm the flag, so isolated forward NaNs and the first forward NaN after
+        gradient-only overflows reach it too."""
         if not amp:
             return finite, None
         lso_skipped = tf.logical_and(tf.convert_to_tensor(self._lso_skip[task]),
@@ -2014,7 +2025,7 @@ class Trainer:
                              for lv in self._frozen_levels)
             else:
                 skip = cascade_skip_draw(cfg.seed, s, p_skip) if p_skip > 0 else False
-            lso_flag = amp and consecutive_task[task] >= LSO_SKIP_STREAK - 1
+            lso_flag = amp and save_streak[task] >= LSO_SKIP_STREAK - 1
             res = self.train_step(task, batch, skip=skip, lso_skip=lso_flag)
             t2 = time.perf_counter()
             done = s + 1

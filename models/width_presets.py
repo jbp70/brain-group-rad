@@ -19,6 +19,18 @@ Every preset lists BOTH widths explicitly. Note: the explicit ``default`` preset
 not dict-equal to it (``ModelConfig().decoder_widths`` is None = half the encoder widths).
 Presets are for new runs only; old configs are untouched.
 
+m11 grid widths (fp32-decoder-width memory job; flag lines, not presets, so `PRESETS` and the
+memory-model grid tests are unchanged):
+
+* default: no width flags (``ModelConfig`` default, decoder_widths None);
+* d12h (d1/d2 halved): ``--decoder-widths 128,96,64,16,8``;
+* d12hs (d1/d2 + stem halved): ``--filters 16,64,128,192,256,384 --decoder-widths 128,96,64,16,8``;
+* fr50: the ``fr50`` preset, ``--filters 16,32,128,192,256,384 --decoder-widths 128,96,64,16,8``.
+
+A non-default width at levels 2 / 1 cascades through the normal ``--cascade-from`` path from
+random-weight level-4 / level-2 sources built at the same width (slurm/m11_random_sources.sh),
+so the frozen stages are narrow too.
+
 `count_params` uses the architecture of `models.group_net` (same rules as the memory model,
 design 4.2) and is checked against built models by `tests/test_width_presets_tf.py` (1 %).
 No TensorFlow import.

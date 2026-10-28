@@ -1,0 +1,10 @@
+{
+ "verdict": "APPROVED",
+ "reviewDoc": "d:\\Research\\Brain_Registration_Projects\\brain-group-rad\\.agents\\tasks\\fp32-decoder-width\\review.md",
+ "findings": [
+  "NIT: m11_build_sources has no TIME_BUDGET_S check (worst case 6 x SOURCE_TIMEOUT 1200 s before the grid); optionally lower SOURCE_TIMEOUT or guard it.",
+  "NIT: the ~3.0 h time estimate is unmeasured; the skipped_time guard and the ONLY/SOURCES_DIR split rule cover overruns; check status.tsv times after the first job.",
+  "NIT: plan item 8 open: report.md not written yet and the .agents/tmp/fp32w_* helpers not deleted.",
+  "NIT: the unrelated tests/test_group_net.py tolerance change (flake fix, 1e-6 -> 1e-5 of g_max) should be mentioned in the report or commit message."
+ ]
+}

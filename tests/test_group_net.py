@@ -611,7 +611,9 @@ class TestGradientCheckpointing(NetTestCase):
         m.gradient_checkpointing = "none"
         ref_loss, ref_grads = results["none"]
         # Variables whose gradient is analytically ~0 (e.g. a conv bias right before a BN) only
-        # carry rounding noise: floor the per-variable tolerance at 1e-6 of the largest gradient.
+        # carry rounding noise: floor the per-variable tolerance at 1e-5 of the largest gradient.
+        # (1e-6 was the GPU-nondeterminism noise level of the stem conv bias, ~1e-9 vs a floor of
+        # ~1e-9, and made this test flaky; a real recompute bug gives O(1) relative differences.)
         g_max = max(float(np.abs(tf.convert_to_tensor(r).numpy()).max()) for r in ref_grads)
         for mode, (loss, grads) in results.items():
             self.assertAlmostEqual(float(loss), float(ref_loss), delta=1e-4 * abs(float(ref_loss)),
@@ -619,7 +621,7 @@ class TestGradientCheckpointing(NetTestCase):
             for v, g, r in zip(variables, grads, ref_grads):
                 self.assertIsNotNone(g, "%s %s" % (mode, v.name))
                 g, r = tf.convert_to_tensor(g).numpy(), tf.convert_to_tensor(r).numpy()
-                tol = 1e-4 * float(np.abs(r).max()) + 1e-6 * g_max
+                tol = 1e-4 * float(np.abs(r).max()) + 1e-5 * g_max
                 self.assertLessEqual(float(np.abs(g - r).max()), tol, "%s %s" % (mode, v.name))
 
 

@@ -458,6 +458,62 @@ class TestFrozenStageFactories(CascadeCase):
         for a, v in zip(src16.weights, frozen.model.weights):
             self.assertTrue(np.array_equal(a.numpy(), v.numpy()), v.name)
 
+    @staticmethod
+    def _keras_layers(layer):
+        return [x for x in [layer] + list(layer.submodules) if isinstance(x, tf.keras.layers.Layer)]
+
+    def test_cascade_copy_into_float32_decoders(self):
+        """fp32-decoder-width (nonfinite-fixes review NIT 3): the main.py cascade copy
+        (load_cascade_source -> check_cascade_config -> FrozenStage.from_checkpoint ->
+        copy_weights_from) into trainable models with --deform-decoder-dtype float32 /
+        float32_fine; frozen stages are float32 everywhere, decoder included (D2)."""
+        cfg = tiny_config(deform_decoder=True)
+        paths, _ = save_run(self.tmp, "src", cfg)
+        prefix, src_cfg, _ = C.load_cascade_source(paths["ckpt_last"])
+        C.check_cascade_config(cfg, src_cfg)
+        mp = tf.keras.mixed_precision
+        mp.set_global_policy("mixed_float16")
+        for dtype in ("float32", "float32_fine"):
+            with self.subTest(deform_decoder_dtype=dtype):
+                frozen = cascade.FrozenStage.from_checkpoint(prefix, src_cfg)
+                self.assertEqual(mp.global_policy().name, "mixed_float16")
+                for x in self._keras_layers(frozen.model):
+                    self.assertEqual(x.compute_dtype, "float32", x.name)
+                trainable = GroupRegLevelModel(2, cfg, deform_decoder_dtype=dtype).build_model(2)
+                self.assertEqual(trainable.copy_weights_from(frozen.source_model), len(trainable.weights))
+                for s, d in zip(frozen.source_model.weights, trainable.weights):
+                    self.assertTrue(np.array_equal(s.numpy(), d.numpy()), d.name)
+                dec = trainable.deform_decoder
+                self.assertEqual(dec.d1.conv.compute_dtype, "float32")
+                self.assertEqual(dec.d3.conv.compute_dtype, "float16" if dtype == "float32_fine" else "float32")
+                self.assertEqual(trainable.encoder.l2.compute_dtype, "float16")
+                del frozen, trainable, dec
+                free_memory()
+                mp.set_global_policy("mixed_float16")
+
+    def test_chain_copy_into_float32_fine_level1(self):
+        """Level-1 variant: FrozenChain (float32 level 4 + level 2) -> level-1 float32_fine copy."""
+        cfg = tiny_config(deform_decoder=True)
+        _, model4 = save_run(self.tmp, "src", cfg)
+        model2 = GroupRegLevelModel(2, cfg).build_model(2)
+        randomize(model2, 5)
+        mp = tf.keras.mixed_precision
+        mp.set_global_policy("mixed_float16")
+        chain = cascade.FrozenChain.from_models(model4, model2)
+        self.assertEqual(mp.global_policy().name, "mixed_float16")
+        for m in chain.models:
+            for x in self._keras_layers(m):
+                self.assertEqual(x.compute_dtype, "float32", x.name)
+        trainable = GroupRegLevelModel(1, cfg, deform_decoder_dtype="float32_fine").build_model(1)
+        self.assertEqual(trainable.copy_weights_from(chain.source_model), len(trainable.weights))
+        for s, d in zip(model2.weights, trainable.weights):
+            self.assertTrue(np.array_equal(s.numpy(), d.numpy()), d.name)
+        dec = trainable.deform_decoder
+        self.assertIsNotNone(dec.up_d1)
+        for x in self._keras_layers(dec.d1) + [dec.up_d1, dec.up_d2, dec.svf_norm_act]:
+            self.assertEqual(x.compute_dtype, "float32", x.name)
+        self.assertEqual(dec.d3.conv.compute_dtype, "float16")
+
 
 # ============================================================ Trainer integration (FEAT-002)
 N2, ND2 = 4, 2                      # level-2 linear / deform group sizes of the trainer tests

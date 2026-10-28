@@ -193,26 +193,127 @@ class TestFloat32Decoder(MixedPolicyCase):
 
     def test_amp_trainer_full_ckpt_lean_split(self):
         n = 4
-        model = GroupRegLevelModel(4, narrow_config(dropout=0.0, seed=1, deform_decoder=True),
-                                   gradient_checkpointing="full", lean_sampler=True, split_group_conv=True,
-                                   deform_decoder_dtype="float32").build_model(n)
-        self.assertEqual(model.deform_decoder.d1.conv.compute_dtype, "float32")
-        head = model.deform_decoder.svf_head
-        head.kernel.assign(np.random.default_rng(0).normal(0, 1e-3, head.kernel.shape).astype(np.float32))
-        dgroup = fd.synthetic_deform_group(4, n, seed=0)
-        opt = MP.LossScaleOptimizer(O.make_optimizer("adam", lr=1e-3), initial_scale=2.0 ** 8)
-        cfg = TrainConfig(level=4, group_size=n, steps=100, val_every=0, log_every=0, task_ratio={"deform": 1.0},
-                          schedule=ScheduleConfig("constant", base_lr=1e-3, total_steps=100, warmup_steps=0),
-                          seed=0, amp=True, lean_sampler=True)
-        tr = Trainer(model, opt, {"deform": fd.FixedGroupSource(dgroup["batch"])},
-                     synthetic_group(4, n, "rigid", seed=0)["S"], cfg)
-        before = [v.numpy().copy() for v in model.deform_decoder.trainable_variables]
-        for _ in range(3):
-            res = tr.train_step("deform", dgroup["batch"])
-            self.assertTrue(res["finite"], res)
-        self.assertEqual(tr.trace_counts, {"deform": 1})
-        self.assertTrue(any(not np.array_equal(a, v.numpy())
-                            for a, v in zip(before, model.deform_decoder.trainable_variables)))
+        for dtype in ("float32", "float32_fine"):          # fp32-decoder-width: both float32 modes
+            with self.subTest(deform_decoder_dtype=dtype):
+                model = GroupRegLevelModel(4, narrow_config(dropout=0.0, seed=1, deform_decoder=True),
+                                           gradient_checkpointing="full", lean_sampler=True,
+                                           split_group_conv=True, deform_decoder_dtype=dtype).build_model(n)
+                self.assertEqual(model.deform_decoder.d1.conv.compute_dtype, "float32")
+                self.assertEqual(model.deform_decoder.d3.conv.compute_dtype,
+                                 "float16" if dtype == "float32_fine" else "float32")
+                head = model.deform_decoder.svf_head
+                head.kernel.assign(np.random.default_rng(0).normal(0, 1e-3, head.kernel.shape).astype(np.float32))
+                dgroup = fd.synthetic_deform_group(4, n, seed=0)
+                opt = MP.LossScaleOptimizer(O.make_optimizer("adam", lr=1e-3), initial_scale=2.0 ** 8)
+                cfg = TrainConfig(level=4, group_size=n, steps=100, val_every=0, log_every=0,
+                                  task_ratio={"deform": 1.0},
+                                  schedule=ScheduleConfig("constant", base_lr=1e-3, total_steps=100,
+                                                          warmup_steps=0),
+                                  seed=0, amp=True, lean_sampler=True)
+                tr = Trainer(model, opt, {"deform": fd.FixedGroupSource(dgroup["batch"])},
+                             synthetic_group(4, n, "rigid", seed=0)["S"], cfg)
+                before = [v.numpy().copy() for v in model.deform_decoder.trainable_variables]
+                for _ in range(3):
+                    res = tr.train_step("deform", dgroup["batch"])
+                    self.assertTrue(res["finite"], res)
+                self.assertEqual(tr.trace_counts, {"deform": 1})
+                self.assertTrue(any(not np.array_equal(a, v.numpy())
+                                    for a, v in zip(before, model.deform_decoder.trainable_variables)))
+                del tr, opt, model
+                free_memory()
+                MP.set_global_policy("mixed_float16")
+
+
+def _layers(layer):
+    """`layer` and every Keras layer below it."""
+    return [x for x in [layer] + list(layer.submodules) if isinstance(x, tf.keras.layers.Layer)]
+
+
+class TestFloat32FineDecoder(MixedPolicyCase):
+    """fp32-decoder-width D1: --deform-decoder-dtype float32_fine (d2, d1, their upsamples and
+    svf_norm_act in float32; d5..d3 float16) under mixed_float16."""
+
+    FP32_PARTS = ("d2", "d1", "up_d2", "up_d1", "svf_norm_act", "svf_head")
+
+    def assert_decoder_dtypes(self, model, mode):
+        dec = model.deform_decoder
+        if mode == "float32":
+            want32 = {id(x) for x in _layers(dec)}
+        elif mode == "float32_fine":
+            want32 = set()
+            for name in self.FP32_PARTS:
+                if getattr(dec, name) is not None:
+                    want32.update(id(x) for x in _layers(getattr(dec, name)))
+        else:                                                 # policy / float16
+            want32 = {id(x) for x in _layers(dec.svf_head)}
+        n32 = 0
+        for x in _layers(dec):
+            want = "float32" if id(x) in want32 else "float16"
+            self.assertEqual(x.compute_dtype, want, "%s %s" % (mode, x.name))
+            n32 += want == "float32"
+        self.assertEqual(n32, len(want32))
+        if mode == "float32_fine":
+            self.assertEqual(dec.float32_stages, ("d2", "d1"))
+            for name in ("d5", "d4", "d3"):
+                self.assertEqual(getattr(dec, name).conv.compute_dtype, "float16", name)
+                self.assertEqual(getattr(dec, "up_" + name).compute_dtype, "float16", name)
+            self.assertEqual(dec.compute_dtype, "float16")
+        for x in _layers(model.encoder):
+            self.assertEqual(x.compute_dtype, "float16", x.name)
+        self.assertEqual(MP.global_policy().name, "mixed_float16")      # scope restored
+
+    def test_dtypes_per_submodule(self):
+        cases = (("level 2 repro", lambda dtype: self.repro_model(deform_decoder_dtype=dtype)),
+                 ("level 1 tiny", lambda dtype: GroupRegLevelModel(
+                     1, tiny_config(deform_decoder=True, seed=1), deform_decoder_dtype=dtype).build_model(1)))
+        for label, make in cases:
+            for mode in ("policy", "float16", "float32", "float32_fine"):
+                with self.subTest(label, mode=mode):
+                    m = make(mode)
+                    dec = m.deform_decoder
+                    self.assertEqual(dec.up_d1 is not None, label.startswith("level 1"))
+                    self.assertIsNotNone(dec.up_d2)
+                    self.assert_decoder_dtypes(m, mode)
+                    del m, dec
+                    free_memory()
+                    MP.set_global_policy("mixed_float16")
+
+    def test_overflow_repro_finite(self):
+        x, lab = self.repro_data()
+        ref = self.repro_model()
+        w = self.overflow_weights(ref)
+        out = ref(x, task="deform", training=False)
+        self.assertGreater(_nonfinite(out["v_raw"]), 0)               # precondition: the repro overflows
+        m = self.repro_model(deform_decoder_dtype="float32_fine")
+        m.set_weights(w)
+        out = m(x, task="deform", training=False)
+        for k in ("v_raw", "v", "u", "u_inv"):
+            self.assertEqual(_nonfinite(out[k]), 0, k)
+        self.assertEqual(_nonfinite(self.deform_terms(out, lab)["loss"]), 0)
+
+    def test_matches_float32_model_without_overflow(self):
+        x, _ = self.repro_data()
+        m = self.repro_model(deform_decoder_dtype="float32_fine")
+        head = m.deform_decoder.svf_head
+        head.kernel.assign(np.random.default_rng(1).normal(0, 0.02, head.kernel.shape).astype(np.float32))
+        m32 = self.repro_model(policy="float32")
+        m32.set_weights(m.get_weights())
+        v = m(x, task="deform", training=False)["v_raw"].numpy()
+        v32 = m32(x, task="deform", training=False)["v_raw"].numpy()
+        self.assertTrue(np.all(np.isfinite(v)))
+        self.assertGreater(np.abs(v32).max(), 0.0)
+        self.assertLessEqual(np.abs(v - v32).max(), 2e-2 * np.abs(v32).max() + 1e-6)
+
+    def test_noop_under_float32_policy(self):
+        MP.set_global_policy("float32")
+
+        def make(**kw):
+            return GroupRegLevelModel(4, tiny_config(deform_decoder=True, seed=1), **kw).build_model(3)
+        ref = [o.type for o in TestOffAddsNoOps.graph_ops(self, make())]
+        m = make(deform_decoder_dtype="float32_fine")
+        self.assertEqual(m.deform_decoder.float32_stages, ())
+        self.assertTrue(all(x.compute_dtype == "float32" for x in _layers(m)))
+        self.assertEqual([o.type for o in TestOffAddsNoOps.graph_ops(self, m)], ref)
 
 
 class TestCheckpointCompatibility(MixedPolicyCase):
@@ -245,6 +346,55 @@ class TestCheckpointCompatibility(MixedPolicyCase):
         self.assertEqual(fresh.copy_weights_from(a2), len(a2.weights))
         for s, d in zip(a2.weights, fresh.weights):
             np.testing.assert_array_equal(s.numpy(), d.numpy(), d.name)
+
+    MODES = ("policy", "float32", "float32_fine")
+
+    def test_all_modes_identical_variables(self):
+        """fp32-decoder-width: names, shapes and dtypes are identical in all four modes."""
+        sig = {}
+        for mode in self.MODES + ("float16",):
+            m = self.repro_model(deform_decoder_dtype=mode)
+            sig[mode] = [(GroupRegLevelModel._local_name(v), tuple(v.shape), v.dtype) for v in m.variables]
+            self.assertTrue(all(v.dtype == tf.float32 for v in m.variables), mode)
+        for mode in sig:
+            self.assertEqual(sig[mode], sig["policy"], mode)
+
+    def test_checkpoint_and_copy_across_all_modes(self):
+        """Checkpoint write/read and copy_weights_from for every ordered pair of modes."""
+        models = {mode: self.repro_model(deform_decoder_dtype=mode) for mode in self.MODES}
+        rng = np.random.default_rng(3)
+        pairs = [(a, b) for a in self.MODES for b in self.MODES if a != b]
+        for i, (a, b) in enumerate(pairs):
+            with self.subTest(src=a, dst=b):
+                src, dst = models[a], models[b]
+                for v in src.variables:
+                    v.assign(rng.normal(0, 1, v.shape).astype(np.float32))
+                prefix = tf.train.Checkpoint(model=src).write(os.path.join(self.tmp, "%s_%d" % (a, i)))
+                tf.train.Checkpoint(model=dst).read(prefix).assert_existing_objects_matched()
+                for s, d in zip(src.variables, dst.variables):
+                    np.testing.assert_array_equal(s.numpy(), d.numpy(), d.name)
+                for v in src.weights:
+                    v.assign(rng.normal(0, 1, v.shape).astype(np.float32))
+                self.assertEqual(dst.copy_weights_from(src), len(src.weights))
+                for s, d in zip(src.weights, dst.weights):
+                    np.testing.assert_array_equal(s.numpy(), d.numpy(), d.name)
+
+    def test_warm_start_model_across_dtypes(self):
+        """C.warm_start_model (--init-weights) of a policy-mode run into float32 / float32_fine
+        models: mode 'full', every weight equal (closes nonfinite-fixes review NIT 3)."""
+        from runtime import checkpoint as C
+        from tests.test_cascade import save_run
+        cfg = tiny_config(deform_decoder=True)
+        paths, src = save_run(self.tmp, "src", cfg)                     # built under mixed_float16
+        for dtype in ("float32", "float32_fine"):
+            with self.subTest(deform_decoder_dtype=dtype):
+                m = GroupRegLevelModel(4, cfg, deform_decoder_dtype=dtype).build_model(2)
+                info = C.warm_start_model(m, cfg, paths["ckpt_last"])
+                self.assertEqual(info["mode"], "full")
+                self.assertEqual(info["n_restored_vars"], len(m.weights))
+                self.assertEqual(len(m.weights), len(src.weights))
+                for s, d in zip(src.weights, m.weights):
+                    np.testing.assert_array_equal(s.numpy(), d.numpy(), d.name)
 
 
 class TestBnEpsilonOverride(MixedPolicyCase):

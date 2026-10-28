@@ -54,7 +54,8 @@ DECODER_STAGES = ("d5", "d4", "d3", "d2", "d1")
 GRADIENT_CHECKPOINTING = ("none", "integrator", "decoder", "both", "full")
 FP16_ACT_CLIP_SCOPES = ("deform_decoder", "all")          # nonfinite-fixes a1
 FP16_ACT_CLIP_MAX = 32000.0     # two clipped split-conv terms sum to <= 64000 < 65504
-DEFORM_DECODER_DTYPES = ("policy", "float16", "float32")  # nonfinite-fixes a2
+DEFORM_DECODER_DTYPES = ("policy", "float16", "float32", "float32_fine")  # nonfinite-fixes a2
+FLOAT32_FINE_STAGES = ("d2", "d1")   # fp32-decoder-width D1: float32 stages of 'float32_fine'
 BOTTLENECK_SHAPE = (5, 7, 6)
 
 
@@ -201,22 +202,42 @@ class DeformDecoder(tf.keras.layers.Layer):
     the encoder's pool3); d1 at level 1 (mirrors pool2). All upsamples are parameter-free, so the
     variables are identical at every level. The SVF head is NormAct -> Conv3D(3, 3, 'same') with
     zero kernel and bias in float32: v_raw = 0 at init (identity map). dec_feat = d1 output.
+
+    Per-stage dtype (fp32-decoder-width D1): the stages named in ``float32_stages`` (a subset of
+    DECODER_STAGES; GroupRegLevelModel passes FLOAT32_FINE_STAGES = d2, d1 for
+    deform_decoder_dtype 'float32_fine') are built with their upsample under a float32 policy, and
+    then svf_norm_act too; the other stages and this layer keep the policy at construction time.
+    `call` casts x to each stage block's compute dtype before its upsample and to svf_norm_act's
+    before the head (no-op casts when the dtypes match, so a uniform-dtype decoder's graph is
+    unchanged). Variables are float32 and identical in every case.
     """
 
-    def __init__(self, level, config=None, **kwargs):
+    def __init__(self, level, config=None, float32_stages=(), **kwargs):
         super().__init__(**kwargs)
         self.level = P.check_level(level)
         self.config = config or ModelConfig()
+        float32_stages = tuple(float32_stages)
+        bad = [s for s in float32_stages if s not in DECODER_STAGES]
+        if bad:
+            raise ValueError("float32_stages must be a subset of {}, got {!r}".format(
+                DECODER_STAGES, float32_stages))
+        self.float32_stages = float32_stages
         cfg = self.config
         widths = cfg.resolved_decoder_widths()
         has_up = {"d5": True, "d4": True, "d3": True, "d2": self.level in (2, 1),
                   "d1": self.level == 1}
         for name, width in zip(DECODER_STAGES, widths):
-            setattr(self, "up_" + name,
-                    L.TrilinearUpsample2x(name="up_" + name) if has_up[name] else None)
-            setattr(self, name, _conv_block(cfg, width, 1, True, name, residual_ok=False))
-        self.svf_norm_act = L.NormAct(cfg.norm, cfg.negative_slope, cfg.bn_momentum,
-                                      cfg.bn_epsilon, name="svf_norm_act")
+            scope = (precision.policy_scope("float32") if name in float32_stages
+                     else contextlib.nullcontext())
+            with scope:
+                setattr(self, "up_" + name,
+                        L.TrilinearUpsample2x(name="up_" + name) if has_up[name] else None)
+                setattr(self, name, _conv_block(cfg, width, 1, True, name, residual_ok=False))
+        scope = (precision.policy_scope("float32") if float32_stages
+                 else contextlib.nullcontext())
+        with scope:
+            self.svf_norm_act = L.NormAct(cfg.norm, cfg.negative_slope, cfg.bn_momentum,
+                                          cfg.bn_epsilon, name="svf_norm_act")
         self.svf_head = tf.keras.layers.Conv3D(
             3, 3, padding="same", use_bias=True, kernel_initializer="zeros",
             bias_initializer="zeros", dtype="float32", name="svf_head")
@@ -230,11 +251,14 @@ class DeformDecoder(tf.keras.layers.Layer):
         x = tf.cast(skips[5], self.compute_dtype)
         for name, skip in zip(DECODER_STAGES, (skips[4], skips[3], skips[2], skips[1], skips[0])):
             up, block = getattr(self, "up_" + name), getattr(self, name)
+            # No-op unless this stage runs in another dtype ('float32_fine': d2, d1 in float32).
+            x = tf.cast(x, block.compute_dtype)
             if up is not None:
                 x = up(x)
             x = block(tf.concat([x, tf.cast(skip, x.dtype)], axis=-1), training=training)
         dec_feat = x
-        v_raw = self.svf_head(self.svf_norm_act(x, training=training))
+        x_head = tf.cast(x, self.svf_norm_act.compute_dtype)
+        v_raw = self.svf_head(self.svf_norm_act(x_head, training=training))
         return tf.cast(v_raw, tf.float32), dec_feat
 
     def blocks(self):
@@ -282,12 +306,19 @@ class GroupRegLevelModel(tf.keras.Model):
         BatchNormWithSeparateAffine to [-C, C]. fp16_act_clip_scope 'deform_decoder' (default:
         d5..d1 + svf_norm_act + the blocks' BN) or 'all' (every such layer of this model, encoder
         and linear decoder too; this also changes the linear tasks). No-op under float32.
-      deform_decoder_dtype 'policy' (default) | 'float16' | 'float32': 'float32' constructs the
-        DeformDecoder (and so all its sublayers) under a float32 policy while the global policy is
-        mixed_float16; the fp16 skips are cast to float32, the encoder stays float16. Variables
-        are float32 with the same names/order in every mode, so checkpoints, warm start,
-        `copy_weights_from` and resume are compatible across dtypes. Costs ~2x decoder activation
-        memory (fine at levels 4/2; not expected to fit level 1 at 4 pairs under 40000 MB).
+      deform_decoder_dtype 'policy' (default) | 'float16' | 'float32' | 'float32_fine':
+        'policy' = the global policy; 'float16' = explicit alias of it under mixed_float16 (same
+        graph; error under a float32 policy); 'float32' constructs the DeformDecoder (and so all
+        its sublayers) under a float32 policy while the global policy is mixed_float16 (the fp16
+        skips are cast to float32, the encoder stays float16; ~2x decoder activation memory, not
+        expected to fit level 1 at 4 pairs under 40000 MB); 'float32_fine' (fp32-decoder-width
+        D1) runs only the full- and half-resolution stages d2, d1 (with up_d2 / up_d1 when they
+        exist) and svf_norm_act in float32 (svf_head is float32 in every mode), while the
+        DeformDecoder itself, d5..d3 and their upsamples keep mixed_float16. 'float32' and
+        'float32_fine' are no-ops under a float32 global policy. Variables are float32 with the
+        same names, order and shapes in every mode, so checkpoints, warm start,
+        `copy_weights_from`, --cascade-from and resume are compatible across modes. Frozen
+        cascade stages (`models.cascade`) are always built float32, whatever this flag is.
       bn_epsilon_override E (0 = off): `layers.set_bn_epsilon` on every BatchNormWithSeparateAffine
         of this model (LayerNorm / InstanceNorm untouched; config.bn_epsilon unchanged).
 
@@ -343,8 +374,14 @@ class GroupRegLevelModel(tf.keras.Model):
         decoder_scope = (precision.policy_scope("float32")
                          if deform_decoder_dtype == "float32" and global_compute != "float32"
                          else contextlib.nullcontext())
+        # 'float32_fine' under a float32 global policy is a no-op (like 'float32').
+        float32_stages = (FLOAT32_FINE_STAGES
+                          if deform_decoder_dtype == "float32_fine" and global_compute != "float32"
+                          else ())
         with decoder_scope:
-            self.deform_decoder = (DeformDecoder(self.level, self.config, name="deform_decoder")
+            self.deform_decoder = (DeformDecoder(self.level, self.config,
+                                                 float32_stages=float32_stages,
+                                                 name="deform_decoder")
                                    if self.config.deform_decoder else None)
         if self.split_group_conv:
             L.set_split_group_conv(self, True)

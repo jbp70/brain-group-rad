@@ -252,6 +252,9 @@ class TestArgs(unittest.TestCase):
         self.assertEqual(A.model_config_from_args(a), A.model_config_from_args(A.parse_args(ok[:4])))  # no field
         A.parse_args(["--data", "x", "--amp", "true", "--fp16-act-clip", "32000", "--fp16-act-clip-scope", "all"])
         A.parse_args(["--data", "x", "--amp", "true", "--deform-decoder-dtype", "float16"])
+        a = A.parse_args(["--data", "x", "--amp", "true", "--task-ratio", "rigid:1,deform:1",
+                          "--deform-decoder-dtype", "float32_fine"])           # fp32-decoder-width
+        self.assertEqual(a.deform_decoder_dtype, "float32_fine")
         A.parse_args(["--data", "x", "--bn-epsilon-override", "1e-2"])        # also without AMP
         amp_d = ["--amp", "true", "--task-ratio", "deform:1"]
         cases = ((["--nonfinite-patience-task", "-1"], "--nonfinite-patience-task must be >= 0"),
@@ -264,6 +267,10 @@ class TestArgs(unittest.TestCase):
                  (["--deform-decoder-dtype", "float16"], "needs --amp true"),
                  (["--amp", "true", "--deform-decoder-dtype", "float32"],
                   "--deform-decoder-dtype float32 needs 'deform' in --task-ratio"),
+                 (["--task-ratio", "deform:1", "--deform-decoder-dtype", "float32_fine"],
+                  "--deform-decoder-dtype float32_fine needs --amp true"),
+                 (["--amp", "true", "--task-ratio", "rigid:1,affine:1", "--deform-decoder-dtype", "float32_fine"],
+                  "--deform-decoder-dtype float32_fine needs 'deform' in --task-ratio"),
                  (amp_d + ["--fp16-act-clip-scope", "encoder"], "invalid choice"),
                  (["--bn-epsilon-override", "-1"], "--bn-epsilon-override must be finite and >= 0"),
                  (["--bn-epsilon-override", "inf"], "--bn-epsilon-override must be finite and >= 0"))

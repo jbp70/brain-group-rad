@@ -871,6 +871,11 @@ class TestScriptsDryRun(unittest.TestCase):
         self.assert_seqs(main, (["--fp16-act-clip", "30000", "--fp16-act-clip-scope", "deform_decoder"],))
         self.assertNotIn("--deform-decoder-dtype", main)
         self.check_parses(main)
+        for path, base in ((R4, {}), (R2, self.l2()), (R1, self.l2())):   # fp32-decoder-width
+            with self.subTest(os.path.basename(path), dtype="float32_fine"):
+                main, _, _ = self.dry(path, **dict(base, DEFORM_DECODER_DTYPE="float32_fine"))
+                self.assert_seqs(main, (["--deform-decoder-dtype", "float32_fine"],))
+                self.check_parses(main)
 
     def test_mitigations_linear_only_r4(self):
         main, _, out = self.dry(R4, TASK_RATIO="rigid:1,affine:1", FP16_ACT_CLIP="30000",
@@ -880,6 +885,10 @@ class TestScriptsDryRun(unittest.TestCase):
         for flag in ("--fp16-act-clip", "--deform-decoder-dtype"):
             self.assertNotIn(flag, main)
         self.assert_seqs(main, (["--bn-epsilon-override", "1e-3"],))
+        self.check_parses(main)
+        main, _, out = self.dry(R4, TASK_RATIO="rigid:1,affine:1", DEFORM_DECODER_DTYPE="float32_fine")
+        self.assertIn("NOTE: linear-only ratio, DEFORM_DECODER_DTYPE dropped", out)
+        self.assertNotIn("--deform-decoder-dtype", main)
         self.check_parses(main)
         main, _, _ = self.dry(R4, TASK_RATIO="rigid:1,affine:1", FP16_ACT_CLIP="30000", FP16_ACT_CLIP_SCOPE="all")
         self.assert_seqs(main, (["--fp16-act-clip", "30000", "--fp16-act-clip-scope", "all"],))
@@ -894,6 +903,8 @@ class TestScriptsDryRun(unittest.TestCase):
                 self.assertEqual(r.returncode, 2, (path, env, r.stdout, r.stderr))
                 self.assertIn("ERROR", r.stderr)
                 self.assertNotIn("MAIN: ", r.stdout)
+                if "DEFORM_DECODER_DTYPE" in env:
+                    self.assertIn("policy float16 float32 float32_fine", r.stderr)
 
     def test_r2_default(self):
         main, chk, _ = self.dry(R2, **self.l2())

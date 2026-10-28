@@ -32,6 +32,8 @@ The per-task non-finite guard, ckpt/last protection, LSO skip, window logs, chec
   - isolated forward NaNs.
 
   The flag is a captured `tf.Variable(bool)` per task, `Trainer._lso_skip`. It is not part of any checkpoint or of the BN backup, and nothing re-traces (trace counts stay at 1).
+
+  fp32-decoder-width: the flag now follows the hard-failure streak (review NIT 1), i.e. `save_streak` instead of the all-non-finite streak, so gradient-only overflows never arm it and the first forward NaN after them reaches the LSO.
 - **Streak scope:** streaks and the pending-save flag live inside one `fit()` call. A resume starts with empty streaks, which is fine because the ckpt/last it resumes from is pre-streak.
 - **Window logs:** each log record carries `train_<task>/{window_steps, nonfinite_steps, nonfinite_frac}` for every task with a step in the window, plus `optimizer/loss_scale` under an LSO. A stderr `WARNING step N: task T non-finite in b of n steps of the last log window (p %)` is printed when the fraction is > 0.1. `nonfinite_step_skipped` gains `task_streak`, and `lso_skipped` under AMP.
 - **Not implemented (documented):** an optional "restore last good + lower lr" mode. It would keep a `ckpt/good` manager, saved only when no task had a non-finite step in the last window, restore model + optimizer + LSO + RNG on a trip, halve the failing task's lr, and allow at most 2 recoveries.

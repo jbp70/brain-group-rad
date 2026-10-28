@@ -1,0 +1,7 @@
+{
+  "task_id": "task-fp32-decoder-width",
+  "task_description": "Float32 deform decoder for the from-scratch retrain: new --deform-decoder-dtype float32_fine (fp32 only d2/d1/svf), tests incl. warm start + cascade across dtypes (nonfinite-fixes NIT 3), NIT 1 (LSO flag on hard failures) + NIT 2 docs, --cascade-trainable-init fresh for narrower trainable stages (memory measurement only) + width-flag documentation (existing --filters/--decoder-widths), and the m11 real-trainer memory job slurm/m11_fp32_width_memory.sh with a stdlib collector. No commits, no submission.",
+  "status": "completed",
+  "feature_order": ["FEAT-001", "FEAT-002", "FEAT-003"],
+  "blocked_reason": null
+}

@@ -745,6 +745,46 @@ class TestCascadeMain(MainCase):
         self.assertEqual(ev[0]["data"]["new"]["skip_probs"], {"rigid": {"4": 0.2}})
         self.assertEqual(ev[0]["step"], 2)
 
+    def test_random_width_sources_chain(self):
+        """fp32-decoder-width FEAT-002: the minimal source recipe of slurm/m11_random_sources.sh
+        (one rigid step, deform decoder built, no validation, only the final ckpt/last save) at a
+        non-default width (stem and D2/D1 narrower than TINY) builds a level-4 and a level-2 source
+        that a level-1 cascade accepts through the normal --cascade-from copy path."""
+        import tensorflow as tf
+        self.addCleanup(tf.keras.mixed_precision.set_global_policy, "float32")       # level 1 --amp true
+        res = os.path.join(self.tmp, "results")
+        widths = ["--filters", "4,16,16,16,16,16", "--decoder-widths", "8,8,8,4,4"]
+        recipe = ["--overfit-one-group", "--overfit-synthetic", "--task-ratio", "rigid:1", "--deform-decoder", "true",
+                  "--group-size", "2", "--overfit-max-steps", "1", "--warmup-steps", "0", "--val-every", "0",
+                  "--ckpt-every", "0", "--val-png", "false", "--log-every", "1", "--resume", "false",
+                  "--results", res] + TINY_ARGS + widths + COMMON
+        self.assertIn(M.main(recipe + ["--level", "4", "--run-name", "l4_w"]), (0, 1))
+        free_memory()
+        self.assertIn(M.main(recipe + ["--level", "2", "--run-name", "l2_w", "--cascade-from",
+                                       os.path.join(self.run_dir("l4_w"), "ckpt", "last")]), (0, 1))
+        free_memory()
+        src2 = os.path.join(self.run_dir("l2_w"), "ckpt", "last")
+        keys = [k for k, _ in tf.train.list_variables(src2)]
+        self.assertTrue(any(k.startswith("frozen_stage/") for k in keys))
+        self.assertIn(M.main(recipe + ["--level", "1", "--run-name", "l1_w", "--cascade-from", src2,
+                                       "--amp", "true", "--split-group-conv", "true"]), (0, 1))
+        free_memory()
+        for name, level in (("l2_w", 2), ("l1_w", 1)):
+            with open(os.path.join(self.run_dir(name), "config.json")) as f:
+                cfg = json.load(f)
+            with self.subTest(name):
+                self.assertEqual(cfg["model_config"]["filters"], [4, 16, 16, 16, 16, 16])
+                self.assertEqual(cfg["model_config"]["decoder_widths"], [8, 8, 8, 4, 4])
+                self.assertTrue(cfg["model_config"]["deform_decoder"])
+                iw = cfg["init_weights"]
+                self.assertEqual((iw["via"], iw["mode"], iw["n_fresh_vars"]), ("cascade", "full", 0))
+                self.assertEqual(iw["cross_level"], [4 if level == 2 else 2, level])
+                self.assertEqual(cfg["cascade"]["source_step"], 1)
+        with open(os.path.join(self.run_dir("l1_w"), "config.json")) as f:
+            cas = json.load(f)["cascade"]
+        self.assertEqual([s["level"] for s in cas["stages"]], [4, 2])
+        self.assertEqual([s["origin_step"] for s in cas["stages"]], [1, 1])
+
 
 class TestStageSkipArgs(unittest.TestCase):
     """Retrain-prereqs 11.3 a (parser) and g (`main._skip_consistency`), `_refresh_skip_record`."""
