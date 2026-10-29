@@ -132,3 +132,54 @@ New: `.agents/tasks/fp32-decoder-width/` (plan, features, verification, review, 
 `tests/test_collect_memory_runs.py`.
 
 `main.py` and `runtime/checkpoint.py` are unchanged.
+
+## Follow-up L4/L2 job
+After jobs 10527941 / 10528396 (every float32 / float32_fine line at L4 N 64 and L2 N 16 OOMed at
+default and d12h widths), `slurm/m11_fp32_width_memory.sh` has 28 more configs, appended after the
+existing 20 (names and order of those unchanged; SBATCH header unchanged):
+- 12 main lines, recipe as the existing l4_* / l2_* lines: L4 deform N 64 from scratch and L2 deform
+  N 16 cascading from the random `l4_W` source, `--max-pairs 64`, {f32fine, f32, f16} x {d12hs, fr50}.
+- 16 fallbacks, float32_fine / float32 only, d12hs / fr50, named `..._n<N>`: L4 N 48, N 32, then
+  L2 N 12, N 8. The suffix sets `--group-size N --deform-group-size N`; status.tsv column `n` (and
+  so the collector's `n`) is the real N.
+- Sources: a width used only by level-2 lines now builds only `l4_W` (new `SOURCE_L4_ONLY` in
+  `m11_random_sources.sh`, filled by the job); `l2_W` is built only if a level-1 line needs it. Both
+  ONLY lists below build `l4_d12hs` and `l4_fr50` only.
+
+Dry run (`ONLY=<12 main names> BGR_DRY_RUN=1 PROJ=/tmp/m11dry bash slurm/m11_fp32_width_memory.sh`,
+common recipe flags cut):
+```
+SOURCE l4_d12hs: python main.py ... --run-name l4_d12hs --level 4 ... --filters 16,64,128,192,256,384 --decoder-widths 128,96,64,16,8
+SOURCE l4_fr50:  python main.py ... --run-name l4_fr50 --level 4 ... --filters 16,32,128,192,256,384 --decoder-widths 128,96,64,16,8
+CONFIG l4_f32fine_d12hs: ... --level 4 --group-size 64 --deform-group-size 64 --max-pairs 64 --pair-recompute false --val-pair-chunk 16 --filters 16,64,... --run-name l4_f32fine_d12hs --deform-decoder-dtype float32_fine
+CONFIG l4_f32_d12hs / l4_f16_d12hs / l4_f32fine_fr50 / l4_f32_fr50 / l4_f16_fr50: same, dtype float32 / float16, fr50 = --filters 16,32,...
+CONFIG l2_f32fine_d12hs: ... --level 2 --cascade-from .../sources/l4_d12hs/ckpt/last --group-size 16 --deform-group-size 16 --max-pairs 64 --pair-recompute false --val-pair-chunk 4 --filters 16,64,... --deform-decoder-dtype float32_fine
+CONFIG l2_f32_d12hs / l2_f16_d12hs: same; l2_*_fr50: --cascade-from .../sources/l4_fr50/ckpt/last
+COLLECT: python scripts/collect_memory_runs.py --status .../status.tsv --runs .../runs --out .../fp32_width_memory.json --job manual
+```
+Fallback dry run: `--deform-group-size` 48 / 32 (L4) and 12 / 8 (L2), L2 lines cascade from
+`sources/l4_d12hs` or `sources/l4_fr50`, sources again `l4_d12hs`, `l4_fr50` only.
+
+Time estimate for the 12 main lines (RTX 8000): 2 level-4 sources ~1-2 min each; L4 N 64 line
+~2 min if it OOMs (measured 100-130 s), ~4-6 min if it fits; L2 N 16 line ~2 min OOM (120-130 s),
+~4-6 min if it fits. Expected (f16 fits, part of the fp32 lines fit) ~45-55 min; worst case (all
+12 fit at 6 min) ~75-78 min. So 1 h 15 min is enough in the expected case but not in the worst
+case. The job's time guard defaults to 13800 s and does not see the shorter `--time`, so pass
+`TIME_BUDGET_S=4200` (70 min): a config that would start after 65 min is recorded as
+skipped_time, the remaining ones are capped at 70 min, and the collector still runs before SLURM
+kills the job. Skipped lines are rerun with the split rule. (`--time=01:30:00` with the default
+guard also removes the risk.)
+
+(a) 12 main configs:
+```
+ONLY=l4_f32fine_d12hs,l4_f32_d12hs,l4_f16_d12hs,l4_f32fine_fr50,l4_f32_fr50,l4_f16_fr50,l2_f32fine_d12hs,l2_f32_d12hs,l2_f16_d12hs,l2_f32fine_fr50,l2_f32_fr50,l2_f16_fr50 SOURCE_TIMEOUT=600 TIME_BUDGET_S=4200 sbatch --time=01:15:00 slurm/m11_fp32_width_memory.sh
+```
+(b) fallbacks (only if needed; reuse the sources of job (a); ~16 x 2-5 min ~45-75 min):
+```
+ONLY=l4_f32fine_d12hs_n48,l4_f32_d12hs_n48,l4_f32fine_fr50_n48,l4_f32_fr50_n48,l4_f32fine_d12hs_n32,l4_f32_d12hs_n32,l4_f32fine_fr50_n32,l4_f32_fr50_n32,l2_f32fine_d12hs_n12,l2_f32_d12hs_n12,l2_f32fine_fr50_n12,l2_f32_fr50_n12,l2_f32fine_d12hs_n8,l2_f32_d12hs_n8,l2_f32fine_fr50_n8,l2_f32_fr50_n8 SOURCES_DIR=<job (a) dir>/sources SOURCE_TIMEOUT=600 TIME_BUDGET_S=6000 sbatch --time=01:45:00 slurm/m11_fp32_width_memory.sh
+```
+A subset of (b) is fine (e.g. only the N steps below the largest fitting main config).
+rtx8000, account qtim, 1 GPU, 3 CPUs, 64G (SBATCH header). Check `squeue -u jn85` (2-job limit).
+
+Tests (WSL, bgr_preproc38): `python -m unittest tests.test_slurm_scripts tests.test_collect_memory_runs`
+-> 44 tests OK; `bash -n` on both scripts OK.

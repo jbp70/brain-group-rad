@@ -21,7 +21,8 @@ M10C = os.path.join(REPO, "slurm", "m10_batch_memory_capped.sh")
 M11SRC = os.path.join(REPO, "slurm", "m11_random_sources.sh")
 M11 = os.path.join(REPO, "slurm", "m11_fp32_width_memory.sh")
 # Env of slurm/m11_random_sources.sh removed from the inherited environment (TestM11Sources).
-M11_SOURCE_ENV = ("SOURCES_DIR", "SOURCE_WIDTHS", "SOURCE_N", "SOURCE_TIMEOUT", "BGR_DRY_RUN", "STUB_FAIL_LEVEL",
+M11_SOURCE_ENV = ("SOURCES_DIR", "SOURCE_WIDTHS", "SOURCE_L4_ONLY", "SOURCE_N", "SOURCE_TIMEOUT", "BGR_DRY_RUN",
+                  "STUB_FAIL_LEVEL",
                   "STUB_FAIL_RUN")
 M9_KNOBS = ["--lean-sampler", "true", "--lean-losses", "false", "--split-group-conv", "true"]
 LOGS = "/autofs/space/crater_001/users/jn85/BrainRegProjects/GroupwiseReg/logs"
@@ -694,6 +695,17 @@ class TestM11Sources(unittest.TestCase):
                          [("l4_d12h", "1", "0"), ("l2_d12h", "-2", "0")])
         self.assertIn("source l2_d12h missing", r.stdout)
 
+    def test_level4_only_widths(self):
+        """SOURCE_L4_ONLY widths build l4_W only (level-2 grid lines need nothing else)."""
+        r, _ = self.run_script(SOURCE_WIDTHS="d12h fr50", SOURCE_L4_ONLY="fr50", BGR_DRY_RUN="1")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual([ln.split(":")[0][len("SOURCE "):] for ln in r.stdout.splitlines()
+                          if ln.startswith("SOURCE ")], ["l4_d12h", "l2_d12h", "l4_fr50"])
+        r, calls = self.run_script(SOURCE_WIDTHS="d12hs fr50", SOURCE_L4_ONLY="d12hs fr50")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual([c.split("|--run-name|")[1].split("|")[0] for c in calls], ["l4_d12hs", "l4_fr50"])
+        self.assertFalse(os.path.exists(os.path.join(self.src, "l2_d12hs")))
+
     def test_invalid_settings(self):
         for extra in ({"SOURCE_WIDTHS": "d12h foo"}, {"SOURCE_WIDTHS": "default"}, {"SOURCE_N": "1"},
                       {"SOURCE_TIMEOUT": "x"}):
@@ -731,9 +743,23 @@ class TestM11Job(unittest.TestCase):
              "l1_f32_d12hs", "l1_f32fine_fr50", "l1_f32_fr50", "l1_f16_default", "l1_f16_d12h", "l1_f16_d12hs",
              "l1_f16_fr50", "l2_f32fine_default", "l2_f32_default", "l2_f32fine_d12h", "l2_f32_d12h",
              "l4_f32fine_default", "l4_f32_default", "l4_f32fine_d12h", "l4_f32_d12h"]
+    # Follow-up L4 / L2 lines at d12hs / fr50: 12 main lines, then the smaller-group fallbacks.
+    MAIN12 = ["l4_f32fine_d12hs", "l4_f32_d12hs", "l4_f16_d12hs", "l4_f32fine_fr50", "l4_f32_fr50", "l4_f16_fr50",
+              "l2_f32fine_d12hs", "l2_f32_d12hs", "l2_f16_d12hs", "l2_f32fine_fr50", "l2_f32_fr50", "l2_f16_fr50"]
+    FALLBACKS = ["%s_%s_%s_n%d" % (lv, tag, w, n) for lv, n in (("l4", 48), ("l4", 32), ("l2", 12), ("l2", 8))
+                 for w in ("d12hs", "fr50") for tag in ("f32fine", "f32")]
+    ORDER = ORDER + MAIN12 + FALLBACKS
     SOURCES = ["l4_d12h", "l2_d12h", "l4_d12hs", "l2_d12hs", "l4_fr50", "l2_fr50"]
     WIDTH_FLAGS = TestM11Sources.WIDTH_FLAGS
     DTYPES = {"f16": "float16", "f32": "float32", "f32fine": "float32_fine"}
+    DEFAULT_N = {"l1": 4, "l2": 16, "l4": 64}
+
+    @classmethod
+    def parse(cls, name):
+        """<level>_<tag>_<width>[_n<N>] -> (lv, tag, width, N)."""
+        parts = name.split("_")
+        n = int(parts.pop()[1:]) if len(parts) == 4 else cls.DEFAULT_N[parts[0]]
+        return parts[0], parts[1], parts[2], n
     COMMON = (["--task-ratio", "deform:1"], ["--val-every", "0"], ["--ckpt-every", "0"], ["--bn-recal-batches", "0"],
               ["--resume", "false"], ["--amp", "true"], ["--gradient-checkpointing", "full"],
               ["--lean-sampler", "true"], ["--split-group-conv", "true"], ["--log-every", "1"],
@@ -805,9 +831,12 @@ class TestM11Job(unittest.TestCase):
         configs = self.dry_lines("CONFIG", r.stdout)
         self.assertEqual([n for n, _ in configs], self.ORDER)
         for name, argv in configs:
-            lv, tag, width = name.split("_")
+            lv, tag, width, n = self.parse(name)
             with self.subTest(name):
                 self.assertEqual(argv[:2], ["python", "main.py"])
+                self.assertTrue(_has_seq(argv, ["--deform-group-size", str(n)]), argv)
+                self.assertTrue(_has_seq(argv, ["--group-size", str(n)]), argv)
+                self.assertEqual(argv.count("--deform-group-size"), 1)
                 self.assertEqual(argv[-4:], ["--run-name", name, "--deform-decoder-dtype", self.DTYPES[tag]])
                 for seq in self.COMMON + (["--results", os.path.join(self.out, "runs")],
                                           ["--data", os.path.join(self.tmp, "data")]):
@@ -822,11 +851,11 @@ class TestM11Job(unittest.TestCase):
                     self.assertNotIn("--max-pairs", argv)
                 elif lv == "l2":
                     want = os.path.join(src, "l4_%s" % width, "ckpt", "last") if width != "default" else self.ckpt
-                    for seq in (["--level", "2"], ["--cascade-from", want], ["--deform-group-size", "16"],
+                    for seq in (["--level", "2"], ["--cascade-from", want],
                                 ["--max-pairs", "64"], ["--pair-recompute", "false"], ["--val-pair-chunk", "4"]):
                         self.assertTrue(_has_seq(argv, seq), seq)
                 else:
-                    for seq in (["--level", "4"], ["--deform-group-size", "64"], ["--max-pairs", "64"],
+                    for seq in (["--level", "4"], ["--max-pairs", "64"],
                                 ["--pair-recompute", "false"], ["--val-pair-chunk", "16"]):
                         self.assertTrue(_has_seq(argv, seq), seq)
                     self.assertNotIn("--cascade-from", argv)
@@ -862,14 +891,16 @@ class TestM11Job(unittest.TestCase):
                    ((ln[len("SOURCE "):].split(":")[0], ln) for ln in r.stdout.splitlines()
                     if ln.startswith("SOURCE "))}
         lines = [ln for ln in r.stdout.splitlines() if ln.startswith("CONFIG ")]
-        self.assertEqual(len(lines), 20)
+        self.assertEqual(len(lines), 48)
         for ln in lines:
             name = ln[len("CONFIG "):].split(":")[0]
-            lv, tag, width = name.split("_")
+            lv, tag, width, n = self.parse(name)
             argv = shlex.split(ln.split(": ", 1)[1])
             with self.subTest(name):
                 a = A.parse_args(argv[2:])
                 self.assertEqual(a.level, int(lv[1]))
+                self.assertEqual((a.deform_group_size, a.group_size), (n, n))
+                self.assertEqual(a.max_pairs, 0 if lv == "l1" else 64)
                 self.assertEqual(a.deform_decoder_dtype, self.DTYPES[tag])
                 self.assertTrue(a.amp)
                 self.assertEqual(list(a.task_ratio_parsed), ["deform"])
@@ -893,7 +924,25 @@ class TestM11Job(unittest.TestCase):
                                    L2_SOURCE=os.path.join(self.tmp, "missing"))
         self.assertEqual(r.returncode, 0, r.stderr)     # no default-width L1 / L2 line selected
         self.assertEqual([n for n, _ in self.dry_lines("CONFIG", r.stdout)], ["l2_f32_d12h", "l4_f32_default"])
-        self.assertEqual([n for n, _ in self.dry_lines("SOURCE", r.stdout)], ["l4_d12h", "l2_d12h"])
+        self.assertEqual([n for n, _ in self.dry_lines("SOURCE", r.stdout)], ["l4_d12h"])   # L2 line: l4_W only
+        # Follow-up job: the 12 main lines need l4_d12hs + l4_fr50 only (no l2_W, no L1 / L2 real source).
+        r, _ = self.run_script(BGR_DRY_RUN="1", ONLY=",".join(reversed(self.MAIN12)),
+                               L1_SOURCE=os.path.join(self.tmp, "missing"),
+                               L2_SOURCE=os.path.join(self.tmp, "missing"))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual([n for n, _ in self.dry_lines("SOURCE", r.stdout)], ["l4_d12hs", "l4_fr50"])
+        self.assertEqual([n for n, _ in self.dry_lines("CONFIG", r.stdout)], self.MAIN12)    # list order kept
+        r, _ = self.run_script(BGR_DRY_RUN="1", ONLY="l2_f32_fr50_n8,l4_f32fine_d12hs_n48,l1_f32_fr50")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual([n for n, _ in self.dry_lines("SOURCE", r.stdout)], ["l4_fr50", "l2_fr50"])
+        configs = dict(self.dry_lines("CONFIG", r.stdout))
+        self.assertEqual(list(configs), ["l1_f32_fr50", "l4_f32fine_d12hs_n48", "l2_f32_fr50_n8"])
+        self.assertTrue(_has_seq(configs["l4_f32fine_d12hs_n48"], ["--deform-group-size", "48"]))
+        self.assertTrue(_has_seq(configs["l2_f32_fr50_n8"], ["--deform-group-size", "8"]))
+        self.assertTrue(_has_seq(configs["l2_f32_fr50_n8"], ["--cascade-from", os.path.join(
+            self.out, "sources", "l4_fr50", "ckpt", "last")]))
+        r, _ = self.run_script(BGR_DRY_RUN="1", ONLY="l4_f32_d12hs_n64")      # not in the list
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
         r, _ = self.run_script(BGR_DRY_RUN="1", ONLY="l4_f32_default")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self.dry_lines("SOURCE", r.stdout), [])
@@ -922,9 +971,9 @@ class TestM11Job(unittest.TestCase):
     def test_m11_stub_run(self):
         r, calls = self.run_script()
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertEqual(len(calls), 6 + 20 + 1, calls)
+        self.assertEqual(len(calls), 6 + 48 + 1, calls)
         mains = [c for c in calls if "|python|main.py|" in c]
-        self.assertEqual(len(mains), 26)
+        self.assertEqual(len(mains), 54)
         for c in mains:
             self.assertTrue(c.startswith("exec|--nv|-B|/scratch|-B|/autofs|-B|/cluster|-B|/space|-B|/vast|"), c)
         names = [c.split("|--run-name|")[1].split("|")[0] for c in mains]
@@ -934,13 +983,13 @@ class TestM11Job(unittest.TestCase):
                         calls[-1])
         self.assertIn("|--out|%s|" % os.path.join(self.out, "fp32_width_memory.json"), calls[-1])
         rows = self.status_rows()
-        self.assertEqual(len(rows), 21)
+        self.assertEqual(len(rows), 49)
         self.assertEqual(rows[0], ["name", "level", "dtype", "widths", "n", "max_pairs", "rc", "elapsed_s", "log"])
         self.assertEqual([x[0] for x in rows[1:]], self.ORDER)
-        lvl = {"l1": ("1", "4", "0"), "l2": ("2", "16", "64"), "l4": ("4", "64", "64")}
+        lvl = {"l1": ("1", "0"), "l2": ("2", "64"), "l4": ("4", "64")}
         for x in rows[1:]:
-            lv, tag, width = x[0].split("_")
-            self.assertEqual((x[1], x[4], x[5]), lvl[lv])
+            lv, tag, width, n = self.parse(x[0])
+            self.assertEqual((x[1], x[4], x[5]), (lvl[lv][0], str(n), lvl[lv][1]))
             self.assertEqual((x[2], x[3], x[6]), (self.DTYPES[tag], width, "0"))
             self.assertEqual(x[8], os.path.join(self.out, "runs", x[0] + ".log"))
             self.assertTrue(os.path.isfile(os.path.join(self.out, "runs", x[0], "config.json")))
@@ -954,9 +1003,9 @@ class TestM11Job(unittest.TestCase):
         """A failed source skips its width's grid lines (rc -2); a failed config does not stop the loop."""
         r, calls = self.run_script(STUB_FAIL_RUN="l4_d12h l1_f32_default")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertEqual(len(calls), 5 + 15 + 1, calls)
+        self.assertEqual(len(calls), 5 + 43 + 1, calls)
         rows = {x[0]: x for x in self.status_rows()[1:]}
-        self.assertEqual(len(rows), 20)
+        self.assertEqual(len(rows), 48)
         skipped = {n for n, x in rows.items() if x[6] == "-2"}
         self.assertEqual(skipped, {"l1_f32fine_d12h", "l1_f32_d12h", "l1_f16_d12h", "l2_f32fine_d12h", "l2_f32_d12h"})
         self.assertEqual(rows["l1_f32_default"][6], "1")

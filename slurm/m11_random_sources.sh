@@ -36,14 +36,17 @@
 #                               lines and touches nothing. Returns 2 on an unknown width, else 0
 #                               (failed builds are results): the caller checks
 #                               m11_source_ok "$SOURCES_DIR/l2_W" per width.
-#   Globals read: DATA, SIF, SOURCES_DIR, SOURCE_WIDTHS (default "d12h d12hs fr50"), SOURCE_N (4),
-#   SOURCE_TIMEOUT (1200 s per run), SLURM_CPUS_PER_TASK (3), BGR_DRY_RUN.
+#   Globals read: DATA, SIF, SOURCES_DIR, SOURCE_WIDTHS (default "d12h d12hs fr50"),
+#   SOURCE_L4_ONLY (widths of SOURCE_WIDTHS for which only l4_W is built, e.g. when only level-2
+#   grid lines need them; default empty), SOURCE_N (4), SOURCE_TIMEOUT (1200 s per run),
+#   SLURM_CPUS_PER_TASK (3), BGR_DRY_RUN.
 #   Status rows (tab-separated, header written once) in $SOURCES_DIR/status.tsv:
 #     name  level  widths  rc  ok  elapsed_s  log
 #   rc -2 = not run because its level-4 source is missing; ok = 1 iff m11_source_ok after the run.
 # Standalone (tests / manual use): bash slurm/m11_random_sources.sh with the same env variables
 # (PROJ, REPO, DATA, SIF, SOURCES_DIR default $PROJ/scratch/m11/<job>/sources); exit 0 iff every
-# requested width has its level-2 source, 2 on invalid settings.
+# requested width has its level-2 source (level-4 source for SOURCE_L4_ONLY widths), 2 on invalid
+# settings.
 # Time estimate (RTX 8000, not measured yet): level-4 source ~2-3 min (DALI + validation sets +
 # model build + 1 step), level-2 source ~4-6 min (level-2 validation sets + frozen stage) ->
 # ~6-9 min per width, ~20-25 min for the three widths.
@@ -82,14 +85,15 @@ m11_source_cmd() {   # m11_source_cmd <4|2> <width>
 }
 
 m11_build_sources() {
-    local widths="${SOURCE_WIDTHS:-$M11_SOURCE_WIDTHS_ALL}" w level name dir t0 rc ok status
+    local widths="${SOURCE_WIDTHS:-$M11_SOURCE_WIDTHS_ALL}" w level levels name dir t0 rc ok status
     status="$SOURCES_DIR/status.tsv"
     if [ -z "${BGR_DRY_RUN:-}" ]; then
         mkdir -p "$SOURCES_DIR"
         [ -f "$status" ] || printf 'name\tlevel\twidths\trc\tok\telapsed_s\tlog\n' > "$status"
     fi
     for w in $widths; do
-        for level in 4 2; do
+        case " ${SOURCE_L4_ONLY:-} " in *" $w "*) levels="4" ;; *) levels="4 2" ;; esac
+        for level in $levels; do
             name="l${level}_$w"
             dir="$SOURCES_DIR/$name"
             m11_source_cmd "$level" "$w" || return 2
@@ -159,7 +163,8 @@ if [ "${BASH_SOURCE[0]}" = "$0" ]; then
     m11_build_sources
     rc=0
     for w in $SOURCE_WIDTHS; do
-        m11_source_ok "$SOURCES_DIR/l2_$w" || { echo "source l2_$w missing"; rc=1; }
+        case " ${SOURCE_L4_ONLY:-} " in *" $w "*) top="l4_$w" ;; *) top="l2_$w" ;; esac
+        m11_source_ok "$SOURCES_DIR/$top" || { echo "source $top missing"; rc=1; }
     done
     exit "$rc"
 fi

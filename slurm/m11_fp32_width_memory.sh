@@ -55,6 +55,17 @@
 #   l1_f32fine_fr50 l1_f32_fr50 l1_f16_default l1_f16_d12h l1_f16_d12hs l1_f16_fr50
 #   l2_f32fine_default l2_f32_default l2_f32fine_d12h l2_f32_d12h
 #   l4_f32fine_default l4_f32_default l4_f32fine_d12h l4_f32_d12h
+# Follow-up L4 / L2 configs (after jobs 10527941 / 10528396: at L4 N 64 / L2 N 16 every float32 /
+# float32_fine line OOMed at default and d12h widths), appended so the 20 names above keep their order:
+#   12 main lines, deform N 64 (L4) / N 16 (L2):
+#   l4_f32fine_d12hs l4_f32_d12hs l4_f16_d12hs l4_f32fine_fr50 l4_f32_fr50 l4_f16_fr50
+#   l2_f32fine_d12hs l2_f32_d12hs l2_f16_d12hs l2_f32fine_fr50 l2_f32_fr50 l2_f16_fr50
+#   16 smaller-group fallbacks (float32 / float32_fine only), suffix _n<N> = --group-size and
+#   --deform-group-size N (status.tsv column n = N), larger N first:
+#   l4_{f32fine,f32}_{d12hs,fr50}_n48, ..._n32, l2_{f32fine,f32}_{d12hs,fr50}_n12, ..._n8
+# Sources: a width used by a selected level-1 line builds l4_W and l2_W; a width used only by
+# selected level-2 lines builds l4_W only (SOURCE_L4_ONLY); level-4 lines need none. The full list
+# (48 configs) does not fit 4 h: select with ONLY (the time guard records the rest as skipped_time).
 # Deform-only means no linear DALI pipelines: TF peaks are representative, the process DALI
 # memory is lower than in the three-task run (the 40000 MB TF limit keeps level 1 honest).
 #
@@ -68,6 +79,9 @@
 # level-1 validation sets, model builds and the frozen chain restore ~4-5 min; first deform step
 # trace + autotune ~2-3 min; 7 more steps at ~25-45 s), an OOM ~4 min -> 12 L1 configs ~1.8-2.0 h;
 # L2 N 16 ~5 min x 4; L4 N 64 ~4 min x 4 -> ~3.0 h of 4 h in total.
+# Measured (10527941, OOM lines): L4 N 64 ~100-130 s, L2 N 16 ~120-130 s per config. Follow-up
+# 12 main lines: sources l4_d12hs + l4_fr50 ~1-3 min each; 6 L4 lines ~2-6 min, 6 L2 lines ~2-5 min
+# -> ~25-60 min, so --time=01:15:00 with SOURCE_TIMEOUT=600 (report section 'Follow-up L4/L2 job').
 # Guard: a config that would start after TIME_BUDGET_S - 300 s (default 13800 - 300 = 3h45m) is
 # recorded with rc -1 (status skipped_time) and not run. CONFIG_TIMEOUT (2400 s) caps every config.
 # Split rule: if any configs are skipped, rerun them in a new job (results go to a new job
@@ -138,7 +152,13 @@ source "$M11_LIB"    # m11_width_args, m11_source_ok, m11_build_sources (sets no
 ALL_CONFIGS="l1_f32fine_default l1_f32_default l1_f32fine_d12h l1_f32_d12h l1_f32fine_d12hs l1_f32_d12hs
 l1_f32fine_fr50 l1_f32_fr50 l1_f16_default l1_f16_d12h l1_f16_d12hs l1_f16_fr50
 l2_f32fine_default l2_f32_default l2_f32fine_d12h l2_f32_d12h
-l4_f32fine_default l4_f32_default l4_f32fine_d12h l4_f32_d12h"
+l4_f32fine_default l4_f32_default l4_f32fine_d12h l4_f32_d12h
+l4_f32fine_d12hs l4_f32_d12hs l4_f16_d12hs l4_f32fine_fr50 l4_f32_fr50 l4_f16_fr50
+l2_f32fine_d12hs l2_f32_d12hs l2_f16_d12hs l2_f32fine_fr50 l2_f32_fr50 l2_f16_fr50
+l4_f32fine_d12hs_n48 l4_f32_d12hs_n48 l4_f32fine_fr50_n48 l4_f32_fr50_n48
+l4_f32fine_d12hs_n32 l4_f32_d12hs_n32 l4_f32fine_fr50_n32 l4_f32_fr50_n32
+l2_f32fine_d12hs_n12 l2_f32_d12hs_n12 l2_f32fine_fr50_n12 l2_f32_fr50_n12
+l2_f32fine_d12hs_n8 l2_f32_d12hs_n8 l2_f32fine_fr50_n8 l2_f32_fr50_n8"
 ALL_CONFIGS="$(echo $ALL_CONFIGS)"   # one line, single spaces
 
 CONFIGS="$ALL_CONFIGS"
@@ -154,11 +174,15 @@ if [ -n "$ONLY" ]; then
     CONFIGS="${CONFIGS# }"
 fi
 
-# split_name <config>: sets lv (l1/l2/l4), tag (f16/f32/f32fine) and w (width) of <level>_<tag>_<width>.
+# split_name <config>: sets lv (l1/l2/l4), tag (f16/f32/f32fine), w (width) and n (deform group size
+# override, empty = the level default) of <level>_<tag>_<width>[_n<N>].
 split_name() {
-    lv="${1%%_*}"
-    w="${1##*_}"
-    tag="${1#*_}"
+    local s="$1"
+    n=""
+    case "${s##*_}" in n[0-9]*) n="${s##*_n}"; s="${s%_*}" ;; esac
+    lv="${s%%_*}"
+    w="${s##*_}"
+    tag="${s#*_}"
     tag="${tag%_*}"
 }
 
@@ -173,7 +197,7 @@ dtype_of() {
 
 # cascade_src <config>: the --cascade-from path of a config (empty at level 4).
 cascade_src() {
-    local lv tag w
+    local lv tag w n
     split_name "$1"
     case "$lv:$w" in
         l4:*) echo "" ;;
@@ -184,16 +208,22 @@ cascade_src() {
     esac
 }
 
-# Sources needed by the selected configs.
-NEED_L1=0; NEED_L2=0; SOURCE_WIDTHS=""
+# Sources needed by the selected configs: a width used by a level-1 line needs l4_W and l2_W, a
+# width used only by level-2 lines needs l4_W only (SOURCE_L4_ONLY, read by m11_build_sources).
+NEED_L1=0; NEED_L2=0; SOURCE_WIDTHS=""; L1_WIDTHS=""
 for c in $CONFIGS; do
     split_name "$c"
     case "$lv:$w" in
         l4:*) ;;
         l1:default) NEED_L1=1 ;;
         l2:default) NEED_L2=1 ;;
-        *) case " $SOURCE_WIDTHS " in *" $w "*) ;; *) SOURCE_WIDTHS="${SOURCE_WIDTHS:+$SOURCE_WIDTHS }$w";; esac ;;
+        *) case " $SOURCE_WIDTHS " in *" $w "*) ;; *) SOURCE_WIDTHS="${SOURCE_WIDTHS:+$SOURCE_WIDTHS }$w";; esac
+           if [ "$lv" = l1 ]; then L1_WIDTHS="$L1_WIDTHS $w "; fi ;;
     esac
+done
+SOURCE_L4_ONLY=""
+for w in $SOURCE_WIDTHS; do
+    case "$L1_WIDTHS" in *" $w "*) ;; *) SOURCE_L4_ONLY="${SOURCE_L4_ONLY:+$SOURCE_L4_ONLY }$w" ;; esac
 done
 ckpt_ok() { [ -d "$1" ] || [ -f "$1.index" ]; }
 if [ "$NEED_L1" = 1 ] && ! ckpt_ok "$L1_SOURCE"; then
@@ -214,7 +244,7 @@ COMMON=(--data "$DATA" --results "$RUNS" --resume false --task-ratio deform:1 --
 
 # config_cmd <config>: sets CMD=(python main.py ...), LVL, DTYPE, WIDTH, CN (deform N), CMP (max pairs).
 config_cmd() {
-    local c="$1" lv tag w wargs src
+    local c="$1" lv tag w n wargs src
     split_name "$c"
     WIDTH="$w"
     DTYPE="$(dtype_of "$tag")" || die "bad dtype tag in $c"
@@ -225,11 +255,11 @@ config_cmd() {
         l1) LVL=1; CN=4; CMP=0
             CMD+=(--level 1 --cascade-from "$src" --group-size 4 --deform-group-size 4 --pair-recompute true
                   --lean-losses true --gpu-memory-limit-mb 40000 --val-image-chunk 1 --val-pair-chunk 1) ;;
-        l2) LVL=2; CN=16; CMP=64
-            CMD+=(--level 2 --cascade-from "$src" --group-size 16 --deform-group-size 16 --max-pairs 64
+        l2) LVL=2; CN="${n:-16}"; CMP=64
+            CMD+=(--level 2 --cascade-from "$src" --group-size "$CN" --deform-group-size "$CN" --max-pairs 64
                   --pair-recompute false --val-pair-chunk 4) ;;
-        l4) LVL=4; CN=64; CMP=64
-            CMD+=(--level 4 --group-size 64 --deform-group-size 64 --max-pairs 64 --pair-recompute false
+        l4) LVL=4; CN="${n:-64}"; CMP=64
+            CMD+=(--level 4 --group-size "$CN" --deform-group-size "$CN" --max-pairs 64 --pair-recompute false
                   --val-pair-chunk 16) ;;
         *) die "bad level in $c" ;;
     esac
@@ -239,7 +269,7 @@ config_cmd() {
 
 # required_source <config>: the random source run dir a non-default L1 / L2 line needs (else empty).
 required_source() {
-    local lv tag w
+    local lv tag w n
     split_name "$1"
     case "$lv:$w" in
         l4:*|*:default) echo "" ;;

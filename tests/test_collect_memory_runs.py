@@ -101,6 +101,15 @@ class TestCollectMemoryRuns(unittest.TestCase):
         self.assertIn("32.23", out)
         self.assertIn("29.63", out)
 
+    def test_group_size_fallback_row(self):
+        """m11 fallback names (_n<N>) keep the job's real N from status.tsv; the table shows the name."""
+        self.make_run("l4_f32fine_d12hs_n48")
+        self.add_row("l4_f32fine_d12hs_n48", 0, level=4, dtype="float32_fine", widths="d12hs", n=48, max_pairs=64)
+        _, recs, out = self.collect()
+        r = recs["l4_f32fine_d12hs_n48"]
+        self.assertEqual((r["level"], r["n"], r["max_pairs"], r["widths"], r["status"]), (4, 48, 64, "d12hs", "ok"))
+        self.assertIn("l4_f32fine_d12hs_n48 ", out)
+
     def test_skip_steps_and_linear_records(self):
         self.make_run("mix", linear_steps=(4, 6))
         self.add_row("mix", 0)
