@@ -30,6 +30,16 @@
 # both -> identity for the whole frozen chain. Validation never skips. main.py warns when a task
 # skips level 4 here but the level-2 source was never trained with a level-4 skip for it.
 #
+# Width (Jay, retrain recipe): d12hs = default widths with the full-resolution stem and the d1/d2
+# decoder stages halved: --filters 16,64,128,192,256,384 --decoder-widths 128,96,64,16,8.
+# FILTERS / DECODER_WIDTHS (unset -> d12hs; set but empty -> flag not passed = ModelConfig default).
+# The same explicit lists at every level (r_level4/2/1.sh, slurm/sweep_level4.py) so config.json's
+# ModelConfig is identical across the cascade (the cascade check compares every field but seed; an
+# explicit list is NOT config-equal to the None default, so never mix FILTERS= runs with default
+# runs in one cascade, and resume a run with the widths it started with). Measured fits (m11):
+# L4 deform N64 fp16 25.6 GiB 4.1 s (job 10528435), L2 deform N16 fp16 27.2 GiB 7.6 s (10528435),
+# L1 deform N4 4 pairs float32_fine 36.95 GiB 21.1 s under 40000 MB (10528396).
+#
 # Memory (m9, jobs 10517362 / 10518446 / 10518952): linear N 8 (int32 element limit: at default
 # widths N >= 10 overflows the full-resolution stem, job 10517266), DEFORM_N 4, TF_MEM_LIMIT_MB 40000
 # (fixed TF limit; 46080 MiB - ~500 context - DALI without aug ~4600 - >= 1024 headroom; A100:
@@ -71,16 +81,20 @@
 # recalibration; at most CKPT_EVERY steps are lost.
 #
 # Non-finite mitigations (nonfinite-fixes, default off; decide after the m9 NaN probe; report
-# .agents/tasks/nonfinite-fixes/report.md). No flag is emitted while a value is at its default.
+# .agents/tasks/nonfinite-fixes/report.md). No flag is emitted while a value is at its default,
+# except the deform decoder dtype: its level-1 default is float32_fine and its flag is emitted.
 #   FP16_ACT_CLIP (default 0 = off; 0 < C <= 32000, e.g. 30000) -> --fp16-act-clip C with
 #     FP16_ACT_CLIP_SCOPE (deform_decoder | all, default deform_decoder) -> --fp16-act-clip-scope.
-#   DEFORM_DECODER_DTYPE (policy | float16 | float32 | float32_fine, default policy) ->
+#   DEFORM_DECODER_DTYPE (policy | float16 | float32 | float32_fine, default float32_fine here) ->
 #     --deform-decoder-dtype (float32 = deform decoder in float32 under AMP, ~2x decoder
-#     activation memory; float32_fine = fp32 only d2/d1/svf, d5..d3 stay float16).
+#     activation memory; float32_fine = fp32 only d2, d1, their upsamples and svf_norm_act,
+#     d5..d3 stay float16).
 #   BN_EPSILON_OVERRIDE (default 0 = off) -> --bn-epsilon-override (pass it again on resume: the
 #     same env line does).
-#   Level 1: DEFORM_DECODER_DTYPE=float32 is NOT expected to fit 4 pairs under TF_MEM_LIMIT_MB
-#   40000 (the 4-pair smoke peaked at 37.6 GiB in fp16); use FP16_ACT_CLIP / BN_EPSILON_OVERRIDE.
+#   Level 1 (Jay, retrain recipe): DEFORM_DECODER_DTYPE default float32_fine, after the m9 long
+#   run's fp16 overflow in the trainable d1 split group conv (job 10518952, probe 10524598). m11 job
+#   10528396 at d12hs, 4 pairs under 40000 MB: float32_fine 36.95 GiB 21.1 s, float32 35.50 GiB
+#   21.5 s, float16 36.10 GiB 20.6 s. DEFORM_DECODER_DTYPE=policy = the old fp16 decoder.
 #   Linear-only ratio: the deform-scoped clip and the decoder dtype are dropped with a NOTE.
 # The per-task non-finite guard (--nonfinite-patience-task, default 20) is always on; override
 # with EXTRA_ARGS. The checker also fails a task with > 5 % non-finite steps in any 500-step
@@ -102,7 +116,7 @@ WARMUP="${WARMUP:-500}"
 LR="${LR:-3e-4}"
 WD="${WD:-0}"
 OPTIMIZER="${OPTIMIZER:-adamw}"
-# Group sizes (Jay, 2026-10-27): rigid/affine N = 2 x DEFORM_N at every level: 128/64 (level 4), 32/16 (level 2), 8/4 (level 1). Measured with --max-pairs 64 (job 10524450, scratch/m10/memory_batch_capped.json, RTX 8000 tool peaks): linear N 8 = the int32 element limit at default widths (N >= 10 overflows the stem, job 10517266).
+# Group sizes (Jay, 2026-10-27): rigid/affine N = 2 x DEFORM_N at every level: 128/64 (level 4), 32/16 (level 2), 8/4 (level 1). Measured with --max-pairs 64 (job 10524450, scratch/m10/memory_batch_capped.json, RTX 8000 tool peaks): linear N 8 = the int32 element limit at default widths (N >= 10 overflows the stem, job 10517266). With the d12hs stem (16 ch) the int32 limit moves to N ~19; N stays 8 (Jay: group sizes unchanged).
 N="${N:-8}"
 # Deform N 4 (m9 long run 10518952: 37.8 GB peak under TF_MEM_LIMIT_MB 40000); N 5 aborted even with lean losses (job 10519893).
 DEFORM_N="${DEFORM_N:-4}"
@@ -111,6 +125,9 @@ CASCADE_FROM="${CASCADE_FROM:-}"
 BN_RECAL_BATCHES="${BN_RECAL_BATCHES:-64}"
 BN_RECAL_FREEZE="${BN_RECAL_FREEZE:-true}"
 BN_RECAL_VALIDATE="${BN_RECAL_VALIDATE:-false}"
+# Width (d12hs): unset -> d12hs; set but empty -> flag not passed (ModelConfig default widths).
+FILTERS="${FILTERS-16,64,128,192,256,384}"
+DECODER_WIDTHS="${DECODER_WIDTHS-128,96,64,16,8}"
 SKIP_LINEAR="${SKIP_LINEAR-4:0,2:0.15}"   # unset -> 4:0,2:0.15; set but empty = all 0
 SKIP_DEFORM="${SKIP_DEFORM-4:0.15,2:0.15}" # unset -> 4:0.15,2:0.15; set but empty = all 0
 G_ROT="${G_ROT:-45}"
@@ -171,6 +188,17 @@ need_choice LEAN_LOSSES "$LEAN_LOSSES" true false
 need_choice MIN_PAIRS "$MIN_PAIRS" 1 n
 need_choice BN_RECAL_FREEZE "$BN_RECAL_FREEZE" true false
 need_choice BN_RECAL_VALIDATE "$BN_RECAL_VALIDATE" true false
+WIDTH6_RE='^[1-9][0-9]*(,[1-9][0-9]*){5}$'
+WIDTH5_RE='^[1-9][0-9]*(,[1-9][0-9]*){4}$'
+WIDTH_ARGS=""
+if [ -n "$FILTERS" ]; then
+    [[ "$FILTERS" =~ $WIDTH6_RE ]] || die "FILTERS must be 6 comma-separated positive integers (stem,L2..L6) or empty, got '$FILTERS'"
+    WIDTH_ARGS="--filters $FILTERS"
+fi
+if [ -n "$DECODER_WIDTHS" ]; then
+    [[ "$DECODER_WIDTHS" =~ $WIDTH5_RE ]] || die "DECODER_WIDTHS must be 5 comma-separated positive integers (D5..D1) or empty, got '$DECODER_WIDTHS'"
+    WIDTH_ARGS="$WIDTH_ARGS --decoder-widths $DECODER_WIDTHS"
+fi
 [ "$VAL_PAIR_CHUNK" -ge 1 ] || die "VAL_PAIR_CHUNK must be >= 1, got '$VAL_PAIR_CHUNK'"
 VAL_ARGS=""
 if [ -n "$VAL_GROUP_SIZE" ]; then
@@ -199,10 +227,11 @@ HAS_LINEAR=false
 case ",$TASKS," in *,deform,*) HAS_DEFORM=true ;; esac
 case ",$TASKS," in *,rigid,*|*,affine,*) HAS_LINEAR=true ;; esac
 
-# Non-finite mitigations (nonfinite-fixes; all default off, no flag emitted when off).
+# Non-finite mitigations (nonfinite-fixes; default off and no flag emitted when off, except the
+# level-1 deform decoder dtype default float32_fine, retrain recipe).
 FP16_ACT_CLIP="${FP16_ACT_CLIP:-0}"
 FP16_ACT_CLIP_SCOPE="${FP16_ACT_CLIP_SCOPE:-deform_decoder}"
-DEFORM_DECODER_DTYPE="${DEFORM_DECODER_DTYPE:-policy}"
+DEFORM_DECODER_DTYPE="${DEFORM_DECODER_DTYPE:-float32_fine}"
 BN_EPSILON_OVERRIDE="${BN_EPSILON_OVERRIDE:-0}"
 need_float FP16_ACT_CLIP "$FP16_ACT_CLIP"
 need_float BN_EPSILON_OVERRIDE "$BN_EPSILON_OVERRIDE"
@@ -277,7 +306,7 @@ MAIN=(main.py --data "$DATA" --results "$RESULTS" --run-name "$RUN_NAME" --level
       --cascade-skip-linear "$SKIP_LINEAR" --cascade-skip-deform "$SKIP_DEFORM" $LIN_ARGS
       --val-pair-chunk "$VAL_PAIR_CHUNK" --val-png true
       --num-threads "${SLURM_CPUS_PER_TASK:-3}" --log-every 25 --log-backend jsonl
-      $VAL_ARGS $DEFORM_ARGS $MEM_ARGS $MITIG_ARGS $EXTRA_ARGS)
+      $VAL_ARGS $DEFORM_ARGS $MEM_ARGS $WIDTH_ARGS $MITIG_ARGS $EXTRA_ARGS)
 # AMP: the dynamic loss scale overflows a few times early on (m9 smoke: 8 of 200), hence 0.06.
 # Per task: FAIL if > 5 % of a task's steps in any 500-step window after step 100 are non-finite.
 # shellcheck disable=SC2206
@@ -312,6 +341,7 @@ echo "run $RUN_NAME | level 1 | ratio $TASK_RATIO | steps $STEPS | val every $VA
 echo "cascade from $CASCADE_FROM | bn recal $BN_RECAL_BATCHES (freeze $BN_RECAL_FREEZE, validate $BN_RECAL_VALIDATE) | skip linear '$SKIP_LINEAR' deform '$SKIP_DEFORM'"
 echo "optimizer $OPTIMIZER | lr $LR | wd $WD | grad balance $GRAD_BALANCE ($BAL_ARGS) | lowres $LOWRES_METHOD | min pairs $MIN_PAIRS | max pairs $MAX_PAIRS"
 echo "memory: grad ckpt $GRAD_CKPT | pair recompute $PAIR_RECOMPUTE | lean losses $LEAN_LOSSES | tf memory limit ${TF_MEM_LIMIT_MB} MB (0 = growth) | val image chunk $VAL_IMAGE_CHUNK | val pair chunk $VAL_PAIR_CHUNK"
+echo "widths: filters ${FILTERS:-default} | decoder ${DECODER_WIDTHS:-default}"
 echo "fp16 act clip $FP16_ACT_CLIP ($FP16_ACT_CLIP_SCOPE) | deform decoder dtype $DEFORM_DECODER_DTYPE | bn epsilon override $BN_EPSILON_OVERRIDE (0 = off)"
 
 rc=0

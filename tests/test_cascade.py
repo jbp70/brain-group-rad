@@ -1288,6 +1288,46 @@ class TestCascadeResume(CascadeTrainerCase):
             MAIN.main(lvl2 + ["--overfit-max-steps", "5"])
         self.assertIn("resume of a cascade run without config.json cascade", str(cm.exception))
 
+    def test_main_freeze_false_resume(self):
+        """Retrain recipe (r_level2.sh BN_RECAL_FREEZE false): one recalibration on the fresh run,
+        BN keeps training on the fresh run AND after a resume (no freeze re-applied, no second
+        recalibration); the frozen stage's statistics never change."""
+        res = os.path.join(self.tmp, "results")
+        common = (["--overfit-one-group", "--overfit-synthetic", "--group-size", "4", "--task-ratio", "rigid:1",
+                   "--deform-decoder", "true", "--log-every", "1", "--val-every", "0", "--val-png", "false",
+                   "--schedule", "constant", "--warmup-steps", "0", "--results", res] + TINY_ARGS + MAIN_COMMON)
+        self.assertIn(MAIN.main(common + ["--level", "4", "--run-name", "src", "--overfit-max-steps", "3"]), (0, 1))
+        free_memory()
+        src = os.path.join(res, "src", "ckpt", "last")
+        lvl2 = common + ["--level", "2", "--cascade-from", src, "--run-name", "c",
+                         "--bn-recal-batches", "8", "--bn-recal-freeze", "false"]
+        self.assertIn(MAIN.main(lvl2 + ["--overfit-max-steps", "2"]), (0, 1))
+        free_memory()
+        d = os.path.join(res, "c")
+        rec = self.read_config(d)["bn_recalibration"]
+        self.assertIs(rec["freeze"], False)
+        self.assertEqual(rec["batches"], {"rigid": 8})
+        self.assertEqual(len(self.events(d, "bn_recalibration")), 1)
+        prefix2, bn2 = ckpt_bn_stats(d)
+        _, fz2 = ckpt_bn_stats(d, scope="frozen_stage/")
+        self.assertTrue(prefix2.endswith("last-2"), prefix2)
+        enc = sorted(n for n in bn2 if "encoder" in n)
+        self.assertTrue(enc, sorted(bn2))
+        self.assertTrue(fz2)
+        self.assertIn(MAIN.main(lvl2 + ["--overfit-max-steps", "3"]), (0, 1))
+        free_memory()
+        self.assertEqual(self.read_config(d)["bn_recalibration"], rec)
+        self.assertEqual(len(self.events(d, "bn_recalibration")), 1)
+        prefix3, bn3 = ckpt_bn_stats(d)
+        _, fz3 = ckpt_bn_stats(d, scope="frozen_stage/")
+        self.assertTrue(prefix3.endswith("last-3"), prefix3)
+        self.assertEqual(sorted(bn3), sorted(bn2))
+        for n in enc:                                       # the resumed step trained the statistics
+            self.assertFalse(np.array_equal(bn3[n], bn2[n]), n)
+        self.assertEqual(sorted(fz3), sorted(fz2))
+        for n in fz2:
+            self.assertTrue(np.array_equal(fz3[n], fz2[n]), n)
+
 
 # ============================================================ 3-level frozen chain (milestone 9 phase 2)
 # Design `.agents/tasks/milestone-9-phase2/design-m9-phase2.md` sections 2-3, tests T-C1..T-C9 and

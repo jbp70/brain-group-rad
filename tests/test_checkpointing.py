@@ -12,14 +12,16 @@
 (d) recalibrate_bn under 'full' makes one update per layer and batch (the T7 pattern of
     tests/test_cascade.py, level-2 TINY cascade);
 (e) one trace per task with 'full' over 6 steps of rigid:1,affine:1,deform:2;
-(f) build_model under 'full' creates the same variables (names, shapes) as under 'none'.
+(f) build_model under 'full' creates the same variables (names, shapes) as under 'none';
+(g) retrain recipe: level-2 cascade train steps under 'full' after a recal with freeze False
+    update the trainable BN once per step, the frozen stage never; freeze True: nothing moves.
 """
 import sys
 import unittest
 
 from tests import tf_setup  # noqa: F401  (log level, TF32 off, GPU memory growth)
 from tests.runtime_helpers import free_memory, narrow_config
-from tests.test_cascade import (CascadeTrainerCase, CountingSource, _GrapplerOff, bn_stats,
+from tests.test_cascade import (CascadeTrainerCase, CountingSource, _GrapplerOff, _all_equal, _vals, bn_stats,
                                 cascade_config, randomize)
 from tests.test_trainer import (DeformCase, _OpDeterminism, _seed_with_all_tasks, config)
 import numpy as np
@@ -236,6 +238,79 @@ class TestFullRecal(CascadeTrainerCase):
         self.assertEqual([counts.get(id(m), 0) for m in layers], [2] * len(layers))
         for g, w in zip(bn_stats(tr.model, parts), want):
             np.testing.assert_allclose(g, w, rtol=1e-5, atol=1e-5)
+
+
+class TestFullCascadeTrainableBN(CascadeTrainerCase):
+    """Retrain recipe (level 2, BN_RECAL_FREEZE false): after a step-0 recalibration with
+    freeze=False, cascade TRAIN steps under 'full' update the trainable stage's BN statistics
+    exactly once per step (reference: 'integrator', which never recomputes the encoder / decoder)
+    and never touch the frozen level-4 stage; with freeze=True nothing moves after the recal.
+
+    The recalibration runs on a deform batch with images x 1.5 and the train steps on the
+    unscaled one, so a train step moves the recalibrated statistics by ~1 % (momentum 0.99): a
+    second update in the 'full' recompute would double that and exceed the tolerance."""
+
+    def tearDown(self):
+        free_memory()
+        super().tearDown()
+
+    def _recal_sources(self):
+        scaled = fd.to_deform_batch(self.dgroup["images"] * 1.5, self.dgroup["labels"], level=2)
+        return {"rigid": fd.FixedGroupSource(self.batches["rigid"]),
+                "affine": fd.FixedGroupSource(self.batches["affine"]),
+                "deform": fd.FixedGroupSource(scaled)}
+
+    def _recal_then_deform(self, mode):
+        """(trainer, BN stats of the deform parts after the recal, after one deform step)."""
+        cfg = cascade_config(flip_prob=0.0)
+        tr = self.make(cfg, sources=self._recal_sources(), gradient_checkpointing=mode)
+        self.assertEqual(tr.model.gradient_checkpointing, mode)
+        tr.recalibrate_bn(4, freeze=False, val=False)
+        self.assertFalse(any(m.stats_frozen for m in Trainer._bn_layers([tr.model])))
+        parts = tr._bn_parts("deform")
+        s0 = bn_stats(tr.model, parts)
+        self.assertTrue(tr.train_step("deform", self.batches["deform"])["finite"])
+        return tr, s0, bn_stats(tr.model, parts)
+
+    def test_freeze_false_updates_once(self):
+        ref, s0_ref, s1_ref = self._recal_then_deform("integrator")
+        del ref
+        free_memory()
+        tr, s0, s1 = self._recal_then_deform("full")
+        f0 = _vals(tr.cascade.model.weights)
+        e_recal = rel(s0, s0_ref)
+        e_full = rel(s1, s1_ref)
+        e_moved = rel(s1, s0)
+        print("\n[ckpt full, cascade L2, freeze False] recal full vs integrator %.2e; after one deform step: "
+              "full vs integrator %.2e, step change %.2e" % (e_recal, e_full, e_moved), file=sys.stderr)
+        self.assertLessEqual(e_recal, 1e-6)
+        self.assertLessEqual(e_full, 1e-6)
+        self.assertGreater(e_moved, 1e-4)
+        for a, b in zip(s0, s1):
+            self.assertFalse(np.array_equal(a, b))                       # every BN layer trained
+        # Further steps keep training the trainable stage's BN; the frozen stage never changes.
+        lin_parts = tr._bn_parts("rigid")
+        before = bn_stats(tr.model, lin_parts)
+        self.assertTrue(tr.train_step("rigid", self.batches["rigid"])["finite"])
+        after = bn_stats(tr.model, lin_parts)
+        self.assertTrue(all(not np.array_equal(a, b) for a, b in zip(before, after)))
+        self.assertTrue(tr.train_step("deform", self.batches["deform"])["finite"])
+        s2 = bn_stats(tr.model, tr._bn_parts("deform"))
+        self.assertTrue(all(not np.array_equal(a, b) for a, b in zip(s1, s2)))
+        self.assertTrue(_all_equal(f0, tr.cascade.model.weights))       # incl. frozen BN statistics
+
+    def test_freeze_true_full(self):
+        cfg = cascade_config(flip_prob=0.0)
+        tr = self.make(cfg, sources=self._recal_sources(), gradient_checkpointing="full")
+        tr.recalibrate_bn(4, freeze=True, val=False)
+        self.assertTrue(all(m.stats_frozen for m in Trainer._bn_layers([tr.model])))
+        s0 = bn_stats(tr.model)
+        f0 = _vals(tr.cascade.model.weights)
+        for t in ("rigid", "affine", "deform"):
+            self.assertTrue(tr.train_step(t, self.batches[t])["finite"], t)
+        self.assertTrue(all(np.array_equal(a, b) for a, b in zip(s0, bn_stats(tr.model))))
+        self.assertTrue(_all_equal(f0, tr.cascade.model.weights))
+        self.assertEqual(tr.trace_counts, {"rigid": 1, "affine": 1, "deform": 1})
 
 
 if __name__ == "__main__":

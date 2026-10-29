@@ -15,8 +15,18 @@
 # level-4 cascade (the m8 recipe; design .agents/tasks/retrain-prereqs/design.md sections 4, 6, 16).
 # CASCADE_FROM is REQUIRED on a fresh run (no default): the final level-4 run's ckpt/best, e.g.
 # CASCADE_FROM=$RESULTS/r4_final/ckpt/best. BN statistics of the trainable stage are recalibrated at
-# step 0 of a fresh run (BN_RECAL_BATCHES 64, frozen afterwards with BN_RECAL_FREEZE=true; never
-# repeated on resume). Recipe (the same at every level of the retrain): AMP (hard-coded),
+# step 0 of a fresh run (BN_RECAL_BATCHES 64; never repeated on resume) and BN then stays TRAINABLE
+# for the whole run (BN_RECAL_FREEZE false; Jay, 2026-10 retrain recipe: batch statistics over
+# N 32 / DEFORM_N 16 groups are large enough). Why recal although BN trains: the trainable stage
+# starts as a copy of the level-4 weights, so its moving statistics are level-4 statistics on
+# different inputs (4 mm vs 2 mm, pre-warped); with momentum 0.99 they need ~460 steps to fade
+# (0.99^460 ~ 1 %), so the early eval-mode validations and best-checkpoint picks would use
+# mismatched statistics. The recal replaces them with the mean over 64 level-2 batches (~9 min incl.
+# its pre / post validation passes, m8 job 10505028: 515 s) and logs the eval/train gap; training
+# then updates them normally. BN_RECAL_BATCHES=0 skips it (moving stats start from the level-4
+# copy); BN_RECAL_FREEZE=true = the old m8 recipe (BN frozen after the recal).
+# Deform decoder dtype: the AMP policy (float16; DEFORM_DECODER_DTYPE default policy), as level 4.
+# Recipe (the same at every level of the retrain): AMP (hard-coded),
 # --split-group-conv true, TF-side intensity augmentation with LOWRES_METHOD (default tent),
 # AdamW (OPTIMIZER adamw|adam, LR, WD; cosine, WARMUP 500, --min-lr-factor 1e-3), GRAD_BALANCE
 # gradnorm = --task-grad-norm 12 (deform64 = --task-loss-weights deform:64), Dice + LNCC 1/1 +
@@ -26,6 +36,16 @@
 # skipped level-4 stage contributes the identity (A_prev = I, U = 0); independent draws per task and
 # step; validation never skips. Validation groups follow N / DEFORM_N (VAL_GROUP_SIZE empty =
 # main.py's min(N, n_val), as m8); set VAL_GROUP_SIZE to fix them.
+#
+# Width (Jay, retrain recipe): d12hs = default widths with the full-resolution stem and the d1/d2
+# decoder stages halved: --filters 16,64,128,192,256,384 --decoder-widths 128,96,64,16,8.
+# FILTERS / DECODER_WIDTHS (unset -> d12hs; set but empty -> flag not passed = ModelConfig default).
+# The same explicit lists at every level (r_level4/2/1.sh, slurm/sweep_level4.py) so config.json's
+# ModelConfig is identical across the cascade (the cascade check compares every field but seed; an
+# explicit list is NOT config-equal to the None default, so never mix FILTERS= runs with default
+# runs in one cascade, and resume a run with the widths it started with). Measured fits (m11):
+# L4 deform N64 fp16 25.6 GiB 4.1 s (job 10528435), L2 deform N16 fp16 27.2 GiB 7.6 s (10528435),
+# L1 deform N4 4 pairs float32_fine 36.95 GiB 21.1 s under 40000 MB (10528396).
 #
 # Memory knobs (NOT m8's GRAD_CKPT=none / AMP=false script defaults: here the m10 knob set is the
 # default): GRAD_CKPT (default full; none|integrator|decoder|both|full), PAIR_RECOMPUTE (default
@@ -74,7 +94,9 @@
 #   set --time from the smoke's 'INFO step_time' projection x 1.3; if it exceeds the limit,
 #   resubmit with the same RUN_NAME (resumable).
 # Resume plan: --resume (default true) restores ckpt/last (every CKPT_EVERY steps), the frozen stage
-# and the RNGs, checks the fingerprint, re-applies the BN freeze and never repeats the recalibration.
+# and the RNGs, checks the fingerprint, re-applies the BN freeze only if the saved record has
+# freeze true (default false: BN keeps training after resume, as in the fresh run) and never
+# repeats the recalibration.
 #
 # Non-finite mitigations (nonfinite-fixes, default off; decide after the m9 NaN probe; report
 # .agents/tasks/nonfinite-fixes/report.md). No flag is emitted while a value is at its default.
@@ -113,7 +135,10 @@ DEFORM_N="${DEFORM_N:-16}"
 TASK_RATIO="${TASK_RATIO:-rigid:1,affine:1,deform:2}"
 CASCADE_FROM="${CASCADE_FROM:-}"
 BN_RECAL_BATCHES="${BN_RECAL_BATCHES:-64}"
-BN_RECAL_FREEZE="${BN_RECAL_FREEZE:-true}"
+BN_RECAL_FREEZE="${BN_RECAL_FREEZE:-false}"
+# Width (d12hs): unset -> d12hs; set but empty -> flag not passed (ModelConfig default widths).
+FILTERS="${FILTERS-16,64,128,192,256,384}"
+DECODER_WIDTHS="${DECODER_WIDTHS-128,96,64,16,8}"
 SKIP_LINEAR="${SKIP_LINEAR-4:0}"          # unset -> 4:0; set but empty = all 0
 SKIP_DEFORM="${SKIP_DEFORM-4:0.15}"       # unset -> 4:0.15; set but empty = all 0
 G_ROT="${G_ROT:-45}"
@@ -172,6 +197,17 @@ need_choice PAIR_RECOMPUTE "$PAIR_RECOMPUTE" true false
 need_choice LEAN_LOSSES "$LEAN_LOSSES" true false
 need_choice MIN_PAIRS "$MIN_PAIRS" 1 n
 need_choice BN_RECAL_FREEZE "$BN_RECAL_FREEZE" true false
+WIDTH6_RE='^[1-9][0-9]*(,[1-9][0-9]*){5}$'
+WIDTH5_RE='^[1-9][0-9]*(,[1-9][0-9]*){4}$'
+WIDTH_ARGS=""
+if [ -n "$FILTERS" ]; then
+    [[ "$FILTERS" =~ $WIDTH6_RE ]] || die "FILTERS must be 6 comma-separated positive integers (stem,L2..L6) or empty, got '$FILTERS'"
+    WIDTH_ARGS="--filters $FILTERS"
+fi
+if [ -n "$DECODER_WIDTHS" ]; then
+    [[ "$DECODER_WIDTHS" =~ $WIDTH5_RE ]] || die "DECODER_WIDTHS must be 5 comma-separated positive integers (D5..D1) or empty, got '$DECODER_WIDTHS'"
+    WIDTH_ARGS="$WIDTH_ARGS --decoder-widths $DECODER_WIDTHS"
+fi
 [ "$VAL_PAIR_CHUNK" -ge 1 ] || die "VAL_PAIR_CHUNK must be >= 1, got '$VAL_PAIR_CHUNK'"
 VAL_ARGS=""
 if [ -n "$VAL_GROUP_SIZE" ]; then
@@ -276,7 +312,7 @@ MAIN=(main.py --data "$DATA" --results "$RESULTS" --run-name "$RUN_NAME" --level
       --cascade-skip-linear "$SKIP_LINEAR" --cascade-skip-deform "$SKIP_DEFORM" $LIN_ARGS
       --val-pair-chunk "$VAL_PAIR_CHUNK" --val-png true
       --num-threads "${SLURM_CPUS_PER_TASK:-3}" --log-every 25 --log-backend jsonl
-      $VAL_ARGS $DEFORM_ARGS $MEM_ARGS $MITIG_ARGS $EXTRA_ARGS)
+      $VAL_ARGS $DEFORM_ARGS $MEM_ARGS $WIDTH_ARGS $MITIG_ARGS $EXTRA_ARGS)
 # AMP: the dynamic loss scale overflows a few times early on (m8: 10-11 of 8000), hence 0.06.
 # Per task: FAIL if > 5 % of a task's steps in any 500-step window after step 100 are non-finite.
 # shellcheck disable=SC2206
@@ -311,6 +347,7 @@ echo "run $RUN_NAME | level 2 | ratio $TASK_RATIO | steps $STEPS | val every $VA
 echo "cascade from $CASCADE_FROM | bn recal $BN_RECAL_BATCHES (freeze $BN_RECAL_FREEZE) | skip linear '$SKIP_LINEAR' deform '$SKIP_DEFORM'"
 echo "optimizer $OPTIMIZER | lr $LR | wd $WD | grad balance $GRAD_BALANCE ($BAL_ARGS) | lowres $LOWRES_METHOD | min pairs $MIN_PAIRS | max pairs $MAX_PAIRS"
 echo "memory: grad ckpt $GRAD_CKPT | pair recompute $PAIR_RECOMPUTE | lean losses $LEAN_LOSSES | tf memory limit ${TF_MEM_LIMIT_MB} MB (0 = growth) | val group ${VAL_GROUP_SIZE:-default} | val pair chunk $VAL_PAIR_CHUNK"
+echo "widths: filters ${FILTERS:-default} | decoder ${DECODER_WIDTHS:-default}"
 echo "fp16 act clip $FP16_ACT_CLIP ($FP16_ACT_CLIP_SCOPE) | deform decoder dtype $DEFORM_DECODER_DTYPE | bn epsilon override $BN_EPSILON_OVERRIDE (0 = off)"
 
 rc=0

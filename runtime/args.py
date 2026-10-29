@@ -50,7 +50,9 @@ Pattern from the rigid project's ``runtime/args.py`` (argparse + ``str2bool``). 
   cascade needs the same lists. The default --decoder-widths is None (half the encoder widths);
   an explicit 128,96,64,32,16 builds the same model but is NOT config-equal, so never pass it to
   a cascade from a default-width run. Narrow-width cascade sources for memory measurements are
-  random-weight level-4 / level-2 main.py runs (slurm/m11_random_sources.sh).
+  random-weight level-4 / level-2 main.py runs (slurm/m11_random_sources.sh). The from-scratch
+  retrain width is d12hs (--filters 16,64,128,192,256,384 --decoder-widths 128,96,64,16,8): the
+  default of slurm/r_level{4,2,1}.sh and slurm/sweep_level4.py.
 * minimum pair count (milestone 9 phase 2, `.agents/tasks/milestone-9-phase2/design-m9-phase2.md`
   section 5): --min-pairs 1 (today: at least 1 sampled training pair per step); 'n' raises the
   floor to the group size N. --p-pair and --p-pdice must be in (0, 1].

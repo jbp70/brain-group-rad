@@ -33,6 +33,10 @@ BASH = shutil.which("bash")
 POSIX = os.name == "posix" and BASH is not None
 FAKE_SHA = "0123456789abcdef0123456789abcdef01234567"
 PY37_TOKENS = ("capture_output", "text=True", "import dataclasses", "from dataclasses", "fromisoformat")
+# The retrain width d12hs (retrain recipe): default of r_level{4,2,1}.sh and sweep_level4.py.
+D12HS_FILTERS = "16,64,128,192,256,384"
+D12HS_DECODER = "128,96,64,16,8"
+D12HS_SEQ = ["--filters", D12HS_FILTERS, "--decoder-widths", D12HS_DECODER]
 
 
 def _load(path, name):
@@ -136,7 +140,8 @@ class TestSweepConfigs(unittest.TestCase):
             self.assertEqual(env["RUN_NAME"], c["run"])
             for k, v in (("STEPS", "8000"), ("DEFORM_START", "2000"), ("DEFORM_RAMP", "500"),
                          ("CURRICULUM_RAMP", "2000"), ("G_START", "2000"), ("G_RAMP", "2000"), ("WARMUP", "1000"),
-                         ("VAL_EVERY", "500"), ("VAL_GROUP_SIZE", "16"), ("N", "128"), ("DEFORM_N", "64")):
+                         ("VAL_EVERY", "500"), ("VAL_GROUP_SIZE", "16"), ("N", "128"), ("DEFORM_N", "64"),
+                         ("FILTERS", D12HS_FILTERS), ("DECODER_WIDTHS", D12HS_DECODER)):
                 self.assertEqual(env[k], v, k)
             self.assertEqual(c["time"], "14:00:00")
             self.assertTrue(all(isinstance(v, str) for v in env.values()))
@@ -151,6 +156,8 @@ class TestSweepConfigs(unittest.TestCase):
         self.assertEqual([c["run"] for c in b], ["r4sw_B_lr3e-4_wd1e-2_n64_d64", "r4sw_B_lr3e-4_wd1e-2_n128_d32"])
         self.assertEqual([(c["env"]["N"], c["env"]["DEFORM_N"]) for c in b], [("64", "64"), ("128", "32")])
         self.assertTrue(all(c["env"]["STEPS"] == "8000" and c["env"]["DEFORM_START"] == "2000" for c in b))
+        self.assertTrue(all((c["env"]["FILTERS"], c["env"]["DECODER_WIDTHS"]) == (D12HS_FILTERS, D12HS_DECODER)
+                            for c in b))
         c = sweep.configs(_grid("--phase", "C", "--best-lr", "1e-4", "--best-wd", "0", "--best-n", "32"))
         self.assertEqual([x["k"] for x in c], [11, 12])
         self.assertEqual([x["run"] for x in c], ["r4sw_C_s12000_lr1e-4_wd0_n32_d64", "r4sw_C_s16000_lr1e-4_wd0_n32_d64"])
@@ -159,7 +166,7 @@ class TestSweepConfigs(unittest.TestCase):
             self.assertEqual(set(env), set(sweep.CFG_KEYS))
             for k, v in (("STEPS", steps), ("DEFORM_START", "3000"), ("DEFORM_RAMP", "500"),
                          ("CURRICULUM_RAMP", "3000"), ("G_START", "3000"), ("G_RAMP", "3000"), ("WARMUP", "1000"),
-                         ("VAL_GROUP_SIZE", "16")):
+                         ("VAL_GROUP_SIZE", "16"), ("FILTERS", D12HS_FILTERS), ("DECODER_WIDTHS", D12HS_DECODER)):
                 self.assertEqual(env[k], v, k)
             self.assertEqual(x["time"], "24:00:00")
 
@@ -218,9 +225,11 @@ class TestSweepConfigs(unittest.TestCase):
         self.assertEqual((env["RUN_NAME"], env["LR"]), ("r", "3e-4"))
 
     def test_script_env_keys_cover_r_level4(self):
-        """11.5 g: SCRIPT_ENV_KEYS is a superset of every ${NAME:- default in r_level4.sh."""
-        names = set(re.findall(r"\$\{([A-Z_][A-Z0-9_]*):-", _read(R4)))
+        """11.5 g: SCRIPT_ENV_KEYS is a superset of every ${NAME:- / ${NAME- default in r_level4.sh."""
+        names = set(re.findall(r"\$\{([A-Z_][A-Z0-9_]*):?-", _read(R4)))
         self.assertIn("EXTRA_ARGS", names)
+        for k in ("FILTERS", "DECODER_WIDTHS", "VAL_GROUP_SIZE"):
+            self.assertIn(k, names)
         self.assertEqual(names - set(sweep.SCRIPT_ENV_KEYS), set())
         self.assertTrue(set(sweep.CFG_KEYS) <= set(sweep.SCRIPT_ENV_KEYS))
 
@@ -671,6 +680,17 @@ class TestScriptsStatic(unittest.TestCase):
         r1 = _read(R1)
         for k in ("36.7 GB", "MIN_PAIRS=1", "39000 MB", "TF_MEM_LIMIT_MB=34000"):
             self.assertIn(k, r1, k)
+        # retrain recipe: d12hs widths at every level, BN trainable at level 2, float32_fine at level 1
+        for path in SCRIPTS:
+            text = _read(path)
+            header = text[:text.index("set -euo pipefail")]
+            self.assertIn("d12hs", header, path)
+            self.assertIn("--filters %s --decoder-widths %s" % (D12HS_FILTERS, D12HS_DECODER), header, path)
+        r2 = _read(R2)
+        self.assertIn("BN_RECAL_FREEZE false", r2[:r2.index("set -euo pipefail")])
+        r1_header = r1[:r1.index("set -euo pipefail")]
+        for k in ("float32_fine", "36.95 GiB"):
+            self.assertIn(k, r1_header, k)
 
     @unittest.skipIf(BASH is None, "bash not available")
     def test_bash_syntax(self):
@@ -767,9 +787,9 @@ class TestScriptsDryRun(unittest.TestCase):
                                  "--lambda-ncc-pair", "1", "--lambda-smooth", "0.5", "--p-pdice", "0.1"],
                                 ["--p-pair", "0.1"], ["--val-pair-chunk", "16"], ["--deform-decoder", "auto"],
                                 ["--num-threads", "3"], ["--log-every", "25", "--log-backend", "jsonl"],
-                                ["--val-png", "true"]))
+                                ["--val-png", "true"], D12HS_SEQ))
         for flag in ("--lean-losses", "--gpu-memory-limit-mb", "--init-weights", "--task-loss-weights",
-                     "--cascade-from"):
+                     "--cascade-from", "--deform-decoder-dtype"):
             self.assertNotIn(flag, main)
         self.assert_seqs(chk, ([os.path.join(self.tmp, "results", "r4_manual")], ["--tasks", "rigid,affine,deform"],
                                ["--steps", "16000"], ["--grad-balance-rule", "true", "--grad-balance-from-step", "3100"],
@@ -849,10 +869,15 @@ class TestScriptsDryRun(unittest.TestCase):
                    "--nonfinite-patience-task")
 
     def test_mitigations_default_off(self):
+        """All off by default, except the level-1 deform decoder dtype (retrain recipe: float32_fine)."""
         for path, env in ((R4, {}), (R2, self.l2()), (R1, self.l2())):
             with self.subTest(os.path.basename(path)):
                 main, chk, _ = self.dry(path, **env)
                 for flag in self.MITIG_FLAGS:
+                    if path == R1 and flag == "--deform-decoder-dtype":
+                        self.assert_seqs(main, (["--deform-decoder-dtype", "float32_fine"],))
+                        self.assertEqual(main.count(flag), 1)
+                        continue
                     self.assertNotIn(flag, main)
                 self.assert_seqs(chk, (["--max-nonfinite-frac", "0.06", "--max-window-nonfinite-frac", "0.05"],))
 
@@ -913,13 +938,14 @@ class TestScriptsDryRun(unittest.TestCase):
                                 ["--gradient-checkpointing", "full", "--lean-sampler", "true", "--pair-recompute",
                                  "false"],
                                 ["--min-pairs", "n"], ["--max-pairs", "64"], ["--bn-recal-batches", "64"],
-                                ["--bn-recal-freeze", "true"], ["--cascade-skip-linear", "4:0"],
+                                ["--bn-recal-freeze", "false"], ["--cascade-skip-linear", "4:0"],
                                 ["--cascade-skip-deform", "4:0.15"], ["--val-pair-chunk", "4"],
                                 ["--global-transform", "true", "--global-rot-max-deg", "45", "--global-trans-max-mm",
                                  "10", "--global-start-step", "0", "--global-ramp-steps", "0", "--curriculum", "false"],
-                                ["--optimizer", "adamw"], ["--lowres-method", "tent"], ["--task-grad-norm", "12"]))
+                                ["--optimizer", "adamw"], ["--lowres-method", "tent"], ["--task-grad-norm", "12"],
+                                D12HS_SEQ))
         for flag in ("--lean-losses", "--val-group-size", "--gpu-memory-limit-mb", "--init-weights",
-                     "--task-start-step", "--cascade-skip-prob", "--val-image-chunk"):
+                     "--task-start-step", "--cascade-skip-prob", "--val-image-chunk", "--deform-decoder-dtype"):
             self.assertNotIn(flag, main)
         self.assert_seqs(chk, (["--tasks", "rigid,affine,deform"], ["--steps", "8000"],
                                ["--grad-balance-rule", "true", "--grad-balance-from-step", "100"],
@@ -942,12 +968,58 @@ class TestScriptsDryRun(unittest.TestCase):
                                 ["--min-pairs", "n"], ["--max-pairs", "64"], ["--gpu-memory-limit-mb", "40000"],
                                 ["--val-image-chunk", "1"], ["--val-pair-chunk", "1"], ["--bn-recal-validate", "false"],
                                 ["--cascade-skip-linear", "4:0,2:0.15"], ["--cascade-skip-deform", "4:0.15,2:0.15"],
-                                ["--curriculum", "false"], ["--optimizer", "adamw"], ["--lowres-method", "tent"]))
+                                ["--curriculum", "false"], ["--optimizer", "adamw"], ["--lowres-method", "tent"],
+                                ["--deform-decoder-dtype", "float32_fine"], ["--bn-recal-batches", "64"],
+                                ["--bn-recal-freeze", "true"], D12HS_SEQ))
         self.assertNotIn("--val-group-size", main)
         self.assert_seqs(chk, (["--expect-cascade", "true", "--expect-cascade-stages", "2"], ["--expect-skip", "true"],
                                ["--expect-init-weights", "full"], ["--expect-bn-recal", "true"],
                                ["--grad-balance-from-step", "100"], ["--project-steps", "8000"]))
         self.check_parses(main)
+        main, _, out = self.dry(R1, **self.l2(TASK_RATIO="rigid:1,affine:1"))
+        self.assertIn("NOTE: linear-only ratio, DEFORM_DECODER_DTYPE dropped", out)
+        self.assertNotIn("--deform-decoder-dtype", main)
+        self.check_parses(main)
+        main, _, _ = self.dry(R1, **self.l2(DEFORM_DECODER_DTYPE="policy"))      # the old fp16 decoder
+        self.assertNotIn("--deform-decoder-dtype", main)
+
+    def test_widths_env(self):
+        """FILTERS / DECODER_WIDTHS: empty -> no flag (ModelConfig default), a value -> passed, bad -> exit 2."""
+        for path, base in ((R4, {}), (R2, self.l2()), (R1, self.l2())):
+            with self.subTest(os.path.basename(path)):
+                main, _, _ = self.dry(path, **dict(base, FILTERS="", DECODER_WIDTHS=""))
+                for flag in ("--filters", "--decoder-widths"):
+                    self.assertNotIn(flag, main)
+                self.check_parses(main)
+                main, _, _ = self.dry(path, **dict(base, FILTERS="32,64,128,192,256,384"))
+                self.assert_seqs(main, (["--filters", "32,64,128,192,256,384", "--decoder-widths", D12HS_DECODER],))
+                self.check_parses(main)
+                for env in (dict(FILTERS="16,64"), dict(FILTERS="a,b,c,d,e,f"), dict(FILTERS="0,64,128,192,256,384"),
+                            dict(DECODER_WIDTHS="1,2,3")):
+                    r = self.run_script(path, **dict(base, **env))
+                    self.assertEqual(r.returncode, 2, (path, env, r.stdout, r.stderr))
+                    self.assertIn("ERROR", r.stderr)
+                    self.assertNotIn("MAIN: ", r.stdout)
+
+    def test_cascade_model_configs_identical(self):
+        """r_level2 cascading from r_level4 and r_level1 from r_level2 pass the cascade config check:
+        the ModelConfig of the three default dry-run lines, after the config.json round trip, is equal
+        in every field but seed. The rule of runtime.checkpoint.check_cascade_config is replicated
+        here because runtime.checkpoint imports TensorFlow."""
+        from runtime import args as A
+        from models.config import ModelConfig
+        dicts = []
+        for path, base in ((R4, {}), (R2, self.l2()), (R1, self.l2())):
+            main, _, _ = self.dry(path, **base)
+            cfg = A.model_config_from_args(A.parse_args(main))
+            cfg = ModelConfig.from_dict(json.loads(json.dumps(cfg.to_dict())))
+            self.assertEqual(tuple(cfg.filters), (16, 64, 128, 192, 256, 384), path)
+            self.assertEqual(tuple(cfg.decoder_widths), (128, 96, 64, 16, 8), path)
+            self.assertTrue(cfg.deform_decoder, path)
+            self.assertEqual(cfg.integration_steps, 7, path)
+            dicts.append({k: v for k, v in cfg.to_dict().items() if k != "seed"})
+        self.assertEqual(dicts[0], dicts[1])     # level 2 cascading from level 4
+        self.assertEqual(dicts[1], dicts[2])     # level 1 cascading from level 2
 
     def test_cascade_guards(self):
         for path in (R2, R1):

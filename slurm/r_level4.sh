@@ -34,6 +34,18 @@
 # recover within ~1000 steps, stagger by env only: DEFORM_START=$((G_START + 1000)).
 # Deform-only ratio (TASK_RATIO=deform:1): DEFORM_START, curriculum and G are dropped with a NOTE
 # (main.py needs one task starting at 0, and curriculum / G act on the linear tasks only).
+# BatchNorm trains normally (batch statistics, moving averages updated every step; no recal at
+# level 4). Deform decoder dtype: the AMP policy (float16; DEFORM_DECODER_DTYPE default policy).
+#
+# Width (Jay, retrain recipe): d12hs = default widths with the full-resolution stem and the d1/d2
+# decoder stages halved: --filters 16,64,128,192,256,384 --decoder-widths 128,96,64,16,8.
+# FILTERS / DECODER_WIDTHS (unset -> d12hs; set but empty -> flag not passed = ModelConfig default).
+# The same explicit lists at every level (r_level4/2/1.sh, slurm/sweep_level4.py) so config.json's
+# ModelConfig is identical across the cascade (the cascade check compares every field but seed; an
+# explicit list is NOT config-equal to the None default, so never mix FILTERS= runs with default
+# runs in one cascade, and resume a run with the widths it started with). Measured fits (m11):
+# L4 deform N64 fp16 25.6 GiB 4.1 s (job 10528435), L2 deform N16 fp16 27.2 GiB 7.6 s (10528435),
+# L1 deform N4 4 pairs float32_fine 36.95 GiB 21.1 s under 40000 MB (10528396).
 #
 # Memory knobs (must equal the knob set of the m10 memory record that sets N / DEFORM_N):
 #   GRAD_CKPT (default full; none|integrator|decoder|both|full), PAIR_RECOMPUTE (default false),
@@ -146,6 +158,9 @@ GRAD_BALANCE="${GRAD_BALANCE:-gradnorm}"
 VAL_PAIR_CHUNK="${VAL_PAIR_CHUNK:-16}"
 VAL_GROUP_SIZE="${VAL_GROUP_SIZE-16}"     # unset -> 16; set but empty -> main.py's default
 DEFORM_DECODER="${DEFORM_DECODER:-auto}"
+# Width (d12hs): unset -> d12hs; set but empty -> flag not passed (ModelConfig default widths).
+FILTERS="${FILTERS-16,64,128,192,256,384}"
+DECODER_WIDTHS="${DECODER_WIDTHS-128,96,64,16,8}"
 INIT="${INIT:-}"
 PROJECT_STEPS="${PROJECT_STEPS:-$STEPS}"
 PROJECT_VAL_EVERY="${PROJECT_VAL_EVERY:-$VAL_EVERY}"
@@ -178,6 +193,17 @@ need_choice LEAN_LOSSES "$LEAN_LOSSES" true false
 need_choice MIN_PAIRS "$MIN_PAIRS" 1 n
 need_choice CURRICULUM "$CURRICULUM" true false
 need_choice DEFORM_DECODER "$DEFORM_DECODER" auto true false
+WIDTH6_RE='^[1-9][0-9]*(,[1-9][0-9]*){5}$'
+WIDTH5_RE='^[1-9][0-9]*(,[1-9][0-9]*){4}$'
+WIDTH_ARGS=""
+if [ -n "$FILTERS" ]; then
+    [[ "$FILTERS" =~ $WIDTH6_RE ]] || die "FILTERS must be 6 comma-separated positive integers (stem,L2..L6) or empty, got '$FILTERS'"
+    WIDTH_ARGS="--filters $FILTERS"
+fi
+if [ -n "$DECODER_WIDTHS" ]; then
+    [[ "$DECODER_WIDTHS" =~ $WIDTH5_RE ]] || die "DECODER_WIDTHS must be 5 comma-separated positive integers (D5..D1) or empty, got '$DECODER_WIDTHS'"
+    WIDTH_ARGS="$WIDTH_ARGS --decoder-widths $DECODER_WIDTHS"
+fi
 [ "$VAL_PAIR_CHUNK" -ge 1 ] || die "VAL_PAIR_CHUNK must be >= 1, got '$VAL_PAIR_CHUNK'"
 VAL_ARGS=""
 if [ -n "$VAL_GROUP_SIZE" ]; then
@@ -285,7 +311,7 @@ MAIN=(main.py --data "$DATA" --results "$RESULTS" --run-name "$RUN_NAME" --level
       --deform-decoder "$DEFORM_DECODER" $START_ARGS $LIN_ARGS $INIT_ARGS
       --val-pair-chunk "$VAL_PAIR_CHUNK" --val-png true
       --num-threads "${SLURM_CPUS_PER_TASK:-3}" --log-every 25 --log-backend jsonl
-      $VAL_ARGS $DEFORM_ARGS $MEM_ARGS $MITIG_ARGS $EXTRA_ARGS)
+      $VAL_ARGS $DEFORM_ARGS $MEM_ARGS $WIDTH_ARGS $MITIG_ARGS $EXTRA_ARGS)
 # AMP: the dynamic loss scale overflows a few times early on (m8: 10-11 of 8000), hence 0.06.
 # Per task: FAIL if > 5 % of a task's steps in any 500-step window after step 100 are non-finite.
 # shellcheck disable=SC2206
@@ -320,6 +346,7 @@ echo "run $RUN_NAME | level 4 | ratio $TASK_RATIO | steps $STEPS | val every $VA
 echo "optimizer $OPTIMIZER | lr $LR | wd $WD | grad balance $GRAD_BALANCE ($BAL_ARGS) | lowres $LOWRES_METHOD | min pairs $MIN_PAIRS | max pairs $MAX_PAIRS"
 echo "deform start $DEFORM_START (ramp $DEFORM_RAMP) | curriculum $CURRICULUM ($CURRICULUM_RAMP) | G $G_ROT deg / $G_TRANS mm from $G_START (ramp $G_RAMP) | init ${INIT:-none}"
 echo "memory: grad ckpt $GRAD_CKPT | pair recompute $PAIR_RECOMPUTE | lean losses $LEAN_LOSSES | tf memory limit ${TF_MEM_LIMIT_MB} MB (0 = growth) | val group ${VAL_GROUP_SIZE:-default} | val pair chunk $VAL_PAIR_CHUNK"
+echo "widths: filters ${FILTERS:-default} | decoder ${DECODER_WIDTHS:-default}"
 echo "fp16 act clip $FP16_ACT_CLIP ($FP16_ACT_CLIP_SCOPE) | deform decoder dtype $DEFORM_DECODER_DTYPE | bn epsilon override $BN_EPSILON_OVERRIDE (0 = off)"
 
 rc=0

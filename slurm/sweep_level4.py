@@ -17,7 +17,10 @@ final schedule. One global job index across phases (A 0-8, B 9-10, C 11-12 with 
 job names r4sw<k>. The B / C indices start after len(--lrs) x len(--wds) of the CURRENT call, so
 pass the same grid options (--lrs, --wds) in every phase and command; other values shift the B / C
 names, which can then collide with a still-active phase-A job (jobs are matched by name). Every config passes VAL_GROUP_SIZE = min(16, DEFORM_N_small) (fixed for the
-whole sweep; review v1.3 NIT 6) so the validation groups are identical in every run.
+whole sweep; review v1.3 NIT 6) so the validation groups are identical in every run. Every config
+also passes the retrain width d12hs explicitly (FILTERS=16,64,128,192,256,384
+DECODER_WIDTHS=128,96,64,16,8, identical to the r_level*.sh defaults) so the sweep trains the
+final width.
 
 Status (evaluated in this order): running / pending = the job name is in squeue (RUNNING ->
 running, else pending); done = the run dir exists and the last record of logs/metrics.jsonl that
@@ -62,10 +65,15 @@ SCRIPT_ENV_KEYS = (
     "LEAN_LOSSES", "LOWRES_METHOD", "GRAD_BALANCE", "VAL_PAIR_CHUNK", "VAL_GROUP_SIZE", "DEFORM_DECODER",
     "INIT", "EXTRA_ARGS", "BGR_DRY_RUN", "PROJECT_STEPS", "PROJECT_VAL_EVERY",
     "FP16_ACT_CLIP", "FP16_ACT_CLIP_SCOPE", "DEFORM_DECODER_DTYPE", "BN_EPSILON_OVERRIDE",
+    "FILTERS", "DECODER_WIDTHS",
     "PROJ", "REPO", "DATA", "RESULTS", "SIF", "SCRATCH_ROOT", "SLURM_JOB_ID", "SLURM_CPUS_PER_TASK")
 # The full env set of every submission (7.1), in this order.
 CFG_KEYS = ("RUN_NAME", "LR", "WD", "N", "DEFORM_N", "STEPS", "VAL_EVERY", "WARMUP", "DEFORM_START",
-            "DEFORM_RAMP", "CURRICULUM_RAMP", "G_START", "G_RAMP", "VAL_GROUP_SIZE")
+            "DEFORM_RAMP", "CURRICULUM_RAMP", "G_START", "G_RAMP", "VAL_GROUP_SIZE",
+            "FILTERS", "DECODER_WIDTHS")
+# The retrain width d12hs, identical to the slurm/r_level*.sh defaults (FILTERS / DECODER_WIDTHS).
+WIDTH_FILTERS = "16,64,128,192,256,384"
+WIDTH_DECODER = "128,96,64,16,8"
 # Schedules: phases A / B (8000 steps, scaled) and phase C (the final schedule).
 SCHEDULE_AB = {"DEFORM_START": 2000, "DEFORM_RAMP": 500, "CURRICULUM_RAMP": 2000, "G_START": 2000,
                "G_RAMP": 2000, "WARMUP": 1000, "VAL_EVERY": 500}
@@ -197,7 +205,8 @@ def resolve(args):
 
 def _config(k, phase, run, lr, wd, n, dn, steps, sched, time_limit, val_group_size):
     env = {"RUN_NAME": run, "LR": env_float(lr), "WD": env_float(wd), "N": str(n), "DEFORM_N": str(dn),
-           "STEPS": str(steps), "VAL_GROUP_SIZE": str(val_group_size)}
+           "STEPS": str(steps), "VAL_GROUP_SIZE": str(val_group_size),
+           "FILTERS": WIDTH_FILTERS, "DECODER_WIDTHS": WIDTH_DECODER}
     for key, val in sched.items():
         env[key] = str(val)
     return {"k": k, "phase": phase, "job": "r4sw%d" % k, "run": run, "time": time_limit, "env": env}

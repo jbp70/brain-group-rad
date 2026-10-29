@@ -24,7 +24,8 @@ memory-model grid tests are unchanged):
 
 * default: no width flags (``ModelConfig`` default, decoder_widths None);
 * d12h (d1/d2 halved): ``--decoder-widths 128,96,64,16,8``;
-* d12hs (d1/d2 + stem halved): ``--filters 16,64,128,192,256,384 --decoder-widths 128,96,64,16,8``;
+* d12hs (d1/d2 + stem halved): ``--filters 16,64,128,192,256,384 --decoder-widths 128,96,64,16,8``
+  (the from-scratch retrain width: default of slurm/r_level{4,2,1}.sh and slurm/sweep_level4.py);
 * fr50: the ``fr50`` preset, ``--filters 16,32,128,192,256,384 --decoder-widths 128,96,64,16,8``.
 
 A non-default width at levels 2 / 1 cascades through the normal ``--cascade-from`` path from
