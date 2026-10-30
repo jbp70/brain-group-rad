@@ -214,6 +214,28 @@ def test_mindboggle_native_hln_row_registered(tmp_path, fake_tools, target_dir, 
     assert dice(mask, _template_mask()) > 0.85
 
 
+def test_hln_synthstrip_mask_only_zeroes_labels_outside(tmp_path, fake_tools, target_dir, mni_files):
+    """config_mindboggle_hln.yaml: SynthStrip mask alone, labels set to 0 outside it."""
+    cfg = write_config(tmp_path / "hln.yaml", target_dir, mni_files,
+                       mask={"union_labels": False, "zero_labels_outside": True}, outputs={"save_mask": True})
+    row = ds.mindboggle_native_row(str(tmp_path / "in"))
+    man = ds.write_rows(str(tmp_path / "m.csv"), [row])
+    out = str(tmp_path / "out")
+    assert _run(cfg, man, out) == 0
+    d = _sd(out, row)
+    meta = _meta(d)
+    assert meta["mask_source"] == "synthstrip" and "mask_union_labels" not in meta
+    assert meta["labels_zeroed_outside_mask"]["dkt31aseg"] > 0  # fake SynthStrip mask is tighter than seg
+    mask = nifti.load_data(os.path.join(d, "mask.nii.gz"), np.uint8)[0]
+    lab = nifti.load_data(os.path.join(d, "labels_dkt31aseg.nii.gz"), np.int64)[0]
+    assert not np.any(lab[mask == 0]) and np.any(lab[mask == 1])
+    # Option off (default): the same row keeps labels outside the mask.
+    cfg2 = write_config(tmp_path / "off.yaml", target_dir, mni_files, outputs={"save_mask": True})
+    assert _run(cfg2, man, out, "--overwrite") == 0
+    lab2 = nifti.load_data(os.path.join(d, "labels_dkt31aseg.nii.gz"), np.int64)[0]
+    assert np.any(lab2[mask == 0]) and "labels_zeroed_outside_mask" not in _meta(d)
+
+
 def test_union_labels_off_keeps_synthstrip_mask(tmp_path, fake_tools, config_file):
     row = ds.mindboggle_row(str(tmp_path / "in"))
     man = ds.write_rows(str(tmp_path / "m.csv"), [row])

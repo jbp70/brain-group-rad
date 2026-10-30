@@ -54,7 +54,8 @@ mni_templates:
 contrast_template: {T1w: T1, T2w: T2, FLAIR: T2, PDw: T2}
 
 # union_labels: SynthStrip rows use mask = SynthStrip mask | (labels > 0) (e.g. Mindboggle)
-mask: {threshold: 0.0, fill_holes: true, largest_component: true, union_labels: false}
+# zero_labels_outside: set written labels to 0 outside the final brain mask
+mask: {threshold: 0.0, fill_holes: true, largest_component: true, union_labels: false, zero_labels_outside: false}
 normalization: {upper_percentile: 99.5, lower_percentile: null}
 
 synthstrip:

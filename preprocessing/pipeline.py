@@ -497,10 +497,20 @@ def step_normalize(c: RowContext) -> None:
         nifti.save_like(mask.astype(np.uint8), aff, c.o("mask.nii.gz"), np.uint8, xform_code=4)
     elif os.path.isfile(c.o("mask.nii.gz")):
         os.remove(c.o("mask.nii.gz"))  # stale mask of an earlier run would be preferred by QC/export
+    zero_outside = bool(c.cfg["mask"]["zero_labels_outside"])
+    zeroed: Dict[str, int] = {}
     for name, p in labels.items():
         ldata, limg = nifti.load_data(p, np.float64)
         lab = to_label_dtype(_to_target(c, ldata, limg, "labels_" + name, True), "uint16")
+        if zero_outside:
+            out = (lab > 0) & ~mask
+            zeroed[name] = int(out.sum())
+            lab[out] = 0
         nifti.save_like(lab, aff, c.o("labels_%s.nii.gz" % name), np.uint16, xform_code=4)
+    if zero_outside:
+        c.meta["labels_zeroed_outside_mask"] = zeroed
+    else:
+        c.meta.pop("labels_zeroed_outside_mask", None)
 
 
 def step_synthseg(c: RowContext) -> None:

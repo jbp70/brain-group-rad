@@ -6,7 +6,8 @@
 target_dir: /autofs/space/crater_001/users/jn85/BrainRegProjects/GroupwiseReg/data/target_grid
 
 # Brain mask = SynthStrip mask | (DKT31+aseg labels > 0): no labelled voxel is stripped.
-mask: {union_labels: true}
+# zero_labels_outside: labels outside the final mask -> 0 (few or none here, because of the union).
+mask: {union_labels: true, zero_labels_outside: true}
 
 # Evaluation only: keep image, labels, meta/qc json; delete work/ intermediates.
 outputs: {keep_work: false, save_mask: false, save_qc_png: false}
