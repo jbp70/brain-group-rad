@@ -73,6 +73,21 @@ def mindboggle_row(root: str, subject: str = "OASIS-TRT-20-1") -> ManifestRow:
                        label_paths=OrderedDict([("dkt31aseg", lab)]), in_template_space=True)
 
 
+def mindboggle_native_row(root: str, subject: str = "HLN-12-1") -> ManifestRow:
+    """Mindboggle HLN-like: raw head in native space, PIR storage (like the real HLN files), float32 labels."""
+    shape = (35, 31, 33)  # odd: centred grid -> integer world coordinates, exact nearest resampling
+    perm = np.array([[0.0, 0, 1], [-1, 0, 0], [0, -1, 0]])  # voxel (i, j, k) -> (k, -i, -j): PIR
+    aff = np.eye(4)
+    aff[:3, :3] = perm
+    aff[:3, 3] = -perm @ ((np.asarray(shape) - 1) / 2.0) + np.array([1.0, -2.0, 1.0])
+    xyz = ph.world_coords(shape, aff)
+    d = os.path.join(root, "mindboggle", "Extra-18_volumes", subject)
+    img = ph.save(os.path.join(d, "t1weighted.nii.gz"), ph.head(xyz), aff)
+    lab = ph.save(os.path.join(d, "labels.DKT31.manual+aseg.nii.gz"), ph.seg(xyz), aff)
+    return ManifestRow(dataset="mindboggle", subject=subject, contrast="T1w", image_path=img,
+                       label_paths=OrderedDict([("dkt31aseg", lab)]))
+
+
 def write_rows(path: str, rows: List[ManifestRow]) -> str:
     write_manifest(rows, path)
     return path

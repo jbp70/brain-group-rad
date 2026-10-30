@@ -144,6 +144,41 @@ def test_generic_mindboggle_mni152_files(tmp_path):
         assert r.in_template_space and not r.skull_stripped and not r.bias_corrected and r.dataset == "mindboggle"
 
 
+def _mindboggle_tree(m):
+    names = ("t1weighted.nii.gz", "t1weighted_brain.nii.gz", "t1weighted.MNI152.nii.gz",
+             "labels.DKT31.manual.MNI152.nii.gz", "labels.DKT31.manual+aseg.nii.gz",
+             "labels.DKT31.manual+aseg.MNI152.nii.gz")
+    for grp, s in (("Extra-18_volumes", "Colin27-1"), ("Extra-18_volumes", "HLN-12-1"),
+                   ("Extra-18_volumes", "HLN-12-10"), ("OASIS-TRT-20_volumes", "OASIS-TRT-20-1")):
+        for n in names:
+            _nii(m / grp / s / n)
+    (m / ".DS_Store").write_text("")
+
+
+def test_mindboggle_builder_hln_native(tmp_path):
+    m = tmp_path / "data_mindboggle"
+    _mindboggle_tree(m)
+    rows = BUILDERS["mindboggle"].build(str(m), _args("mindboggle"))
+    by = {r.subject: r for r in rows}
+    assert sorted(by) == ["Colin27-1", "HLN-12-1", "HLN-12-10", "OASIS-TRT-20-1"]
+    for s in ("HLN-12-1", "HLN-12-10"):
+        r = by[s]
+        assert not r.in_template_space and r.image_path.endswith(s + "/t1weighted.nii.gz")
+        assert r.label_paths["dkt31aseg"].endswith(s + "/labels.DKT31.manual+aseg.nii.gz")
+    for s in ("Colin27-1", "OASIS-TRT-20-1"):
+        r = by[s]
+        assert r.in_template_space and r.image_path.endswith(s + "/t1weighted.MNI152.nii.gz")
+        assert r.label_paths["dkt31aseg"].endswith(s + "/labels.DKT31.manual+aseg.MNI152.nii.gz")
+    assert all(r.dataset == "mindboggle" and not r.skull_stripped and not r.bias_corrected for r in rows)
+    native = BUILDERS["mindboggle"].build(str(m), _args("mindboggle", ["--mb-select", "native"]))
+    assert [r.subject for r in native] == ["HLN-12-1", "HLN-12-10"]
+    mni = BUILDERS["mindboggle"].build(str(m), _args("mindboggle", ["--mb-select", "mni"]))
+    assert [r.subject for r in mni] == ["Colin27-1", "OASIS-TRT-20-1"]
+    custom = BUILDERS["mindboggle"].build(str(m), _args("mindboggle", ["--mb-native", "Colin27-*",
+                                                                       "--mb-select", "native"]))
+    assert [r.subject for r in custom] == ["Colin27-1"]
+
+
 def test_generic_globs_use_raw_folder_name(tmp_path):
     m = tmp_path / "raw"
     _nii(m / "subj 01 (scan)" / "t1.nii.gz")

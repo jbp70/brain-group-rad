@@ -1,7 +1,8 @@
 # Mindboggle-101 (MNI152 versions) on the Martinos cluster. Omitted keys use the
 # defaults in preprocessing/config.py (Martinos tool paths, p99.5 normalization).
-# Rows come from the generic builder with --in-template-space (see builders/generic.py):
-# no registration; SynthStrip + N4, then world-space resampling onto the LUMIR grid.
+# Rows come from `build-manifest --dataset mindboggle` (builders/mindboggle.py):
+# MNI152 rows: no registration; SynthStrip + N4, then world-space resampling onto the LUMIR grid.
+# HLN-* rows (bad provided MNI152 files): native files, reorient + SynthStrip + N4 + 9-DOF FLIRT.
 target_dir: /autofs/space/crater_001/users/jn85/BrainRegProjects/GroupwiseReg/data/target_grid
 
 # Brain mask = SynthStrip mask | (DKT31+aseg labels > 0): no labelled voxel is stripped.

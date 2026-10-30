@@ -13,7 +13,7 @@ import logging
 from typing import List, Optional
 
 from ..manifest import ManifestRow
-from . import generic, lumir, neurite_oasis, ultracortex
+from . import generic, lumir, mindboggle, neurite_oasis, ultracortex
 
 log = logging.getLogger(__name__)
 
@@ -22,6 +22,7 @@ BUILDERS = {
     "neurite_oasis": neurite_oasis,
     "ultracortex": ultracortex,
     "generic": generic,
+    "mindboggle": mindboggle,
 }
 
 

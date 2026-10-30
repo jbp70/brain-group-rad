@@ -185,6 +185,35 @@ def test_mindboggle_row_template_space_strip_n4_union_labels(tmp_path, fake_tool
     assert dice(mask, _template_mask()) > 0.9
 
 
+def test_mindboggle_native_hln_row_registered(tmp_path, fake_tools, target_dir, mni_files):
+    cfg = write_config(tmp_path / "mb.yaml", target_dir, mni_files, mask={"union_labels": True})
+    row = ds.mindboggle_native_row(str(tmp_path / "in"))
+    man = ds.write_rows(str(tmp_path / "m.csv"), [row])
+    out = str(tmp_path / "out")
+    assert _run(cfg, man, out) == 0
+    calls = fake_tools.calls()
+    # SynthStrip + N4 + FLIRT (1 registration + image/mask/labels applied with the same matrix).
+    assert ds.calls_by_tool(calls) == {"mri_synthstrip": 1, "N4BiasFieldCorrection": 1, "flirt": 4}
+    d = _sd(out, row)
+    reg = [c["argv"] for c in calls if c["tool"] == "flirt"][0]
+    assert reg[reg.index("-in") + 1] == os.path.join(d, "work", "n4.nii.gz")
+    applies = [c["argv"] for c in calls if c["tool"] == "flirt"][1:]
+    assert [a[a.index("-interp") + 1] for a in applies][1:] == ["nearestneighbour", "nearestneighbour"]
+    assert applies[2][1] == row.label_paths["dkt31aseg"]
+    img, mask = _check_outputs(d, ["dkt31aseg"])
+    meta = _meta(d)
+    assert meta["status"] == "completed" and meta["mask_source"] == "synthstrip+labels"
+    assert meta["mask_union_labels"]["added_label_voxels"] > 0
+    assert meta["steps"]["reorient"]["status"] == "done" and meta["steps"]["register"]["status"] == "done"
+    # Fake FLIRT finds the true (identity world) mapping: labels land on the right anatomy, IDs unchanged.
+    lab = nifti.load_data(os.path.join(d, "labels_dkt31aseg.nii.gz"), np.int64)[0]
+    exp = ph.seg(ph.world_coords(ph.TARGET_SHAPE, ph.target_affine()))
+    assert set(np.unique(lab)) <= {0, 2, 4, 41}
+    assert dice(lab == 41, exp == 41) > 0.99 and dice(lab == 2, exp == 2) > 0.99  # left/right preserved
+    assert dice(lab == 41, exp == 2) < 0.1                                         # not mirrored
+    assert dice(mask, _template_mask()) > 0.85
+
+
 def test_union_labels_off_keeps_synthstrip_mask(tmp_path, fake_tools, config_file):
     row = ds.mindboggle_row(str(tmp_path / "in"))
     man = ds.write_rows(str(tmp_path / "m.csv"), [row])
