@@ -1,0 +1,10 @@
+# Mindboggle-101 HLN-* subjects (native files, own FLIRT registration; manifest from
+# `build-manifest --dataset mindboggle --mb-select native`). Same as config_mindboggle.yaml
+# except the brain mask is the SynthStrip mask alone: the HLN labels reach too far outside
+# the brain (e.g. cerebellum), so they are not added to the mask. Labels are written unchanged.
+target_dir: /autofs/space/crater_001/users/jn85/BrainRegProjects/GroupwiseReg/data/target_grid
+
+mask: {union_labels: false}
+
+# Evaluation only: keep image, labels, meta/qc json; delete work/ intermediates.
+outputs: {keep_work: false, save_mask: false, save_qc_png: false}
