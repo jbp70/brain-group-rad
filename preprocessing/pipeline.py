@@ -4,6 +4,7 @@ LUMIR target grid (MNI152 world), with mask and labels.
 Steps (ALL_STEPS, in order; validation always runs):
   reorient   flirt backend only: canonical reorientation (nibabel, world-preserving) or fslreorient2std
   strip      provided mask | derive_mask (already stripped) | mri_synthstrip
+             (mask.union_labels: SynthStrip mask | labels > 0)
   n4         N4BiasFieldCorrection inside the mask (skipped if bias_corrected)
   register   9-DOF FLIRT (default) or ANTs Rigid+Affine/Similarity to MNI152 1 mm (skipped if in_template_space)
   resample   ONE interpolation native -> target grid (anti-alias smoothing for sub-mm inputs first);
@@ -21,6 +22,9 @@ so they can resume.
 LUMIR rows (in_template_space): voxel arrays are never resampled when the
 shape matches and the header is the recorded raw LUMIR header (or already the
 corrected affine); outputs get the corrected affine from target_grid.json.
+Other in_template_space rows (e.g. Mindboggle on FSL's MNI152 grid) skip
+reorient/register and are resampled in world space with their own header,
+from the N4 output (or the stripped image when bias_corrected).
 
 Every step is skipped when its outputs exist AND meta.json records it as
 done (unless --overwrite); a step is recorded "running" before it starts, so
@@ -263,6 +267,8 @@ def step_strip(c: RowContext) -> None:
                               c.cfg["synthstrip"]["extra_args"])
         c.run_tool(argv, "strip")
         c.meta["mask_source"] = "synthstrip"
+        if c.cfg["mask"]["union_labels"] and r.label_paths:
+            _union_label_mask(c, src, stripped, mask_out)
         return
     how = "provided" if r.mask_path else "derived"
     c.py("strip(%s mask)" % how, [src] + ([r.mask_path] if r.mask_path else []), [stripped, mask_out])
@@ -283,6 +289,28 @@ def step_strip(c: RowContext) -> None:
         mask = derive_mask(data, mc["threshold"], mc["fill_holes"], mc["largest_component"], extra=extra)
     if not mask.any():
         raise PipelineError("empty brain mask")
+    nifti.save_like(data * mask, img.affine, stripped, np.float32, xform_code=1)
+    nifti.save_like(mask.astype(np.uint8), img.affine, mask_out, np.uint8, xform_code=1)
+
+
+def _union_label_mask(c: RowContext, src: str, stripped: str, mask_out: str) -> None:
+    """mask.union_labels: mask = SynthStrip mask | (labels > 0); stripped = src * mask."""
+    labels = list(c.row.label_paths.values())
+    c.py("strip(union SynthStrip mask with labels > 0)", [src, mask_out] + labels, [stripped, mask_out])
+    c.meta["mask_source"] = "synthstrip+labels"
+    if c.dry:
+        return
+    data, img = nifti.load_data(src)
+    mdata, mimg = nifti.load_data(mask_out)
+    mask = _on_grid(mdata, mimg, img) > 0
+    n_strip = int(mask.sum())
+    for p in labels:
+        ldata, limg = nifti.load_data(p, np.float64)
+        mask |= _on_grid(ldata, limg, img) > 0
+    added = int(mask.sum()) - n_strip
+    c.meta["mask_union_labels"] = {"synthstrip_voxels": n_strip, "added_label_voxels": added}
+    if added:
+        log.info("%s: %d labelled voxels outside the SynthStrip mask added to the mask", c.D, added)
     nifti.save_like(data * mask, img.affine, stripped, np.float32, xform_code=1)
     nifti.save_like(mask.astype(np.uint8), img.affine, mask_out, np.uint8, xform_code=1)
 
@@ -369,18 +397,27 @@ def step_resample(c: RowContext) -> None:
     if r.in_template_space:
         if c.meta.get("grid_state") != "mismatch":
             return
-        c.py("resample(world, own header)", [c.w("stripped.nii.gz"), c.w("native_mask.nii.gz")],
+        # reg_input = N4 output, or the stripped image when the row is already bias corrected.
+        c.py("resample(world, own header)", [c.reg_input, c.w("native_mask.nii.gz")],
              [img_out, mask_out] + list(c.resampled_labels().values()))
         if c.dry:
             return
-        for src, out, order in ((c.w("stripped.nii.gz"), img_out, 1), (c.w("native_mask.nii.gz"), mask_out, 0)):
+        c.need(c.reg_input, c.w("native_mask.nii.gz"))
+        for src, out, order in ((c.reg_input, img_out, 1), (c.w("native_mask.nii.gz"), mask_out, 0)):
             data, img = nifti.load_data(src)
             res = nifti.resample_world(data, img.affine, c.target.shape, c.target.affine, order=order)
             nifti.save_like(res, c.target.affine, out, np.float32, xform_code=4)
+        lost: Dict[str, int] = {}
         for name, out in c.resampled_labels().items():
             data, img = nifti.load_data(r.label_paths[name], np.float64)
             res = resample_labels_nearest(data, img.affine, c.target.shape, c.target.affine)
+            # Same voxel size: labelled voxels that fall outside the target field of view are lost.
+            lost[name] = int((data > 0).sum()) - int((res > 0).sum())
+            if lost[name] > 0:
+                log.warning("%s: labels %s: %d labelled voxels fewer on the target grid (field of view crop?)",
+                            c.D, name, lost[name])
             nifti.save_like(res, c.target.affine, out, np.float32, xform_code=4)
+        c.meta["label_voxels_lost_resample"] = lost
         return
     moving = c.reg_input
     c.need(moving, c.w("native_mask.nii.gz"), c.o("affine_to_template.mat"))
@@ -422,7 +459,7 @@ def step_resample(c: RowContext) -> None:
 def _sources(c: RowContext) -> Tuple[str, str, Dict[str, str]]:
     r = c.row
     if r.in_template_space and c.meta.get("grid_state") != "mismatch":
-        return c.w("stripped.nii.gz"), c.w("native_mask.nii.gz"), dict(r.label_paths)
+        return c.reg_input, c.w("native_mask.nii.gz"), dict(r.label_paths)
     return c.w("image_resampled.nii.gz"), c.w("mask_resampled.nii.gz"), c.resampled_labels()
 
 

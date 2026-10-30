@@ -60,6 +60,19 @@ def generic_row(root: str, subject: str = "OAS2_0001") -> ManifestRow:
                        label_paths=OrderedDict([("manual", lab)]))
 
 
+def mindboggle_row(root: str, subject: str = "OASIS-TRT-20-1") -> ManifestRow:
+    """Mindboggle-like: raw head (skull, bias) already on the MNI grid (LAS header), float32 labels.
+
+    Off the target grid -> world-space resampling with its own header; needs strip + N4.
+    """
+    xyz = ph.world_coords(ph.MNI_SHAPE, ph.MNI_AFFINE)
+    d = os.path.join(root, "mindboggle", "OASIS-TRT-20_volumes", subject)
+    img = ph.save(os.path.join(d, "t1weighted.MNI152.nii.gz"), ph.head(xyz), ph.MNI_AFFINE)
+    lab = ph.save(os.path.join(d, "labels.DKT31.manual+aseg.MNI152.nii.gz"), ph.seg(xyz), ph.MNI_AFFINE)
+    return ManifestRow(dataset="mindboggle", subject=subject, contrast="T1w", image_path=img,
+                       label_paths=OrderedDict([("dkt31aseg", lab)]), in_template_space=True)
+
+
 def write_rows(path: str, rows: List[ManifestRow]) -> str:
     write_manifest(rows, path)
     return path

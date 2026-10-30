@@ -156,6 +156,44 @@ def test_ultracortex_row_strip_n4_antialias(tmp_path, fake_tools, config_file):
     assert meta["mask_source"] == "synthstrip"
 
 
+def test_mindboggle_row_template_space_strip_n4_union_labels(tmp_path, fake_tools, target_dir, mni_files, capsys):
+    cfg = write_config(tmp_path / "mb.yaml", target_dir, mni_files, mask={"union_labels": True})
+    row = ds.mindboggle_row(str(tmp_path / "in"))
+    man = ds.write_rows(str(tmp_path / "m.csv"), [row])
+    out = str(tmp_path / "out")
+    assert _run(cfg, man, out, "--dry-run") == 0
+    text = capsys.readouterr().out
+    d = _sd(out, row)
+    # Template-space resampling reads the N4 output, not the stripped image.
+    assert "PY resample(world, own header): %s" % os.path.join(d, "work", "n4.nii.gz") in text
+    assert "PY strip(union SynthStrip mask with labels > 0)" in text
+    assert _run(cfg, man, out) == 0
+    # No registration, no reorientation, no FLIRT resampling: SynthStrip + N4 only.
+    assert ds.calls_by_tool(fake_tools.calls()) == {"mri_synthstrip": 1, "N4BiasFieldCorrection": 1}
+    img, mask = _check_outputs(d, ["dkt31aseg"])
+    meta = _meta(d)
+    assert meta["status"] == "completed" and meta["grid_state"] == "mismatch"
+    assert meta["mask_source"] == "synthstrip+labels"
+    assert meta["mask_union_labels"]["added_label_voxels"] > 0  # fake SynthStrip mask is tighter than seg
+    assert meta["label_voxels_lost_resample"] == {"dkt31aseg": 0}
+    assert "register" not in meta["steps"] and "reorient" not in meta["steps"]
+    assert not os.path.exists(os.path.join(d, "work"))  # intermediates deleted
+    lab = nifti.load_data(os.path.join(d, "labels_dkt31aseg.nii.gz"), np.int64)[0]
+    xyz = ph.world_coords(ph.TARGET_SHAPE, ph.target_affine())
+    np.testing.assert_array_equal(lab, ph.seg(xyz))  # world-consistent, label IDs unchanged
+    assert np.all(img[lab > 0] > 0)                  # no labelled voxel stripped away
+    assert dice(mask, _template_mask()) > 0.9
+
+
+def test_union_labels_off_keeps_synthstrip_mask(tmp_path, fake_tools, config_file):
+    row = ds.mindboggle_row(str(tmp_path / "in"))
+    man = ds.write_rows(str(tmp_path / "m.csv"), [row])
+    out = str(tmp_path / "out")
+    assert _run(config_file, man, out) == 0
+    meta = _meta(_sd(out, row))
+    assert meta["mask_source"] == "synthstrip" and "mask_union_labels" not in meta
+
+
 def test_generic_row_ants_backend(tmp_path, fake_tools, target_dir, mni_files):
     cfg = write_config(tmp_path / "ants.yaml", target_dir, mni_files, registration={"backend": "ants"})
     row = ds.generic_row(str(tmp_path / "in"))

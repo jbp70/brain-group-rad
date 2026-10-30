@@ -53,7 +53,8 @@ mni_templates:
     image_2mm: /PLACEHOLDER/templates/MNI152_T2_2mm_brain.nii.gz   # PLACEHOLDER
 contrast_template: {T1w: T1, T2w: T2, FLAIR: T2, PDw: T2}
 
-mask: {threshold: 0.0, fill_holes: true, largest_component: true}
+# union_labels: SynthStrip rows use mask = SynthStrip mask | (labels > 0) (e.g. Mindboggle)
+mask: {threshold: 0.0, fill_holes: true, largest_component: true, union_labels: false}
 normalization: {upper_percentile: 99.5, lower_percentile: null}
 
 synthstrip:

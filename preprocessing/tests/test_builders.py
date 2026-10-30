@@ -123,6 +123,27 @@ def test_generic_bids_and_folder(tmp_path):
     assert not rows[0].skull_stripped and rows[0].contrast == "T1w"
 
 
+def test_generic_mindboggle_mni152_files(tmp_path):
+    """The exact Mindboggle-101 MNI152 command: the globs must not pick the sibling files."""
+    m = tmp_path / "data_mindboggle"
+    names = ("t1weighted.nii.gz", "t1weighted_brain.nii.gz", "t1weighted.MNI152.nii.gz",
+             "t1weighted_brain.MNI152.nii.gz", "labels.DKT31.manual.nii.gz", "labels.DKT31.manual.MNI152.nii.gz",
+             "labels.DKT31.manual+aseg.nii.gz", "labels.DKT31.manual+aseg.MNI152.nii.gz")
+    for grp, s in (("Extra-18_volumes", "Colin27-1"), ("MMRR-21_volumes", "MMRR-21-1"),
+                   ("OASIS-TRT-20_volumes", "OASIS-TRT-20-1")):
+        for n in names:
+            _nii(m / grp / s / n)
+    rows = BUILDERS["generic"].build(str(m), _args("generic", [
+        "--name", "mindboggle", "--image-glob", "*/*/t1weighted.MNI152.nii.gz",
+        "--label", "dkt31aseg=*/{subject}/labels.DKT31.manual+aseg.MNI152.nii.gz", "--in-template-space"]))
+    assert [r.subject for r in rows] == ["Colin27-1", "MMRR-21-1", "OASIS-TRT-20-1"]
+    for r in rows:
+        assert r.image_path.endswith(r.subject + "/t1weighted.MNI152.nii.gz")
+        assert list(r.label_paths) == ["dkt31aseg"]
+        assert r.label_paths["dkt31aseg"].endswith(r.subject + "/labels.DKT31.manual+aseg.MNI152.nii.gz")
+        assert r.in_template_space and not r.skull_stripped and not r.bias_corrected and r.dataset == "mindboggle"
+
+
 def test_generic_globs_use_raw_folder_name(tmp_path):
     m = tmp_path / "raw"
     _nii(m / "subj 01 (scan)" / "t1.nii.gz")

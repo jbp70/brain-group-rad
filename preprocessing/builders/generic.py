@@ -11,6 +11,13 @@ placeholder). Flags (--skull-stripped etc.) apply to every row.
     python -m preprocessing build-manifest --dataset generic --root /data/Mindboggle101 --name mindboggle \\
         --image-glob '*/*/t1weighted.nii.gz' --label 'manual=*/{subject}/labels.DKT31.manual+aseg.nii.gz'
     python -m preprocessing build-manifest --dataset generic --root /data/oasis3_bids --name oasis3 --suffix T2w
+
+Mindboggle-101, MNI152 versions (already on FSL's MNI152 1 mm grid -> no registration;
+strip + N4, then world-space resampling onto the LUMIR grid; run with mask.union_labels: true):
+
+    python -m preprocessing build-manifest --dataset generic --root /data/data_mindboggle --name mindboggle \\
+        --image-glob '*/*/t1weighted.MNI152.nii.gz' \\
+        --label 'dkt31aseg=*/{subject}/labels.DKT31.manual+aseg.MNI152.nii.gz' --in-template-space
 """
 import argparse
 import logging

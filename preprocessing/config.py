@@ -67,7 +67,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     },
     # Contrast suffix -> MNI template key. Unknown contrasts use "T1".
     "contrast_template": {"T1w": "T1", "T2w": "T2", "FLAIR": "T2", "PDw": "T2"},
-    "mask": {"threshold": 0.0, "fill_holes": True, "largest_component": True},
+    # union_labels: rows skull-stripped by SynthStrip get mask = SynthStrip mask | (labels > 0)
+    # (every provided label file), so no labelled voxel is stripped away (e.g. Mindboggle).
+    "mask": {"threshold": 0.0, "fill_holes": True, "largest_component": True, "union_labels": False},
     "normalization": {"upper_percentile": 99.5, "lower_percentile": None},
     "synthstrip": {"extra_args": []},
     "n4": {"shrink_factor": 4, "bspline_fitting": "[200]", "convergence": "[50x50x50x50,0.0]"},
@@ -174,6 +176,8 @@ def validate(cfg: Dict[str, Any]) -> None:
              "synthseg.threads must be a positive int")
     for name, t in cfg["mni_templates"].items():
         _require(isinstance(t, dict) and "image_1mm" in t, "mni_templates.%s needs image_1mm" % name)
+    for key in ("fill_holes", "largest_component", "union_labels"):
+        _require(isinstance(cfg["mask"][key], bool), "mask.%s must be true or false" % key)
     for key, val in cfg["outputs"].items():
         _require(isinstance(val, bool), "outputs.%s must be true or false" % key)
 
