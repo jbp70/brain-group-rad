@@ -346,6 +346,7 @@ def cmd_run(a) -> int:
     S.clear()
     S.update(subs=subs, images=images, labels=labels, masks=masks, fields=src, spacing=sp,
              labels_list=np.asarray(lab_list), hd95=a.hd95, lncc_window=a.lncc_window)
+    t_load = time.time() - t0
 
     # pass 1: warp everything into atlas space
     wimgs = np.empty_like(images)
@@ -353,6 +354,8 @@ def cmd_run(a) -> int:
     for i, wi, wl in _map(_pass1, list(range(n)), a.workers):
         wimgs[i], wlabs[i] = wi, wl
     log.info("pass 1 (warp to atlas space) done, %.0f s", time.time() - t0)
+    timing = {"load_and_preload": t_load, "pass1_warp": time.time() - t0 - t_load}
+    t_mark = time.time()
     atlas_mask = np.mean(wimgs > 0, axis=0) >= 0.5
     if a.atlas:
         atlas = load_volume(a.atlas, shape, aff, "atlas", np.float32)
@@ -384,6 +387,8 @@ def cmd_run(a) -> int:
         per_label[("template_loo", i)] = d.astype(np.float32)
     del mv
     log.info("pass 2 (template metrics) done, %.0f s", time.time() - t0)
+    timing["pass2_template"] = time.time() - t_mark
+    t_mark = time.time()
 
     # group metrics
     mean_fwd = np.zeros(shape + (3,), np.float64)
@@ -407,6 +412,9 @@ def cmd_run(a) -> int:
         if (k + 1) % 10 == 0:
             log.info("pairs: %d / %d fixed subjects, %.0f s", k + 1, len(by_j), time.time() - t0)
     log.info("pass 3 (%d pairs) done, %.0f s", len(prow), time.time() - t0)
+    timing["pass3_pairs"] = time.time() - t_mark
+    if prow:
+        timing["seconds_per_pair_per_worker"] = timing["pass3_pairs"] * max(1, min(a.workers, len(by_j))) / len(prow)
 
     # outputs
     _write_csv(os.path.join(a.out, "per_subject.csv"), rows)
@@ -429,7 +437,7 @@ def cmd_run(a) -> int:
                "subject_metrics": {k: _summ([r.get(k) for r in rows]) for k in rows[0] if k != "subject"},
                "pair_metrics": ({k: _summ([r.get(k) for r in prow]) for k in prow[0] if k not in ("moving", "fixed")}
                                 if prow else {}),
-               "seconds": time.time() - t0}
+               "seconds": time.time() - t0, "timing_s": timing, "workers": a.workers}
     with open(os.path.join(a.out, "summary.json"), "w") as f:
         json.dump(summary, f, indent=1)
     _print_summary(summary)

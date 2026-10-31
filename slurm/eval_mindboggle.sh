@@ -20,6 +20,7 @@
 #   ATLAS, ATLAS_SEG   method's atlas image / segmentation (optional: mean image / majority vote)
 #   CONV        convention flags from `check-convention`, e.g. "--components zyx --signs +++ --units mm"
 #   IDENTITY=1  no-registration reference
+#   SUBJECTS_FILE  optional list of subjects (folder names, one per line); default: all in PROCESSED
 #   PAIRS       all (default) | none | number of seeded random pairs
 #   EXTRA       more flags, e.g. "--hd95"
 #   OUT         default $PROJ/results/eval_mindboggle/$METHOD
@@ -50,6 +51,7 @@ else
     [ -n "${ATLAS:-}" ] && ARGS+=(--atlas "$ATLAS")
     [ -n "${ATLAS_SEG:-}" ] && ARGS+=(--atlas-seg "$ATLAS_SEG")
 fi
+[ -n "${SUBJECTS_FILE:-}" ] && ARGS+=(--subjects-file "$SUBJECTS_FILE")
 # shellcheck disable=SC2206
 ARGS+=(${CONV:-} ${EXTRA:-})
 mkdir -p "$OUT"
