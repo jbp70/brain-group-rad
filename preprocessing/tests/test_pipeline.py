@@ -215,7 +215,7 @@ def test_mindboggle_native_hln_row_registered(tmp_path, fake_tools, target_dir, 
 
 
 def test_hln_synthstrip_mask_only_zeroes_labels_outside(tmp_path, fake_tools, target_dir, mni_files):
-    """config_mindboggle_hln.yaml: SynthStrip mask alone, labels set to 0 outside it."""
+    """config_mindboggle.yaml: SynthStrip mask alone, labels set to 0 outside it."""
     cfg = write_config(tmp_path / "hln.yaml", target_dir, mni_files,
                        mask={"union_labels": False, "zero_labels_outside": True}, outputs={"save_mask": True})
     row = ds.mindboggle_native_row(str(tmp_path / "in"))

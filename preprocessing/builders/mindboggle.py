@@ -12,12 +12,14 @@ T1 image and of the DKT31 manual + aseg labels.
   full pipeline: reorient, SynthStrip, N4, 9-DOF FLIRT to MNI152, one resampling onto
   the LUMIR grid (labels nearest-neighbour with the same transform).
 
-Labels are named ``dkt31aseg`` in both cases, so outputs look the same. Run with
-mask.union_labels: true (preprocessing/config_mindboggle.yaml).
+Labels are named ``dkt31aseg`` in both cases, so outputs look the same. Config:
+preprocessing/config_mindboggle.yaml (SynthStrip mask only, labels zeroed outside it).
 
+    # current recipe: every subject from the native files with our own registration
+    python -m preprocessing build-manifest --dataset mindboggle --root /data/data_mindboggle --out mb.csv \\
+        --mb-native '*'
+    # mixed: provided MNI152 files except HLN-*
     python -m preprocessing build-manifest --dataset mindboggle --root /data/data_mindboggle --out mb.csv
-    python -m preprocessing build-manifest --dataset mindboggle --root /data/data_mindboggle --out mb_hln.csv \\
-        --mb-select native
 """
 import argparse
 import fnmatch

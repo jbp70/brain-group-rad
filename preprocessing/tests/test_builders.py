@@ -174,6 +174,10 @@ def test_mindboggle_builder_hln_native(tmp_path):
     assert [r.subject for r in native] == ["HLN-12-1", "HLN-12-10"]
     mni = BUILDERS["mindboggle"].build(str(m), _args("mindboggle", ["--mb-select", "mni"]))
     assert [r.subject for r in mni] == ["Colin27-1", "OASIS-TRT-20-1"]
+    every = BUILDERS["mindboggle"].build(str(m), _args("mindboggle", ["--mb-native", "*"]))
+    assert len(every) == 4 and all(not r.in_template_space for r in every)
+    assert all(r.image_path.endswith(r.subject + "/t1weighted.nii.gz") for r in every)
+    assert all(r.label_paths["dkt31aseg"].endswith(r.subject + "/labels.DKT31.manual+aseg.nii.gz") for r in every)
     custom = BUILDERS["mindboggle"].build(str(m), _args("mindboggle", ["--mb-native", "Colin27-*",
                                                                        "--mb-select", "native"]))
     assert [r.subject for r in custom] == ["Colin27-1"]

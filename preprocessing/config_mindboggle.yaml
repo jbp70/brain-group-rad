@@ -1,13 +1,14 @@
-# Mindboggle-101 (MNI152 versions) on the Martinos cluster. Omitted keys use the
-# defaults in preprocessing/config.py (Martinos tool paths, p99.5 normalization).
-# Rows come from `build-manifest --dataset mindboggle` (builders/mindboggle.py):
-# MNI152 rows: no registration; SynthStrip + N4, then world-space resampling onto the LUMIR grid.
-# HLN-* rows (bad provided MNI152 files): native files, reorient + SynthStrip + N4 + 9-DOF FLIRT.
+# Mindboggle-101 on the Martinos cluster. Omitted keys use the defaults in
+# preprocessing/config.py (Martinos tool paths, p99.5 normalization).
+# Manifest: `build-manifest --dataset mindboggle --mb-native '*'` (builders/mindboggle.py):
+# every subject from its native files (t1weighted.nii.gz + labels.DKT31.manual+aseg.nii.gz),
+# reorient + SynthStrip + N4 + our own 9-DOF FLIRT to MNI152, one resampling onto the LUMIR grid.
+# (The provided MNI152 files are not used: the HLN-* ones are misregistered.)
 target_dir: /autofs/space/crater_001/users/jn85/BrainRegProjects/GroupwiseReg/data/target_grid
 
-# Brain mask = SynthStrip mask | (DKT31+aseg labels > 0): no labelled voxel is stripped.
-# zero_labels_outside: labels outside the final mask -> 0 (few or none here, because of the union).
-mask: {union_labels: true, zero_labels_outside: true}
+# Brain mask = SynthStrip mask alone (the labels reach outside the brain, e.g. cerebellum).
+# Labels outside it are set to 0 (count per file in meta.json labels_zeroed_outside_mask).
+mask: {union_labels: false, zero_labels_outside: true}
 
 # Evaluation only: keep image, labels, meta/qc json; delete work/ intermediates.
 outputs: {keep_work: false, save_mask: false, save_qc_png: false}
