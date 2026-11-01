@@ -689,17 +689,37 @@ class GroupConvBlock(_PreActivation):
         return clip_fp16(self.conv(self._pre(x, training)), self.fp16_act_clip)
 
     def _split_call(self, x, training):
-        """conv(concat(x, mean)) as conv_a(x) + conv_b(mean): compute dtype, the layer's strides,
-        'SAME' padding, NDHWC. With ``fp16_act_clip`` C > 0 under float16 each conv term and the
-        bias-added sum are clipped to [-C, C] (two clipped terms sum to <= 2C <= 64000 < 65504)."""
+        """conv(concat(x, mean)) as conv_a(x) + conv_b(mean) (`conv_with_group_mean` on `pre`
+        and its group mean; predict-script design 4.2: same ops in the same order as before)."""
         x = self._pre(x, training, concat=False)
-        channels = int(x.shape[-1])
         mean = tf.reduce_mean(x, axis=0, keepdims=True)
+        return self.conv_with_group_mean(x, mean)
+
+    def pre(self, x, training=None):
+        """norm -> act without the group concat (identity for the stem, pre_activation=False).
+        Public for the streaming prediction engine (predict-script design 4.2)."""
+        return self._pre(x, training, concat=False)
+
+    def conv_with_group_mean(self, x, mean, inner_clip=True):
+        """conv(concat(x, mean)) as conv_a(x) + conv_b(mean) + bias (predict-script design 4.2).
+
+        x: `pre` output [n, ...] in the compute dtype; mean: its group mean [1, ...] in x.dtype
+        (the engine may pass a mean accumulated over chunks). Compute dtype, the layer's strides,
+        'SAME' padding, NDHWC; the built conv's variables. With ``fp16_act_clip`` C > 0 under
+        float16 the bias-added sum is clipped to [-C, C], and with ``inner_clip`` also each conv
+        term (the split path; two clipped terms sum to <= 2C <= 64000 < 65504). ``inner_clip``
+        False = only the outer clip (the unsplit path's clip semantics). No clip op when C == 0.
+        """
         k = tf.cast(self.conv.kernel, x.dtype)
+        channels = int(x.shape[-1])
         strides = [1, self.strides, self.strides, self.strides, 1]
         c = self.fp16_act_clip
-        y = (clip_fp16(tf.nn.conv3d(x, k[..., :channels, :], strides, "SAME"), c)
-             + clip_fp16(tf.nn.conv3d(mean, k[..., channels:, :], strides, "SAME"), c))
+        if inner_clip:
+            y = (clip_fp16(tf.nn.conv3d(x, k[..., :channels, :], strides, "SAME"), c)
+                 + clip_fp16(tf.nn.conv3d(mean, k[..., channels:, :], strides, "SAME"), c))
+        else:
+            y = (tf.nn.conv3d(x, k[..., :channels, :], strides, "SAME")
+                 + tf.nn.conv3d(mean, k[..., channels:, :], strides, "SAME"))
         return clip_fp16(tf.nn.bias_add(y, tf.cast(self.conv.bias, x.dtype)), c)
 
     def group_overhead_params(self):

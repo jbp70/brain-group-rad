@@ -77,6 +77,7 @@ export BGR_TF_GPU_LIMIT_MB=6000
 # TestGradients flaky. Local only.
 export TF_CUDNN_USE_AUTOTUNE=0
 python -c "import sys, tensorflow as tf, numpy, scipy; print('python', sys.version.split()[0], '| tf', tf.__version__, '| numpy', numpy.__version__, '| scipy', scipy.__version__)" 2>&1 | grep -v "cuBLAS factory"
+python -c "import nibabel" || { echo "tf_gpu needs nibabel (pip install nibabel==3.1.1)"; status=1; }
 start=$(date +%s)
 # One process per test module (retrain-prereqs integration): in a single `discover` process the
 # GPU memory held over from earlier modules filled the 6000 MB limit after ~640 tests (OOMs on
