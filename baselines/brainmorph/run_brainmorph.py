@@ -179,26 +179,49 @@ def parse_align(s):
     raise ValueError("alignment must be rigid, affine or tps_<lambda>, got %r" % s)
 
 
-def make_aligner(kind, lmbda, points_m, points_f):
+def make_aligner(kind, lmbda, points_m, points_f, w=None):
+    """keymorph aligner; ``w`` [1, K] keypoint weights summing to 1 (None = unweighted)."""
     if kind == "rigid":
-        return KM.Rigid(points_m=points_m, points_f=points_f, w=None, dim=3)
+        return KM.Rigid(points_m=points_m, points_f=points_f, w=w, dim=3)
     if kind == "affine":
-        return KM.Affine(points_m=points_m, points_f=points_f, w=None, dim=3)
+        return KM.Affine(points_m=points_m, points_f=points_f, w=w, dim=3)
     lm = torch.tensor([float(lmbda)], dtype=torch.float32, device=points_m.device)
-    return KM.TPS(points_m=points_m, points_f=points_f, lmbda=lm, w=None, dim=3, use_checkpoint=False)
+    return KM.TPS(points_m=points_m, points_f=points_f, lmbda=lm, w=w, dim=3, use_checkpoint=False)
 
 
-def groupwise(points_norm, align, num_iters):
-    """keymorph KeyMorph.groupwise_register loop. points_norm: tensor [N, K, 3].
+def group_weights(power):
+    """Power weighting (optional, not in the BrainMorph code). power [N, K] channel powers
+    (sum of the ReLU'd heatmap). Returns (q [N, K]: per-subject normalised power,
+    eps [N, K]: fit weights q_ik * qbar_k normalised per subject, as BrainMorph's / SynthMorph's
+    pairwise weights p_moving * p_fixed with the group-mean power as the 'fixed' image)."""
+    q = power / power.sum(dim=1, keepdim=True).clamp_min(1e-12)
+    qbar = q.mean(dim=0, keepdim=True)
+    eps = q * qbar
+    return q, eps / eps.sum(dim=1, keepdim=True).clamp_min(1e-12)
+
+
+def template(curr, q=None):
+    """Template keypoints [1, K, 3]: plain mean (BrainMorph) or per-keypoint power-weighted mean."""
+    if q is None:
+        return curr.mean(dim=0, keepdim=True)
+    w = q[..., None]
+    return (w * curr).sum(dim=0, keepdim=True) / w.sum(dim=0, keepdim=True).clamp_min(1e-12)
+
+
+def groupwise(points_norm, align, num_iters, power=None):
+    """keymorph KeyMorph.groupwise_register loop. points_norm: tensor [N, K, 3]; power [N, K]
+    enables the optional power weighting (None = BrainMorph's unweighted groupwise code).
     Returns (final mean points [1, K, 3], aligned points [N, K, 3])."""
     kind, lmbda = parse_align(align)
+    q, eps = group_weights(power) if power is not None else (None, None)
     curr = points_norm.clone()
     mean = None
     for _ in range(num_iters):
-        mean = curr.mean(dim=0, keepdim=True)
+        mean = template(curr, q)
         new = torch.zeros_like(curr)
         for i in range(curr.shape[0]):
-            al = make_aligner(kind, lmbda, curr[i:i + 1], mean)
+            w = None if eps is None else eps[i:i + 1]
+            al = make_aligner(kind, lmbda, curr[i:i + 1], mean, w)
             new[i:i + 1] = al.get_forward_transformed_points(curr[i:i + 1])
         curr = new
     return mean, curr
@@ -208,10 +231,11 @@ class SubjectTransform:
     """Final transform of one subject: fitted from its ORIGINAL keypoints to the final mean.
     fwd_fn: atlas voxel -> subject voxel; inv_fn: subject voxel -> atlas voxel."""
 
-    def __init__(self, align, points_i, mean, geom, device, chunk):
+    def __init__(self, align, points_i, mean, geom, device, chunk, w=None):
         self.kind, self.lmbda = parse_align(align)
         self.geom, self.device, self.chunk = geom, device, int(chunk)
-        al = make_aligner(self.kind, self.lmbda, points_i, mean)
+        self.w = w
+        al = make_aligner(self.kind, self.lmbda, points_i, mean, w)
         if self.kind in ("rigid", "affine"):
             m_norm = al.inverse_transform_matrix[0].detach().double().cpu().numpy()  # mean -> subject
             S = geom.S()
@@ -221,7 +245,7 @@ class SubjectTransform:
             self.al = al
             self.ctrl_f, self.ctrl_m = mean, points_i
             self.theta_fwd = al.inverse_theta  # fit(points_f -> points_m), control points at mean
-            self.theta_inv = al.fit(points_i, mean, al.lmbda, weights=None)  # subject -> mean
+            self.theta_inv = al.fit(points_i, mean, al.lmbda, weights=w)  # subject -> mean
 
     def _apply_tps(self, theta, ctrl, x_vox):
         out = np.empty_like(x_vox, dtype=np.float32)
@@ -284,27 +308,41 @@ def save_nii(arr, affine, path):
 
 # ------------------------------------------------------------------ pipeline
 def run(subs, out, aligns, geom, keypoint_fn, device, num_iters=5, chunk=131072, log=print,
-        info=None):
-    """subs: list of {'dir','image','labels'}; keypoint_fn(i, padded [D,H,W] float32) -> [1, K, 3]
-    normalised 'ij' keypoints (torch, on device)."""
+        info=None, weighted=False):
+    """subs: list of {'dir','image','labels'}; keypoint_fn(i, padded [D,H,W] float32) ->
+    (points [1, K, 3] normalised 'ij' keypoints, power [1, K] or None), torch on device.
+    weighted: optional power weighting of the groupwise fits (see group_weights)."""
     os.makedirs(out, exist_ok=True)
     n = len(subs)
     t0 = time.time()
-    pts = []
+    pts, pows = [], []
     for i, s in enumerate(subs):
         img, aff = load_vol(s["image"])
         if img.shape != geom.shape or not np.allclose(aff, geom.affine, atol=1e-4):
             raise ValueError("%s: grid %s / affine differ from the first subject" % (s["image"], img.shape))
         with torch.no_grad():
-            p = keypoint_fn(i, geom.pad_image(np.asarray(img, np.float32)))
+            p, pw = keypoint_fn(i, geom.pad_image(np.asarray(img, np.float32)))
         pts.append(p.detach().float())
+        pows.append(None if pw is None else pw.detach().float())
         log("keypoints %d/%d %s  (%.1f s)" % (i + 1, n, s["dir"], time.time() - t0))
     points = torch.cat(pts, 0)  # [N, K, 3] normalised
+    power = None if any(pw is None for pw in pows) else torch.cat(pows, 0)  # [N, K]
+    if weighted and power is None:
+        raise ValueError("weighted groupwise fit needs keypoint powers")
     p_np = points.double().cpu().numpy()
     kp = {"subjects": np.array([s["dir"] for s in subs]), "points_norm": p_np.astype(np.float32),
           "points_vox": geom.norm2vox(p_np).astype(np.float32),
           "points_world_mm": geom.vox2world(geom.norm2vox(p_np)).astype(np.float32),
-          "grid_affine": geom.affine, "pad_lo": geom.pad_lo, "pad_to": geom.pad_to}
+          "grid_affine": geom.affine, "pad_lo": geom.pad_lo, "pad_to": geom.pad_to,
+          "weighted": weighted}
+    eps = None
+    if power is not None:
+        q, eps_all = group_weights(power)
+        kp["power"] = power.cpu().numpy()
+        kp["power_norm"] = q.cpu().numpy()
+        if weighted:
+            eps = eps_all
+            kp["fit_weights"] = eps.cpu().numpy()
     t_kp = time.time() - t0
 
     timings = {"keypoints_s": t_kp}
@@ -312,7 +350,7 @@ def run(subs, out, aligns, geom, keypoint_fn, device, num_iters=5, chunk=131072,
         ta = time.time()
         d = os.path.join(out, align)
         os.makedirs(d, exist_ok=True)
-        mean, aligned = groupwise(points, align, num_iters)
+        mean, aligned = groupwise(points, align, num_iters, power if weighted else None)
         mean_np = mean.double().cpu().numpy()
         kp["%s_mean_vox" % align] = geom.norm2vox(mean_np[0]).astype(np.float32)
         kp["%s_aligned_vox" % align] = geom.norm2vox(aligned.double().cpu().numpy()).astype(np.float32)
@@ -320,7 +358,8 @@ def run(subs, out, aligns, geom, keypoint_fn, device, num_iters=5, chunk=131072,
         atlas_sum = np.zeros(geom.shape, np.float64)
         moved_labs = []
         for i, s in enumerate(subs):
-            tr = SubjectTransform(align, points[i:i + 1], mean, geom, device, chunk)
+            tr = SubjectTransform(align, points[i:i + 1], mean, geom, device, chunk,
+                                  None if eps is None else eps[i:i + 1])
             fwd, inv = tr.fields()
             if tr.kind != "tps":
                 mats["fwd_vox"].append(tr.fwd_vox)
@@ -356,6 +395,7 @@ def run(subs, out, aligns, geom, keypoint_fn, device, num_iters=5, chunk=131072,
     np.savez(os.path.join(out, "keypoints.npz"), **kp)
     meta = dict(info or {})
     meta.update(n_subjects=n, aligns=list(aligns), num_iters=num_iters, grid=list(geom.shape),
+                weighted=weighted,
                 pad_lo=geom.pad_lo.tolist(), pad_to=geom.pad_to, timings=timings,
                 convention="--components xyz --signs +++ --units mm")
     with open(os.path.join(out, "run_info.json"), "w") as f:
@@ -458,7 +498,29 @@ def self_test(device="cpu"):
         assert padded.shape == (P, P, P) and 0 <= padded.min() and padded.max() <= 1
         M = true_maps[i]
         v = kp_base @ M[:3, :3].T + M[:3, 3]
-        return torch.from_numpy(geom.vox2norm(v).astype(np.float32))[None].to(device)
+        return torch.from_numpy(geom.vox2norm(v).astype(np.float32))[None].to(device), None
+
+    # 2b. optional power weighting: one corrupted low-power keypoint must barely matter
+    pts_bad = subj.copy()
+    pts_bad[:, 0] += rng.uniform(-15, 15, (N, 3))
+    power = np.ones((N, K))
+    power[:, 0] = 1e-4
+    pts_t = torch.from_numpy(geom.vox2norm(pts_bad).astype(np.float32)).to(device)
+    pw_t = torch.from_numpy(power.astype(np.float32)).to(device)
+    for align in ("rigid", "affine"):
+        res = {}
+        for name, pw in (("unweighted", None), ("weighted", pw_t)):
+            mean, _ = groupwise(pts_t, align, 5, pw)
+            eps = None if pw is None else group_weights(pw)[1]
+            # transfer error on the clean keypoints 1..K-1 between subjects 0 and 1 via the template
+            t0_ = SubjectTransform(align, pts_t[0:1], mean, geom, device, 4096, None if eps is None else eps[0:1])
+            t1_ = SubjectTransform(align, pts_t[1:2], mean, geom, device, 4096, None if eps is None else eps[1:2])
+            x0 = subj[0, 1:].astype(np.float32)
+            res[name] = float(np.abs(t1_.fwd_fn(t0_.inv_fn(x0)) - subj[1, 1:]).mean())
+        tol = 0.05 if align == "affine" else 0.5  # rigid: data are affine, so a residual remains
+        check("%s weighted: outlier ignored (pair err %.3f vs unweighted %.3f vox)"
+              % (align, res["weighted"], res["unweighted"]),
+              res["weighted"] < tol and res["weighted"] < res["unweighted"], "")
 
     run(subs, out, ["affine", "tps_0"], geom, kp_fn, device, chunk=8192, log=lambda *_: None)
     files = sorted(os.listdir(os.path.join(out, "tps_0")))
@@ -500,6 +562,10 @@ def main():
     ap.add_argument("--num-iters", type=int, default=5, help="groupwise iterations (BrainMorph eval: 5)")
     ap.add_argument("--pad-to", type=int, default=256)
     ap.add_argument("--tps-chunk", type=int, default=131072, help="grid points per TPS evaluation chunk")
+    ap.add_argument("--weighted", action="store_true",
+                    help="power-weighted groupwise fits (NOT in BrainMorph's groupwise code; its pairwise "
+                         "code uses power weights). Template = power-weighted mean keypoints; fit weights "
+                         "= subject power x group-mean power. No effect on tps_0 (lambda 0 interpolates).")
     ap.add_argument("--device", default="cuda")
     a = ap.parse_args()
 
@@ -536,12 +602,18 @@ def main():
 
     def kp_fn(i, padded):
         x = torch.from_numpy(padded)[None, None].to(a.device)
-        return model.get_keypoints(x)
+        points, feat = model.get_keypoints(x, return_feat=True)
+        # channel power as in KeyMorph.weight_by_power (sum of the ReLU'd heatmap per keypoint)
+        power = torch.relu(feat).flatten(2).sum(-1)
+        return points, power
 
     info = {"weights": os.path.abspath(a.weights), "num_keypoints": a.num_keypoints, "variant": a.variant,
             "keymorph": KM.path, "processed_dir": os.path.abspath(a.processed_dir),
-            "torch": torch.__version__, "keypoint_weighting": "none (as keymorph groupwise_register)"}
-    run(subs, a.out, a.aligns, geom, kp_fn, a.device, a.num_iters, a.tps_chunk, info=info)
+            "torch": torch.__version__,
+            "keypoint_weighting": ("power: template = power-weighted mean, fit weight = subject x group-mean "
+                                   "normalised power (wrapper option, not BrainMorph code)") if a.weighted
+            else "none (as keymorph groupwise_register)"}
+    run(subs, a.out, a.aligns, geom, kp_fn, a.device, a.num_iters, a.tps_chunk, info=info, weighted=a.weighted)
     print("done: %s" % a.out)
 
 
