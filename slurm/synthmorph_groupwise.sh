@@ -54,9 +54,9 @@ nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 export NEURITE_BACKEND=tensorflow VXM_BACKEND=tensorflow TF_CPP_MIN_LOG_LEVEL=2
 cd "$REPO" || exit 2
 echo "== self-test"
-"$FSPY" baselines/synthmorph/run_synthmorph_groupwise.py --self-test </dev/null || { echo "self-test FAILED"; exit 3; }
+"$FSPY" -u baselines/synthmorph/run_synthmorph_groupwise.py --self-test </dev/null || { echo "self-test FAILED"; exit 3; }
 echo "== run: ${ARGS[*]}"
-"$FSPY" baselines/synthmorph/run_synthmorph_groupwise.py "${ARGS[@]}" </dev/null
+"$FSPY" -u baselines/synthmorph/run_synthmorph_groupwise.py "${ARGS[@]}" </dev/null
 rc=$?
 echo "exit status $rc"
 exit $rc
