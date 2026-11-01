@@ -20,6 +20,7 @@ SCRIPTS = (MEMORY, TRAIN, M9, M9L1)
 M10C = os.path.join(REPO, "slurm", "m10_batch_memory_capped.sh")
 M11SRC = os.path.join(REPO, "slurm", "m11_random_sources.sh")
 M11 = os.path.join(REPO, "slurm", "m11_fp32_width_memory.sh")
+PREDICT = os.path.join(REPO, "slurm", "predict_mindboggle.sh")
 # Env of slurm/m11_random_sources.sh removed from the inherited environment (TestM11Sources).
 M11_SOURCE_ENV = ("SOURCES_DIR", "SOURCE_WIDTHS", "SOURCE_L4_ONLY", "SOURCE_N", "SOURCE_TIMEOUT", "BGR_DRY_RUN",
                   "STUB_FAIL_LEVEL",
@@ -207,9 +208,64 @@ class TestStatic(unittest.TestCase):
                   "skipped_source", "ONLY=<names, comma-separated>", "--time=02:00:00", "float32_fine"):
             self.assertIn(k, text, k)
 
+    def test_predict_script(self):
+        """predict-script design 9: header, gate / record steps, no sbatch call, grid reference."""
+        text = _read(PREDICT)
+        self.assertNotIn("\r", text)
+        self.assertTrue(all(ord(c) < 128 for c in text))
+        self.assertNotIn("entre", text.lower())
+        for line in ("#SBATCH --job-name=bgr-predict", "#SBATCH -A qtim", "#SBATCH -p rtx8000",
+                     "#SBATCH --gpus=1", "#SBATCH -N 1", "#SBATCH --ntasks-per-node=1",
+                     "#SBATCH --cpus-per-task=3", "#SBATCH --mem=96G", "#SBATCH --time=05:00:00",
+                     "#SBATCH --output=%s/%%x-%%j.out" % LOGS, "#SBATCH --error=%s/%%x-%%j.err" % LOGS):
+            self.assertIn(line + "\n", text)
+        self.assertIn(SIF, text)
+        self.assertIn("DO NOT submit without Jay's approval", text)
+        self.assertIn("never\n# drop the gate", text)
+        self.assertIn("N_CHECK=3 CHECK_CHUNKS='--chunk-l4 2 --chunk-l2 2 --chunk-l1 2'", text)
+        self.assertIn('CHECK_CHUNKS=${CHECK_CHUNKS:-"--chunk-l4 3 --chunk-l2 3 --chunk-l1 3"}', text)
+        self.assertIn("BRANCHES=${BRANCHES:-deform}\n", text)
+        self.assertIn("CKPT=${CKPT:-$PROJ/results/m9_level1_cascade/ckpt/best_deform}\n", text)
+        self.assertIn("GRID_REF=${GRID_REF:-$PROJ/data/target_grid/target_grid.json}\n", text)
+        self.assertIn("EVAL_PAIRS=${EVAL_PAIRS:-none}\n", text)
+        lines = text.splitlines()
+        self.assertFalse([ln for ln in lines if ln.lstrip().startswith("sbatch")])
+        sing = [ln for ln in lines if ln.startswith("singularity ")]
+        self.assertEqual(len(sing), 6)
+        for ln in sing:
+            self.assertIn("</dev/null", ln)
+        pred = [ln for ln in sing if " predict.py " in ln]
+        self.assertEqual(len(pred), 4)
+        for ln in pred:
+            self.assertIn('--grid-reference "$GRID_REF"', ln)
+            self.assertIn("--nv", ln)
+        checks = [ln for ln in pred if "check-streaming" in ln]
+        self.assertEqual(len(checks), 3)
+        for ln in checks:
+            self.assertIn(" $CHECK_CHUNKS ", ln)
+            self.assertIn('--n-subjects "$N_CHECK"', ln)
+        a, b, c = checks
+        self.assertIn("--precision float32", a)
+        self.assertIn('--branches "$BRANCHES"', a)
+        self.assertTrue(a.endswith("|| exit $?"), a)
+        self.assertIn("--precision checkpoint", b)
+        self.assertIn("--precision float32", c)
+        self.assertIn("--branches affine+deform", c)
+        for ln in (b, c):
+            self.assertRegex(ln, r'\|\| echo "WARNING[^"]*"$')
+        run = [ln for ln in pred if " predict.py run " in ln]
+        self.assertEqual(len(run), 1)
+        self.assertTrue(run[0].endswith("$EXTRA </dev/null || exit $?"), run[0])
+        ev = [ln for ln in sing if " -m evaluation " in ln]
+        self.assertEqual(len(ev), 2)
+        self.assertIn("check-convention", ev[0])
+        self.assertIn('--pairs "$EVAL_PAIRS" --workers 3', ev[1])
+        self.assertIn('CONV="--components xyz --signs +++ --units mm"', text)
+        self.assertIn("sbatch slurm/eval_mindboggle.sh", text)
+
     @unittest.skipIf(BASH is None, "bash not available")
     def test_bash_syntax(self):
-        for path in SCRIPTS + (M10C, M11):
+        for path in SCRIPTS + (M10C, M11, PREDICT):
             r = subprocess.run([BASH, "-n", path], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                universal_newlines=True)
             self.assertEqual(r.returncode, 0, r.stderr)
