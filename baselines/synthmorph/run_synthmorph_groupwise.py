@@ -415,10 +415,16 @@ def self_test():
     check("files written (4 x 4 + atlas + atlas_seg + matrices)", len(os.listdir(d)) == 19, len(os.listdir(d)))
     f1 = np.asarray(nib.load(os.path.join(d, "S1_T1w_fwd.nii.gz")).dataobj)
     i1 = np.asarray(nib.load(os.path.join(d, "S1_T1w_inv.nii.gz")).dataobj)
-    e = F.norm_mm(F.compose(f1, i1), (1, 1, 1))[5:-5, 5:-5, 5:-5].max()
-    check("|compose(fwd, inv)| interior max [mm]", e < 1e-3, "%.1e" % e)
+    def inside(fw):  # atlas voxels whose image under fwd lies inside the subject grid (1-voxel margin)
+        y = np.moveaxis(xx, 0, -1) + fw
+        return np.all((y >= 1) & (y <= np.array(shape) - 2), axis=-1)
+
+    e = F.norm_mm(F.compose(f1, i1), (1, 1, 1))[inside(f1)].max()
+    check("|compose(fwd, inv)| max where fwd stays in the grid [mm]", e < 1e-3, "%.1e" % e)
     mv = [np.asarray(nib.load(os.path.join(d, "S%d_T1w_moved.nii.gz" % i)).dataobj) for i in (0, 2)]
-    msk = blob > 0.2 * blob.max()
+    f0 = np.asarray(nib.load(os.path.join(d, "S0_T1w_fwd.nii.gz")).dataobj)
+    f2 = np.asarray(nib.load(os.path.join(d, "S2_T1w_fwd.nii.gz")).dataobj)
+    msk = inside(f0) & inside(f2) & (mv[0] > 0.2 * mv[0].max())
     ncc = np.corrcoef(mv[0][msk], mv[1][msk])[0, 1]
     check("moved S0 vs moved S2 NCC", ncc > 0.98, round(float(ncc), 4))
     print("self-test files: %s" % out)
