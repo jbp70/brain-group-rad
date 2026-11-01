@@ -7,6 +7,9 @@ args / cascade record keys of main.py (322-354). Import `tests.tf_setup` before 
 """
 from tests import tf_setup  # noqa: F401  (log level, TF32 off, GPU memory limit)
 from tests.test_cascade import randomize
+import os
+
+import numpy as np
 import tensorflow as tf
 
 from models.group_net import GroupRegLevelModel
@@ -54,6 +57,72 @@ def save_cascade_run(root, name, m2, frozen_stage, args=None, step=5):
                "S_rel_diff_vs_level4": None, "skip_prob": 0.0}
     return _save(root, name, m2, default_args(2, **dict(args or {})),
                  extra=frozen_stage.checkpoint_extra(), cascade=cascade, step=step)
+
+
+GRID_SHAPE = (160, 224, 192)
+LABELS = (10, 11, 1002, 2002)     # inner core, middle shell, outer shell left / right (x < centre)
+
+
+def grid_affine(shape=GRID_SHAPE):
+    """diag(1, 1, 1, 1) with the origin offset of a centred 1 mm grid (like the processed grid)."""
+    aff = np.eye(4)
+    aff[:3, 3] = -(np.asarray(shape, np.float64) - 1.0) / 2.0
+    return aff
+
+
+def _ellipsoid_radius(shape, centre, semi):
+    axes = [(np.arange(n, dtype=np.float64) - c) / s for n, c, s in zip(shape, centre, semi)]
+    return np.sqrt(axes[0][:, None, None] ** 2 + axes[1][None, :, None] ** 2 + axes[2][None, None, :] ** 2)
+
+
+def _unit(x):
+    x = np.asarray(x, np.float64)
+    return (x - x.min()) / max(float(x.max() - x.min()), 1e-12)
+
+
+def write_subjects(root, n, shape=GRID_SHAPE, textured=False, seed=0):
+    """``n`` synthetic processed subjects <root>/S<k>_T1w/{image.nii.gz, labels_dkt31aseg.nii.gz}.
+
+    Mask: an ellipsoid with semi-axes 0.4 of the extent, its centre shifted per subject by up to
+    +-6 voxels per axis (so the group differs at the coarse levels too). textured: Gaussian-smoothed
+    white noise (sigma 1.5 vox, scipy.ndimage), rescaled to [0, 1], times the mask, different noise
+    per subject. Otherwise level-2 style: a smoothed level-2 volume (sigma 1.5 level-2 voxels)
+    quantised to multiples of 2^-10 and repeated x2 per axis, so 2x2x2 pooling returns it exactly.
+    Labels (uint16): ellipsoid shells inside the mask (LABELS). Affine `grid_affine(shape)`.
+    Returns the subject directories (find_subjects order) and the images [n, X, Y, Z] float32."""
+    import nibabel as nib
+    from scipy import ndimage
+    shape = tuple(int(s) for s in shape)
+    rng = np.random.default_rng(seed)
+    aff = grid_affine(shape)
+    dirs, images = [], np.zeros((int(n),) + shape, np.float32)
+    for k in range(int(n)):
+        centre = (np.asarray(shape, np.float64) - 1.0) / 2.0 + rng.integers(-12, 13, 3)
+        semi = 0.4 * np.asarray(shape, np.float64) * rng.uniform(0.8, 1.0, 3)
+        gain = rng.uniform(0.6, 1.0)
+        r = _ellipsoid_radius(shape, centre, semi)
+        mask = r < 1.0
+        if textured:
+            noise = ndimage.gaussian_filter(rng.standard_normal(shape), 1.5)
+            img = (gain * _unit(noise) * mask).astype(np.float32)
+        else:
+            s2 = tuple(v // 2 for v in shape)
+            vol = gain * _unit(ndimage.gaussian_filter(rng.standard_normal(s2), 1.5))
+            vol = (np.round(vol * 1024.0) / 1024.0).astype(np.float32)
+            vol = vol * mask[::2, ::2, ::2].astype(np.float32)
+            img = vol.repeat(2, 0).repeat(2, 1).repeat(2, 2)
+        lab = np.zeros(shape, np.uint16)
+        lab[mask] = LABELS[2]
+        lab[mask & (np.arange(shape[0])[:, None, None] >= centre[0])] = LABELS[3]
+        lab[r < 0.75] = LABELS[1]
+        lab[r < 0.45] = LABELS[0]
+        d = os.path.join(root, "S%d_T1w" % k)
+        os.makedirs(d, exist_ok=True)
+        nib.save(nib.Nifti1Image(img, aff), os.path.join(d, "image.nii.gz"))
+        nib.save(nib.Nifti1Image(lab, aff), os.path.join(d, "labels_dkt31aseg.nii.gz"))
+        dirs.append(d)
+        images[k] = img
+    return dirs, images
 
 
 def save_chain_run(root, name, m1, chain, args=None, step=5):

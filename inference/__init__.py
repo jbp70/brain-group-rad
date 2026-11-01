@@ -10,4 +10,8 @@ Modules:
   group-size bound; `LoaderError` (CLI exit 2).
 * `runner`: branch orchestration over the cascade levels (design 3.4, 4.4, 4.5):
   `StreamedRunner` (chunked, host store) and `UnchunkedRunner` (one tf.function per level stage).
+* `canonical`: internal (A, u, u_inv) -> canonical fwd / inv fields (mm), NIfTI writer, atlas and
+  atlas segmentation, the internal consistency check, the --grid-reference check (design 5).
+* `cli`: argparse and validation of predict.py (TF-free; design 7), check-streaming chunk defaults.
+* `predict`: device setup, `run_predict`, `run_check_streaming`, predict.json, exit codes (design 3.3, 8).
 """
