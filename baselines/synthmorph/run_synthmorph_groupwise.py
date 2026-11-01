@@ -2,7 +2,8 @@
 
 SynthMorph's affine and rigid models ("Detector", Hoffmann et al. 2024, Imaging Neuroscience,
 https://doi.org/10.1162/imag_a_00197; voxelmorph ``VxmAffineFeatureDetector``) pass ONE image at a
-time through a CNN that outputs k = 64 non-negative feature maps at half resolution. Each map
+time through a CNN that outputs k = 64 non-negative feature maps (8^3 voxels for extent 256: half-
+resolution input, then 4 max-pools; barycenters are continuous). Each map
 gives a keypoint (its barycenter) and a channel power (its sum). A pair is registered by a
 weighted least-squares (WLS) affine fit between the two keypoint sets, weights = normalised power
 of the moving map x normalised power of the fixed map, symmetrised as
@@ -27,10 +28,11 @@ powers, fit weights, template), ``pair_check.json``.
 
 Geometry: as mri_synthmorph, each image is resampled to SynthMorph's network space (1 mm, LIA,
 extent^3, centred on the image's field of view; synthmorph.registration.network_space) and min-max
-normalised. The detector sees that image downsampled by 2 (half-res voxel j = full-res voxel 2j),
-so a barycenter J in half-res indices is the network-space index n = 2 J. (SynthMorph's own fit
-uses 2 J + 0.5 through its centring constants; pair_check reproduces that exactly, the groupwise
-fit uses 2 J.) All subjects must share one processed grid; the template space is the network
+normalised. The detector sees that image downsampled by 2 (half-res voxel j = full-res voxel 2j)
+and max-pools 4 times, so feature voxel j covers full-res voxels centred at n = f j + f/2 - 1
+(f = extent / 8 = 32) and a barycenter J maps to n = f J + f/2 - 1. (SynthMorph's own fit uses
+n + 0.5 through its centring constants; pair_check reproduces that exactly, the groupwise fit uses
+n.) All subjects must share one processed grid; the template space is the network
 space of that grid, mapped back onto the processed grid. Fits run in the centred network frame
 (n - (extent - 1) / 2), like SynthMorph's.
 
@@ -149,8 +151,8 @@ def groupwise(points, rigid, num_iters=5, power=None):
 
 # ------------------------------------------------------------------ network
 class Detector:
-    """Trained SynthMorph Detector; keypoints() returns (n [K, 3] network-space indices = 2 J,
-    power [K]) for one image in network space."""
+    """Trained SynthMorph Detector; keypoints() returns (n [K, 3] network-space indices, power [K],
+    raw feature-grid barycenters J) for one image in network space."""
 
     def __init__(self, align, extent, weights=None):
         self.align, self.extent = align, int(extent)
@@ -178,7 +180,7 @@ class Detector:
 
     @staticmethod
     def barycenters(feat):
-        """feat [h, h, h, K] half-res maps -> (J [K, 3] half-res barycenters, power [K])."""
+        """feat [h, h, h, K] feature maps -> (J [K, 3] barycenters in feature-voxel indices, power [K])."""
         feat = np.asarray(feat, np.float64)
         power = feat.sum(axis=(0, 1, 2))
         J = np.empty((feat.shape[-1], 3))
@@ -187,21 +189,32 @@ class Detector:
             J[:, a] = (np.arange(feat.shape[a])[:, None] * marg).sum(0) / np.maximum(power, 1e-30)
         return J, power
 
+    def factor(self, feat):
+        """Full-res network voxels per feature voxel (256 / 8 = 32: half-res input, 4 max-pools)."""
+        h = feat.shape[0]
+        assert feat.shape[:3] == (h, h, h) and self.extent % h == 0, feat.shape
+        return self.extent // h
+
     def keypoints(self, x):
+        """Feature voxel j pools half-res voxels [s j, s j + s - 1] (s = f / 2), whose centre is the
+        full-res network index f j + f / 2 - 1; barycenter J -> n = f J + f / 2 - 1."""
         _, f1, _ = self.run(x, x)
         J, power = self.barycenters(f1)
-        return 2.0 * J, power, J
+        f = self.factor(f1)
+        return f * J + f / 2.0 - 1.0, power, J
 
 
 def pair_check(det, x0, x1, log=print):
     """Reproduce the model's own pairwise matrix (image 0 <- image 1, network index space) from
-    our keypoints and weights, with SynthMorph's centring constants (cen = 2 J - (e - 1) / 2 + 0.5)."""
+    our keypoints and weights, with SynthMorph's centring: ne.utils.barycenter(normalize=True,
+    shift_center=True) * extent = f (J - (h - 1) / 2) for h^3 feature maps, f = extent / h."""
     aff, f0, f1 = det.run(x0, x1)
     J0, p0 = det.barycenters(f0)
     J1, p1 = det.barycenters(f1)
     e = det.extent
-    c0 = 2 * J0 - (e // 2 - 1)  # ne.utils.barycenter(normalize, shift_center) * e = 2 J - (e/2 - 1)
-    c1 = 2 * J1 - (e // 2 - 1)
+    h, f = f0.shape[0], det.factor(f0)
+    c0 = f * (J0 - (h - 1) / 2.0)
+    c1 = f * (J1 - (h - 1) / 2.0)
     w = (p0 / p0.sum()) * (p1 / p1.sum())
     m = sm_fit(c0, c1, w, det.align == "rigid")
     cen, un = np.eye(4), np.eye(4)
