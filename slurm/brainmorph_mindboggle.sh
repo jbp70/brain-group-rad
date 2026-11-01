@@ -7,12 +7,14 @@
 #SBATCH --gpus=1
 #SBATCH --cpus-per-task=3
 #SBATCH --mem=64G
-#SBATCH --time=12:00:00
+#SBATCH --time=06:00:00
 #SBATCH --output=/autofs/space/crater_001/users/jn85/BrainRegProjects/GroupwiseReg/logs/%x-%j.out
 #SBATCH --error=/autofs/space/crater_001/users/jn85/BrainRegProjects/GroupwiseReg/logs/%x-%j.err
 #
-# BrainMorph groupwise baseline (rigid, affine, TPS lambda 0; variant L, 512 keypoints) on the
+# BrainMorph groupwise baseline (deformable only: TPS lambda 0; variant L, 512 keypoints) on the
 # processed Mindboggle grid, written in the MultiMorph file layout for `python -m evaluation`.
+# The TPS is fitted directly to the raw keypoints (its affine part is included), so it does not
+# need the rigid/affine runs; add them with ALIGNS="rigid affine tps_0" if ever needed.
 # Runs baselines/brainmorph/run_brainmorph.py in pt_nv.sif (PyTorch); first a ~1 min synthetic
 # self-test on CPU, then the real run. See the docstring of run_brainmorph.py for conventions.
 #
@@ -26,14 +28,15 @@
 #
 # Environment overrides (exported by sbatch):
 #   OUT            default $PROJ/baselines/brainmorph/mindboggle_results (one subfolder per alignment)
-#   ALIGNS         default "rigid affine tps_0"
+#   ALIGNS         default "tps_0" (also accepts rigid, affine, tps_<lambda>)
 #   MAX_SUBJECTS   first N subjects only (smoke test; default all)
 #   SUBJECTS_FILE  optional list of subject folder names
 #   KEYMORPH_DIR, WEIGHTS, PROCESSED, SIF, REPO, EXTRA (more flags for run_brainmorph.py)
 #
 # Smoke (4 subjects, ~15 min):  MAX_SUBJECTS=4 OUT=$PROJ/baselines/brainmorph/smoke4 \
 #                                 sbatch --time=01:00:00 slurm/brainmorph_mindboggle.sh
-# Full (101 subjects, est. 3-5 h, mostly writing .nii.gz):  sbatch slurm/brainmorph_mindboggle.sh
+# Full (101 subjects, est. 1-2 h, mostly writing .nii.gz):  sbatch slurm/brainmorph_mindboggle.sh
+#   -> $OUT/tps_0/{<subject_dir>_fwd,_inv,_moved,_moved_seg}.nii.gz, atlas.nii.gz, atlas_seg.nii.gz
 set -uo pipefail
 PROJ=/autofs/space/crater_001/users/jn85/BrainRegProjects/GroupwiseReg
 REPO=${REPO:-$PROJ/brain-group-rad}
@@ -43,7 +46,7 @@ PROCESSED=${PROCESSED:-$PROJ/data/processed/mindboggle}
 KEYMORPH_DIR=${KEYMORPH_DIR:-$BM/keymorph}
 WEIGHTS=${WEIGHTS:-$BM/weights/foundation-numkey512-numlevels6.pth.tar}
 OUT=${OUT:-$BM/mindboggle_results}
-ALIGNS=${ALIGNS:-rigid affine tps_0}
+ALIGNS=${ALIGNS:-tps_0}
 ARGS=(--keymorph-dir "$KEYMORPH_DIR" --processed-dir "$PROCESSED" --out "$OUT" --weights "$WEIGHTS"
       --num-keypoints 512 --variant L)
 # shellcheck disable=SC2206
