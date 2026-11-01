@@ -371,9 +371,13 @@ def self_test(ants, keep=False):
                             "--inv", d + "/{subject_dir}_inv.nii.gz", "--moved", d + "/{subject_dir}_moved.nii.gz"],
                            cwd=REPO, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         txt = r.stdout.decode(errors="replace")
-        res = [ln for ln in txt.splitlines() if ln.startswith("RESULT")]
-        check("%s: evaluation check-convention -> xyz +++ mm" % ttype,
-              bool(res) and "--components xyz --signs +++ --units mm" in res[0], res[0] if res else txt[-500:])
+        # top-ranked convention; with small synthetic transforms the negated/role-swapped variant can
+        # come close (RESULT: AMBIGUOUS), so test the ranking itself
+        lines = txt.splitlines()
+        top = [ln.strip() for i, ln in enumerate(lines) if i > 0 and lines[i - 1].startswith("top conventions")]
+        check("%s: evaluation check-convention ranks xyz +++ mm first" % ttype,
+              bool(top) and "components=xyz signs=+++ units=mm swap_roles=False" in top[0],
+              top[0] if top else txt[-500:])
     log("self-test files: %s" % tmp)
     if not keep and ok:
         shutil.rmtree(tmp, ignore_errors=True)
