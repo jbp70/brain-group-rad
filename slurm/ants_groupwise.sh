@@ -4,18 +4,21 @@
 #SBATCH -p basic
 #SBATCH -N 1
 #SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=16
-#SBATCH --mem=96G
-#SBATCH --time=72:00:00
+#SBATCH --cpus-per-task=24
+#SBATCH --mem=120G
+#SBATCH --time=96:00:00
 #SBATCH --output=/autofs/space/crater_001/users/jn85/BrainRegProjects/GroupwiseReg/logs/%x-%j.out
 #SBATCH --error=/autofs/space/crater_001/users/jn85/BrainRegProjects/GroupwiseReg/logs/%x-%j.err
 #
 # ANTs groupwise template construction (antsMultivariateTemplateConstruction2.sh, SyGN) for one
 # registration type, converted to the MultiMorph / BrainMorph evaluation format
-# (--components xyz --signs +++ --units mm). CPU only: runs on `basic`, 16 registrations in
+# (--components xyz --signs +++ --units mm). CPU only: runs on `basic`, 24 registrations (one per CPU) in
 # parallel inside this ONE job (-c 2 -j $SLURM_CPUS_PER_TASK; never -c 5, which would submit one
 # SLURM job per registration). Python side runs in tf10_nv.sif (numpy/scipy/nibabel); ANTs 2.4.4
-# from pubsw through the /autofs bind. First a synthetic self-test (~5-15 min), then the run.
+# from pubsw through the /autofs bind. First a synthetic self-test (~5 min), then the run.
+# Measured (job 10542601, 4 Mindboggle subjects, 1 iteration): one affine registration ~40 min on
+# one core. Est. for 101 subjects x 4 iterations on 24 CPUs: affine ~11-15 h, deformable (rigid +
+# affine + SyN per registration) ~2-4 days.
 #
 # Environment overrides (exported by sbatch):
 #   TYPE        rigid | affine | deformable (required)
@@ -27,13 +30,13 @@
 #   MAX_SUBJECTS, SUBJECTS_FILE, SKIP_TEMPLATE=1 (only redo the conversion), SKIP_SELFTEST=1
 #   ANTSPATH    default /autofs/cluster/pubsw/2/pubsw/Linux2-2.3-x86_64/packages/ANTS/2.4.4/bin
 #
-# Mindboggle deformable (est. 1-3 days with 16 CPUs; resubmit with SKIP_TEMPLATE=1 if only the
+# Mindboggle deformable (est. 2-4 days with 24 CPUs; resubmit with SKIP_TEMPLATE=1 if only the
 # conversion failed):
 #   TYPE=deformable PROCESSED=$PROJ/data/processed/mindboggle OUT=$PROJ/baselines/ants/mindboggle_results \
 #     sbatch slurm/ants_groupwise.sh
-# Rigid / affine on another dataset (est. a few hours):
+# Rigid / affine on another dataset (est. 11-15 h):
 #   TYPE=affine PROCESSED=$PROJ/data/processed/<dataset> OUT=$PROJ/baselines/ants/<dataset>_results \
-#     sbatch --time=12:00:00 slurm/ants_groupwise.sh
+#     sbatch --time=24:00:00 slurm/ants_groupwise.sh
 # Smoke: add MAX_SUBJECTS=4 ITERATIONS=1 and --time=02:00:00
 set -uo pipefail
 PROJ=/autofs/space/crater_001/users/jn85/BrainRegProjects/GroupwiseReg
@@ -43,7 +46,7 @@ export ANTSPATH=${ANTSPATH:-/autofs/cluster/pubsw/2/pubsw/Linux2-2.3-x86_64/pack
 TYPE=${TYPE:?set TYPE (rigid, affine or deformable)}
 PROCESSED=${PROCESSED:?set PROCESSED (processed dataset folder)}
 OUT=${OUT:?set OUT (output folder)}
-CPUS=${SLURM_CPUS_PER_TASK:-16}
+CPUS=${SLURM_CPUS_PER_TASK:-24}
 ARGS=(--type "$TYPE" --processed-dir "$PROCESSED" --out "$OUT" --label-name "${LABEL_NAME:-dkt31aseg}"
       --iterations "${ITERATIONS:-4}" --cpus "$CPUS" --ants-path "$ANTSPATH")
 [ -n "${ANTS_ARGS:-}" ] && ARGS+=(--ants-args "$ANTS_ARGS")
