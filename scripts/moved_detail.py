@@ -8,9 +8,10 @@ nonzero (skull-stripped brain) voxels, in each space.
   grad_*        mean |grad image| in the cortex mask
   csf_frac_*    fraction of cortex-mask voxels darker than --csf-thr (sulcal CSF; images are [0, 1])
   csf_vol_*     number of those voxels (mm^3 at 1 mm); csf_vol_moved_jac = sum over moved CSF voxels of
-                1 / det J (their native volume), so tissue that was squeezed out shows as a deficit
+                det J (fwd maps atlas -> subject, so this is their native volume)
   logjac_*      in the moved cortex mask: mean |log det J|, std, % voxels det J > 1.5 / < 1/1.5,
-                and mean log det J on moved CSF voxels vs moved tissue voxels
+                and mean log det J on moved CSF voxels vs moved tissue voxels. det J < 1 = the
+                subject's content is magnified (stretched) into the atlas, which blurs it
 Ratios moved / native summarize how much detail a method removes (1 = preserved).
 
     python scripts/moved_detail.py --processed-dir P --out OUT --workers 4 \\
@@ -70,7 +71,8 @@ def one(task):
          "grad_native": grad_mean(img, cn), "grad_moved": grad_mean(moved, cm),
          "csf_frac_native": float(csf_n.sum() / max(cn.sum(), 1)), "csf_frac_moved": float(csf_m.sum() / max(cm.sum(), 1)),
          "csf_vol_native": int(csf_n.sum()), "csf_vol_moved": int(csf_m.sum()),
-         "csf_vol_moved_jac": float((1.0 / np.maximum(det[csf_m], 1e-3)).sum()),
+         # fwd maps atlas -> subject (x -> x + fwd(x)): an atlas voxel covers det J mm^3 of the subject.
+         "csf_vol_moved_jac": float(np.maximum(det[csf_m], 0).sum()),
          "cortex_vol_native": int(cn.sum()), "cortex_vol_moved": int(cm.sum()),
          "logjac_abs_mean": float(np.abs(logj[cm]).mean()), "logjac_std": float(logj[cm].std()),
          "pct_expand_1p5": 100.0 * float((det[cm] > 1.5).mean()), "pct_shrink_1p5": 100.0 * float((det[cm] < 1 / 1.5).mean()),
