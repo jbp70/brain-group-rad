@@ -27,13 +27,19 @@
 #   LABEL_NAME  labels_<name>.nii.gz for moved_seg / atlas_seg (default dkt31aseg; optional)
 #   ITERATIONS  template iterations (default 4)
 #   ANTS_ARGS   extra antsMultivariateTemplateConstruction2.sh flags, appended last (override presets)
+#   NO_LINEAR=1 deformable only: skip ALL rigid / affine alignment (-r 0 -l 0) for pre-aligned inputs;
+#               results in $OUT/deformable_nolinear
 #   MAX_SUBJECTS, SUBJECTS_FILE, SKIP_TEMPLATE=1 (only redo the conversion), SKIP_SELFTEST=1
 #   ANTSPATH    default /autofs/cluster/pubsw/2/pubsw/Linux2-2.3-x86_64/packages/ANTS/2.4.4/bin
 #
-# Mindboggle deformable (est. 2-4 days with 24 CPUs; resubmit with SKIP_TEMPLATE=1 if only the
-# conversion failed):
-#   TYPE=deformable PROCESSED=$PROJ/data/processed/mindboggle OUT=$PROJ/baselines/ants/mindboggle_results \
-#     sbatch slurm/ants_groupwise.sh
+# Timing: the log ends with "TIMING ..." (ANTs template construction alone = the number for the
+# paper, its CPU-hours, our conversion) and "JOB TIMING ..." (whole job incl. self-test);
+# also $OUT/<name>/timing.json.
+#
+# Mindboggle deformable, already affinely aligned -> SyN only (resubmit with SKIP_TEMPLATE=1 if only
+# the conversion failed):
+#   TYPE=deformable NO_LINEAR=1 PROCESSED=$PROJ/data/processed/mindboggle \
+#     OUT=$PROJ/baselines/ants/mindboggle_results sbatch slurm/ants_groupwise.sh
 # Rigid / affine on another dataset (est. 11-15 h):
 #   TYPE=affine PROCESSED=$PROJ/data/processed/<dataset> OUT=$PROJ/baselines/ants/<dataset>_results \
 #     sbatch --time=24:00:00 slurm/ants_groupwise.sh
@@ -53,6 +59,9 @@ ARGS=(--type "$TYPE" --processed-dir "$PROCESSED" --out "$OUT" --label-name "${L
 [ -n "${MAX_SUBJECTS:-}" ] && ARGS+=(--max-subjects "$MAX_SUBJECTS")
 [ -n "${SUBJECTS_FILE:-}" ] && ARGS+=(--subjects-file "$SUBJECTS_FILE")
 [ "${SKIP_TEMPLATE:-0}" = "1" ] && ARGS+=(--skip-template)
+[ "${NO_LINEAR:-0}" = "1" ] && ARGS+=(--no-linear)
+JOB_START=$(date +%s)
+echo "start $(date '+%F %T')"
 mkdir -p "$OUT"
 echo "host $(hostname)  job ${SLURM_JOB_ID:-none}  cpus $CPUS  repo $(git -C "$REPO" log --oneline -1)"
 echo "ANTs $ANTSPATH"
@@ -69,5 +78,8 @@ fi
 echo "== run: ${ARGS[*]}"
 run "${ARGS[@]}"
 rc=$?
+el=$(( $(date +%s) - JOB_START ))
+printf 'JOB TIMING: end %s, whole job %dh %02dm %02ds wall on %s CPUs (incl. self-test)\n' \
+    "$(date '+%F %T')" $((el / 3600)) $((el % 3600 / 60)) $((el % 60)) "$CPUS"
 echo "exit status $rc"
 exit $rc

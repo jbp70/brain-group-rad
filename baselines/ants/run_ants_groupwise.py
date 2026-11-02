@@ -29,6 +29,11 @@ Defaults per type (override with --ants-args, appended last so they win):
     deformable  -t SyN    -m CC -q 100x100x70x20    -f 6x4x2x1 -s 3x2x1x0vox  (Rigid + Affine (MI) + SyN)
     all         -i 4 template iterations, -r 1 (rigid init to the initial average), -n 0 (inputs are
                 already bias corrected), -c 2 -j <cpus> local parallel, ITK threads 1 per registration
+    --no-linear deformable for pre-aligned inputs: -r 0 -l 0 (SyN only; 0GenericAffine.mat = identity),
+                results in <out>/deformable_nolinear/
+
+Timing: <out>/<name>/timing.json and a "TIMING" log line: wall clock of the ANTs template
+construction alone (the number to report), its CPU-hours (wall x CPUs), and our conversion.
 
 Run with numpy/scipy/nibabel python (e.g. tf10_nv.sif) and ANTs reachable via --ants-path:
     python baselines/ants/run_ants_groupwise.py --self-test --ants-path <ANTs bin>
@@ -163,8 +168,12 @@ def write_itk_affine(path, M):
                        "fixed": np.zeros((3, 1))}, format="4")
 
 
-def template_construction(ants, subs, work, ttype, iterations, cpus, extra, log_path):
-    """Run antsMultivariateTemplateConstruction2.sh in ``work`` (inputs symlinked there)."""
+def template_construction(ants, subs, work, ttype, iterations, cpus, extra, log_path, no_linear=False):
+    """Run antsMultivariateTemplateConstruction2.sh in ``work`` (inputs symlinked there).
+
+    no_linear (deformable only, for pre-aligned inputs): ``-r 0`` (no rigid alignment of the inputs
+    to the initial average) and ``-l 0`` (no Rigid / Affine stages in the pairwise registrations; the
+    script then runs a 0-iteration identity Rigid stage + SyN, so <s>0GenericAffine.mat is identity)."""
     os.makedirs(work, exist_ok=True)
     names = []
     for s in subs:
@@ -174,9 +183,11 @@ def template_construction(ants, subs, work, ttype, iterations, cpus, extra, log_
         os.symlink(os.path.abspath(s["image"]), dst)
         names.append(s["dir"] + ".nii.gz")
     par = ["-c", 2, "-j", cpus] if cpus > 1 else ["-c", 0]
+    lin = ["-r", 0, "-l", 0] if no_linear else ["-r", 1]
     args = (["antsMultivariateTemplateConstruction2.sh", "-d", 3, "-o", PREFIX, "-i", iterations,
-             "-r", 1, "-n", 0] + par + PRESETS[ttype] + list(extra) + names)
-    log("ANTs template construction (%s, %d subjects, log %s)" % (ttype, len(subs), log_path))
+             "-n", 0] + lin + par + PRESETS[ttype] + list(extra) + names)
+    log("ANTs template construction (%s%s, %d subjects, log %s)" % (
+        ttype, ", no rigid/affine stages" if no_linear else "", len(subs), log_path))
     ants.run(args, cwd=work, logfile=log_path)
 
 
@@ -270,24 +281,54 @@ def convert(ants, subs, work, d, ttype, log_every=10):
     return checks
 
 
-def run_type(ants, subs, out, ttype, iterations, cpus, extra, skip_template=False, info=None):
-    d = os.path.join(out, ttype)
+def hms(s):
+    s = int(round(s))
+    return "%dh %02dm %02ds" % (s // 3600, s % 3600 // 60, s % 60)
+
+
+def run_type(ants, subs, out, ttype, iterations, cpus, extra, skip_template=False, info=None,
+             no_linear=False, name=None):
+    """Template construction + conversion, timed. Results in <out>/<name or type>/."""
+    d = os.path.join(out, name or ttype)
     work = os.path.join(d, "work")
     os.makedirs(work, exist_ok=True)
-    t0 = time.time()
-    if not skip_template:
+    start = time.time()
+    if skip_template:
+        prev = os.path.join(d, "timing.json")
+        t_tpl = json.load(open(prev))["template_construction_s"] if os.path.isfile(prev) else None
+        log("template construction skipped (reusing %s)" % work)
+    else:
         template_construction(ants, subs, work, ttype, iterations, cpus, extra,
-                              os.path.join(work, "ants_template_construction.log"))
-    t_tpl = time.time() - t0
-    log("template construction done (%.1f h)" % (t_tpl / 3600))
+                              os.path.join(work, "ants_template_construction.log"), no_linear)
+        t_tpl = time.time() - start
+        log("template construction done: %s" % hms(t_tpl))
+    t1 = time.time()
     checks = convert(ants, subs, work, d, ttype)
+    t_conv = time.time() - t1
+    timing = {
+        "template_construction_s": t_tpl,
+        "template_construction_hms": hms(t_tpl) if t_tpl is not None else None,
+        "template_construction_cpu_h": t_tpl * cpus / 3600 if t_tpl is not None else None,
+        "conversion_s": t_conv, "conversion_hms": hms(t_conv),
+        "wrapper_total_s": time.time() - start, "wrapper_total_hms": hms(time.time() - start),
+        "cpus": cpus, "n_subjects": len(subs), "iterations": iterations,
+        "note": "template_construction = ANTs registration + template building only (wall clock, "
+                "cpus parallel registrations of 1 thread each); conversion = our export to the "
+                "evaluation format (not part of the method). cpu_h = wall x allocated CPUs.",
+    }
+    with open(os.path.join(d, "timing.json"), "w") as f:
+        json.dump(timing, f, indent=2)
     meta = dict(info or {})
-    meta.update(type=ttype, n_subjects=len(subs), iterations=iterations, cpus=cpus,
-                ants_args=PRESETS[ttype] + list(extra), template_construction_s=t_tpl,
-                total_s=time.time() - t0, checks_pass=checks["pass"],
+    meta.update(type=ttype, no_linear=no_linear, n_subjects=len(subs), iterations=iterations, cpus=cpus,
+                ants_args=(["-r", "0", "-l", "0"] if no_linear else ["-r", "1"]) + PRESETS[ttype] + list(extra),
+                timing=timing, checks_pass=checks["pass"],
                 convention="--components xyz --signs +++ --units mm")
     with open(os.path.join(d, "run_info.json"), "w") as f:
         json.dump(meta, f, indent=2)
+    log("TIMING %s: template construction %s (%s CPU-h on %d CPUs), conversion %s, total %s" % (
+        name or ttype, timing["template_construction_hms"],
+        "%.1f" % timing["template_construction_cpu_h"] if t_tpl is not None else "n/a", cpus,
+        timing["conversion_hms"], timing["wrapper_total_hms"]))
     return checks
 
 
@@ -378,6 +419,19 @@ def self_test(ants, keep=False):
         check("%s: evaluation check-convention ranks xyz +++ mm first" % ttype,
               bool(top) and "components=xyz signs=+++ units=mm swap_roles=False" in top[0],
               top[0] if top else txt[-500:])
+        check("%s: timing.json written" % ttype, os.path.isfile(os.path.join(d, "timing.json")), "")
+
+    # 3. deformable without rigid / affine stages (-r 0 -l 0): affine files must be identity
+    t = time.time()
+    c = run_type(ants, subs, out, "deformable", 2, 2, small["deformable"], no_linear=True,
+                 name="deformable_nolinear")
+    w = os.path.join(out, "deformable_nolinear", "work")
+    dev = max(np.abs(read_itk_affine(transforms_of(w, "deformable", j, s["dir"])[2]) - np.eye(4)).max()
+              for j, s in enumerate(subs))
+    check("deformable no-linear: ran + converted (%.0f s)" % (time.time() - t), len(c["subjects"]) == 4, "")
+    check("deformable no-linear: every 0GenericAffine.mat is identity", dev < 1e-6, "%.1e" % dev)
+    check("deformable no-linear: our moved == ANTs WarpedToTemplate (min NCC)",
+          (c["min_ncc_vs_ants_warped"] or 0) > 0.995, c["min_ncc_vs_ants_warped"])
     log("self-test files: %s" % tmp)
     if not keep and ok:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -403,6 +457,10 @@ def main():
     ap.add_argument("--ants-args", default="", help="extra template-construction flags, appended last")
     ap.add_argument("--skip-template", action="store_true",
                     help="reuse the transforms in <out>/<type>/work (only redo the conversion)")
+    ap.add_argument("--no-linear", action="store_true",
+                    help="deformable only: skip all rigid / affine alignment (-r 0 -l 0), for inputs that "
+                         "are already affinely aligned (e.g. processed Mindboggle); results in "
+                         "<out>/deformable_nolinear/")
     a = ap.parse_args()
 
     ants = Ants(a.ants_path, threads=1)
@@ -420,8 +478,12 @@ def main():
         log("WARNING: labels_%s missing for some subjects -> no moved_seg / atlas_seg" % a.label_name)
     extra = a.ants_args.split()
     info = {"processed_dir": os.path.abspath(a.processed_dir), "ants_path": ants.path}
-    c = run_type(ants, subs, a.out, a.type, a.iterations, max(1, a.cpus), extra, a.skip_template, info)
-    log("done: %s/%s (checks %s)" % (a.out, a.type, "PASS" if c["pass"] else "FAIL"))
+    if a.no_linear and a.type != "deformable":
+        ap.error("--no-linear only applies to --type deformable")
+    name = "deformable_nolinear" if a.no_linear else a.type
+    c = run_type(ants, subs, a.out, a.type, a.iterations, max(1, a.cpus), extra, a.skip_template, info,
+                 no_linear=a.no_linear, name=name)
+    log("done: %s/%s (checks %s)" % (a.out, name, "PASS" if c["pass"] else "FAIL"))
     sys.exit(0 if c["pass"] else 4)
 
 
