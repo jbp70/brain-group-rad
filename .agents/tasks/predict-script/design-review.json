@@ -1,0 +1,20 @@
+{
+  "verdict": "APPROVED",
+  "findings": [
+    {
+      "id": 1,
+      "severity": "NIT",
+      "title": "check-streaming subject selection not stated",
+      "where": "F6, section 7, section 9 step 1",
+      "fix": "check-streaming uses the first --n-subjects subjects in find_subjects order (after --subjects-file); fewer available -> exit 2."
+    },
+    {
+      "id": 2,
+      "severity": "NIT",
+      "title": "no documented procedure if the float32 gate trips on real weights",
+      "where": "section 8 float32 bounds, section 9 step 1a",
+      "fix": "Script header / report: on exit 4 inspect check_streaming_f32.json; localised or magnitude-dependent differences = engine bug; uniform slightly-above-bound = rounding, resubmit with --tol-* from measured numbers and record them; never drop the gate."
+    }
+  ],
+  "reviewDoc": "d:/Research/Brain_Registration_Projects/brain-group-rad/.agents/tasks/predict-script/design-review.md"
+}
