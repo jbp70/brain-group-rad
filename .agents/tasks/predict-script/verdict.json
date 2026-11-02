@@ -1,0 +1,9 @@
+{
+  "verdict": "APPROVED",
+  "findings": [
+    {"severity": "NIT", "file": "inference/predict.py", "summary": "check-streaming gpu_peak_mb {unchunked, streamed} is only the last runner phase's peak: _collect_side resets the peak, then runner.run's _Phases resets it at every stage. Report the max over summary['gpu_peak_mb'] instead."},
+    {"severity": "NIT", "file": "inference/streaming.py", "summary": "Python max() in StreamedLevel.deform (max_abs_v) and _note (fp16_max_abs) drops NaN, so these diagnostics can read finite for a NaN-producing block. Use a NaN-propagating max (np.maximum or an explicit isnan branch)."},
+    {"severity": "NIT", "file": "inference/predict.py", "summary": "estimate_store_gb gets 'float16' for any AMP trainable stage, but deform_decoder_dtype float32/float32_fine checkpoints (the planned L1 recipe) store d2 in float32. The estimate is ~5 GB low at N 101; pass the decoder dtype."},
+    {"severity": "NIT", "file": "inference/streaming.py", "summary": "A block='residual' checkpoint fails inside runner.run with a plain ValueError, so it exits 1 with a traceback instead of 2. Check model_cfg.block in the loader or _run_predict and map it to EXIT_INPUT."}
+  ]
+}

@@ -1,7 +1,7 @@
 {
   "task_id": "task-predict-script",
   "task_description": "Standalone prediction script (predict.py + inference/ package) for the TF 2.10 groupwise registration model: restore a run checkpoint (config from config.json), run the selected branch set (rigid | affine | deform | affine+deform) on the WHOLE group at once with exact chunked streaming of every group statistic on one GPU (unchunked and CPU modes too), and write canonical per-subject fwd / inv displacements (mm), moved images, atlas, atlas_seg and predict.json for `python -m evaluation`; plus check-streaming, tests (a)-(d) and slurm/predict_mindboggle.sh. Approved design: .agents/tasks/predict-script/design.md v5.",
-  "status": "pending",
+  "status": "completed",
   "feature_order": ["FEAT-001", "FEAT-002", "FEAT-003", "FEAT-004", "FEAT-005"],
   "blocked_reason": null
 }
