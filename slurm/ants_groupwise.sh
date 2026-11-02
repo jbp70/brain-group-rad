@@ -6,7 +6,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=24
 #SBATCH --mem=120G
-#SBATCH --time=96:00:00
+#SBATCH --time=120:00:00
 #SBATCH --output=/autofs/space/crater_001/users/jn85/BrainRegProjects/GroupwiseReg/logs/%x-%j.out
 #SBATCH --error=/autofs/space/crater_001/users/jn85/BrainRegProjects/GroupwiseReg/logs/%x-%j.err
 #
@@ -17,8 +17,9 @@
 # SLURM job per registration). Python side runs in tf10_nv.sif (numpy/scipy/nibabel); ANTs 2.4.4
 # from pubsw through the /autofs bind. First a synthetic self-test (~5 min), then the run.
 # Measured (job 10542601, 4 Mindboggle subjects, 1 iteration): one affine registration ~40 min on
-# one core. Est. for 101 subjects x 4 iterations on 24 CPUs: affine ~11-15 h, deformable (rigid +
-# affine + SyN per registration) ~2-4 days.
+# one core. Job 10542618 (4 subjects, 1 iteration, NO_LINEAR=1): one SyN registration (100x100x70x20,
+# CC, 1 mm) ~3 h on one core (~6 min per full-res iteration). Est. for 101 subjects x 4 iterations on
+# 24 CPUs (5 rounds of 24 per iteration): affine ~11-15 h, SyN-only ~60 h, rigid+affine+SyN longer.
 #
 # Environment overrides (exported by sbatch):
 #   TYPE        rigid | affine | deformable (required)
