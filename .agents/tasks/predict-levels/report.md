@@ -1,7 +1,8 @@
 # predict-levels: pyramid-level selection for predict.py (report)
 
-Design v2 (`design.md`, review APPROVED with 3 NITs, `design-review.md`). Code commit: see
-`git log` (message `feat: predict.py --levels ...`). Nothing was run on the cluster.
+Design v2 (`design.md`, review APPROVED with 3 NITs, `design-review.md`). Code commit `5b27491`
+(`feat: predict.py --levels ...`); code review APPROVED, no findings (`code-review.md`).
+Cluster: see section 6.
 
 ## 1. CLI
 
