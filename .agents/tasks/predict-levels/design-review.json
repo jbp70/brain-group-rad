@@ -1,0 +1,9 @@
+{
+  "verdict": "APPROVED",
+  "findings": [
+    {"id": 1, "severity": "NIT", "title": "'joint' exposure is P(all of K skipped) = product of p_l, not the exact skip pattern (e.g. 0.15 vs 0.1275 for 2,1)", "fix": "Document joint as 'all levels in K skipped; other frozen levels may also have been skipped'; optionally add exact_pattern = prod(p_l) * prod(1 - p_m) for run frozen levels. Rules stay on joint."},
+    {"id": 2, "severity": "NIT", "title": "Content of predict.json 'levels' in error records not specified when no plan exists (level not in checkpoint); assignment order vs the refusal raise implicit", "fix": "Assign rec['levels'] = plan.to_dict() (with exposure) before raising the refusal; for a bad level write {requested, checkpoint_levels, selected: null}; null if _peek_config failed."},
+    {"id": 3, "severity": "NIT", "title": "Insertion point of plan/exposure in _run_check unspecified (_peek_config is called inline in _check_unchunked)", "fix": "peek = _peek_config(...); build plan + exposure (refusal); _check_unchunked(n, peek, ...); all before _read_subjects."}
+  ],
+  "reviewDoc": "d:\\Research\\Brain_Registration_Projects\\brain-group-rad\\.agents\\tasks\\predict-levels\\design-review.md"
+}

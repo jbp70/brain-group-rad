@@ -55,11 +55,15 @@ def _quantize(x):
     return (np.round(np.asarray(x, np.float64) * 1024.0) / 1024.0).astype(np.float32)
 
 
-def _collect(runner, x1, branches, keys=("A",) + FIELD_KEYS):
+def _collect(runner, x1, branches, keys=("A",) + FIELD_KEYS, none_keys=None):
+    """Sink results as numpy [N, ...] per key; ``none_keys`` (a set) collects keys the sink got
+    as None."""
     n = x1.shape[0]
     got = {}
 
     def sink(i0, i1, res):
+        if none_keys is not None:
+            none_keys.update(k for k, v in res.items() if v is None)
         for k in keys:
             if res.get(k) is None:
                 continue
@@ -130,24 +134,42 @@ class RunnerCase(unittest.TestCase):
         tf.keras.mixed_precision.set_global_policy("float32")
         free_memory()
 
-    def compare_modes(self, label, loaded, x1, chunks, branches, fp16, worst, fields=FIELD_KEYS):
+    def compare_modes(self, label, loaded, x1, chunks, branches, fp16, worst, fields=FIELD_KEYS,
+                      plan=None, on_streamed=None, keep_ref=False):
         """Streamed (every chunk size) vs unchunked for every branch; asserts and fills `worst`.
         One branch's reference is held at a time (level-1 host memory). Returns per branch the
-        unchunked A, max |U1| and summary."""
-        un = UnchunkedRunner(loaded)
+        unchunked A, max |U1| and summary (plus the unchunked arrays as 'ref' if ``keep_ref``).
+
+        plan (predict-levels): a `levels.LevelPlan` for both runners; chunk bounds are asserted for
+        its run levels, max |v| and the u_ckpt shape only when the checkpoint stage runs, and
+        otherwise u_ckpt / u_inv_ckpt / v / v_raw must be None in both modes.
+        on_streamed(br, chunk, got): extra checks on every streamed result."""
+        un = UnchunkedRunner(loaded, plan=plan)
         n = x1.shape[0]
-        runners = {c: StreamedRunner(loaded, RamStore(), chunks={"l1": c, "l2": c, "l4": c})
+        runners = {c: StreamedRunner(loaded, RamStore(), chunks={"l1": c, "l2": c, "l4": c}, plan=plan)
                    for c in chunks}
         keys = ("A",) + tuple(fields)
+        run_levels = loaded.levels if plan is None else plan.run
+        ckpt_run = plan is None or plan.last == loaded.level
         out = {}
         for br in branches:
-            ref, ref_sum = _collect(un, x1, br, keys)
+            ref_none = set()
+            ref, ref_sum = _collect(un, x1, br, keys, none_keys=ref_none)
             out[br] = {"A": ref.get("A"), "summary": ref_sum,
                        "U1_max": float(np.abs(ref["U1"]).max()) if "U1" in ref else None}
+            if keep_ref:
+                out[br]["ref"] = ref
             for chunk in chunks:
                 sr = runners[chunk]
                 st = sr.store
-                got, summ = _collect(sr, x1, br, keys)
+                got_none = set()
+                got, summ = _collect(sr, x1, br, keys, none_keys=got_none)
+                if on_streamed is not None:
+                    on_streamed(br, chunk, got)
+                if not ckpt_run and BRANCHES[br][1] is not None:
+                    for key in CKPT_KEYS:
+                        self.assertIn(key, ref_none, "%s %s unchunked %s" % (label, br, key))
+                        self.assertIn(key, got_none, "%s %s chunk %d %s" % (label, br, chunk, key))
                 lin, dfm = BRANCHES[br]
                 self.assertEqual(sorted(got), sorted(ref), "%s %s" % (label, br))
                 msg = "%s %s chunk %d" % (label, br, chunk)
@@ -169,15 +191,18 @@ class RunnerCase(unittest.TestCase):
                     self.assertEqual(got["U1"].shape, (n,) + tuple(P.LEVEL_SHAPE[1]) + (3,))
                     if "u_ckpt" in got:
                         self.assertEqual(got["u_ckpt"].shape[1:4], tuple(P.LEVEL_SHAPE[loaded.level]))
-                    self.assertGreater(summ["stats"]["max_abs_v"]["l%d" % loaded.level], 0.0)
+                    if ckpt_run:
+                        self.assertGreater(summ["stats"]["max_abs_v"]["l%d" % loaded.level], 0.0)
                 expect = _expected_bounds(n, chunk)
-                for lv in loaded.levels:
+                self.assertEqual(sorted(summ["chunks"]), sorted("l%d" % lv for lv in run_levels), msg)
+                for lv in run_levels:
                     for task in (t for t in (lin, dfm) if t is not None):
                         self.assertEqual(summ["chunks"]["l%d" % lv][task], expect,
                                          "%s level %d %s" % (msg, lv, task))
                 self.assertEqual(summ["capped"], {})
                 if fp16:
-                    self.assertIn("l%d" % loaded.level, summ["fp16_max_abs"])
+                    if ckpt_run:
+                        self.assertIn("l%d" % loaded.level, summ["fp16_max_abs"])
                 else:
                     self.assertEqual(summ["fp16_max_abs"], {})
                 self.assertEqual(st.nbytes(), 0, "%s: stores left %s" % (msg, st.names()))

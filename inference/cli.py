@@ -55,6 +55,14 @@ def _positive_float(value):
     return v
 
 
+def _levels(value):
+    from inference import levels as LV
+    try:
+        return LV.parse_levels(value)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(str(e))
+
+
 def _common(p, default_branches, chunk_defaults):
     p.add_argument("--checkpoint", required=True,
                    help="checkpoint prefix or checkpoint directory (e.g. <run>/ckpt/best_deform)")
@@ -69,6 +77,15 @@ def _common(p, default_branches, chunk_defaults):
                         "Mindboggle is; not checked); affine+deform: affine cascade, images resampled "
                         "into the affine space, deform cascade, one composed field (%s; default "
                         "%%(default)s)" % BRANCH_NOTE)
+    p.add_argument("--levels", type=_levels, default=None, metavar="LEVELS",
+                   help="cascade levels to run, coarse to fine, comma-separated (e.g. 4 | 4,2 | 2,1 | "
+                        "1; default: all levels of the checkpoint). Levels finer than the last one "
+                        "are not run (its fields are upsampled to level 1); a coarser level that is "
+                        "left out is skipped as in training (identity; later stages on the "
+                        "un-pre-warped inputs). affine+deform uses the same levels for both cascades")
+    p.add_argument("--allow-untrained-skip", action="store_true",
+                   help="run a selection that skips a level the checkpoint chain was never trained "
+                        "to skip (skip probability 0 or unknown); refused (exit 2) otherwise")
     p.add_argument("--device", choices=("gpu", "cpu"), default="gpu",
                    help="gpu (default) or cpu (hides the GPUs before TF starts)")
     p.add_argument("--precision", choices=("checkpoint", "float32"), default="checkpoint",

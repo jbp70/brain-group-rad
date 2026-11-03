@@ -54,7 +54,8 @@ done
 python - <<'EOF' || status=1
 import sys, unittest
 names = ["tests.test_memory_model", "tests.test_width_presets", "tests.test_step_times", "tests.test_slurm_scripts",
-         "tests.test_sweep_tools", "tests.test_collect_memory_runs", "tests.test_predict_store"]
+         "tests.test_sweep_tools", "tests.test_collect_memory_runs", "tests.test_predict_store",
+         "tests.test_predict_levels"]
 result = unittest.TextTestRunner(verbosity=1).run(unittest.defaultTestLoader.loadTestsFromNames(names))
 assert "tensorflow" not in sys.modules, "tensorflow was imported by the TF-free tests"
 print("TF-free tests OK without TF (%d tests)" % result.testsRun if result.wasSuccessful() else "TF-free tests FAILED")

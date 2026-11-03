@@ -44,7 +44,7 @@ PREDICT_KEYS = (
     "tta", "n_subjects", "subjects", "subject_dirs", "training_group_sizes", "mode", "device",
     "chunks", "grid", "store", "timing_s", "gpu_peak_mb", "nonfinite", "stats", "fp16_max_abs",
     "internal_check", "compress_level", "visible_devices", "convention", "outputs", "input_range",
-    "warnings")
+    "warnings", "levels")
 _SHA_RE = re.compile(r"[0-9a-f]{40}")
 
 
@@ -222,6 +222,88 @@ def _check_unchunked(n, peek, branches):
         raise PredictError(CLI.EXIT_INPUT, str(e))
 
 
+def _read_json(path):
+    with open(path) as f:
+        return json.load(f)
+
+
+def _peek_chain_configs(checkpoint, level):
+    """{run level: (config.json path or None, config dict or None)} of the checkpoint chain, TF-free
+    (predict-levels design 6.1): the checkpoint run; for a level-1 run also its level-2 source
+    (``cascade.source_config``, else the config of the level-2 ``cascade.stages`` origin
+    checkpoint; first readable wins; unreadable -> (first candidate or None, None))."""
+    from inference import loader as LD
+    from runtime import checkpoint as C
+    try:
+        cfg_path, config = LD._read_config(C.resolve_checkpoint(checkpoint))
+    except (LD.LoaderError, ValueError) as e:
+        raise PredictError(CLI.EXIT_INPUT, "checkpoint %s: %s" % (checkpoint, e))
+    out = {int(level): (cfg_path, config)}
+    if int(level) == 1:
+        casc = config.get("cascade") or {}
+        cands = []
+        if casc.get("source_config"):
+            cands.append(casc["source_config"])
+        for s in casc.get("stages") or []:
+            try:
+                is2 = int(s.get("level", -1)) == 2
+            except (TypeError, ValueError):
+                is2 = False
+            if is2 and s.get("origin_checkpoint"):
+                p = C.source_config_path(s["origin_checkpoint"])
+                if p is not None and p not in cands:
+                    cands.append(p)
+        found = (cands[0] if cands else None, None)
+        for p in cands:
+            try:
+                found = (p, _read_json(p))
+                break
+            except (OSError, ValueError) as e:
+                logger.debug("level-2 source config %s not readable: %s", p, e)
+        out[2] = found
+    return out
+
+
+def _setup_levels(args, rec, level):
+    """Level plan + training exposure of ``--levels`` (predict-levels design 3, 6), before any
+    subject is read or model built. Fills rec['levels'] (also when refusing); PredictError(2) for a
+    level not in the checkpoint or an untrained / unknown skip without --allow-untrained-skip."""
+    from inference import levels as LV
+    from inference import loader as LD
+    from inference import runner as RN
+    ckpt_levels = LD.frozen_levels_of(level) + (int(level),)
+    selected = getattr(args, "levels", None)
+    try:
+        plan = LV.plan(ckpt_levels, selected)
+    except ValueError as e:
+        rec["levels"] = {"requested": LV.levels_text(selected), "checkpoint_levels": list(ckpt_levels),
+                         "selected": None}
+        raise PredictError(CLI.EXIT_INPUT, str(e))
+    allow = bool(getattr(args, "allow_untrained_skip", False))
+    tasks = tuple(t for t in RN.branch_tasks(args.branches) if t is not None)
+    exp = LV.exposure(plan, tasks, _peek_chain_configs(args.checkpoint, level))
+    d = plan.to_dict()
+    d["allow_untrained_skip"] = allow
+    d["exposure"] = exp
+    rec["levels"] = d
+    bad = LV.bad_entries(exp)
+    if bad and not allow:
+        raise PredictError(CLI.EXIT_INPUT, "--levels %s with --branches %s skips levels the checkpoint "
+                                           "chain was never trained to skip (or its config is not "
+                                           "readable): %s; use --allow-untrained-skip to run it anyway"
+                           % (plan.requested, args.branches,
+                              "; ".join("%s (%s)" % (LV.entry_text(e), e["status"]) for e in bad)))
+    for e in bad:
+        exp["forced"] = True
+        logger.warning("forced (--allow-untrained-skip): %s is %s in training", LV.entry_text(e), e["status"])
+    for e in exp["entries"]:
+        if e["status"] == "trained" and e["joint"] < exp["low_threshold"]:
+            logger.warning("level %d task %s saw this skip (levels %s skipped) in about %.2f %% of "
+                           "training steps", e["level"], e["task"], e["skipped"], 100.0 * e["joint"])
+    logger.info("levels: %s%s", plan, " (default: all checkpoint levels)" if plan.default else "")
+    return plan
+
+
 def _read_subjects(args, rec, n_first=None):
     """Subjects (find_subjects order, first ``n_first``), grid check on the first header, then
     images / labels (load_grid_data), finiteness and intensity range. Fills rec grid / subjects."""
@@ -289,8 +371,27 @@ def _checkpoint_record(loaded):
             "level": loaded.level, "frozen_stages": frozen}
 
 
-def _pipeline(branches, levels):
-    chain = " -> ".join("L%d" % lv for lv in levels)
+def _chain_text(levels, plan=None):
+    """'L4 -> L2 -> L1' (default plan: today's text) or the per-level kinds of a non-default plan,
+    e.g. 'L4 skipped (identity) -> L2 -> L1' or 'L4 -> L2; L1 not run (truncated after level 2)'."""
+    if plan is None or plan.default:
+        return " -> ".join("L%d" % lv for lv in levels)
+    parts = []
+    for lv in plan.ckpt_levels:
+        kind = plan.kind(lv)
+        if kind == "run":
+            parts.append("L%d" % lv)
+        elif kind == "skipped":
+            parts.append("L%d skipped (identity)" % lv)
+    text = " -> ".join(parts)
+    if plan.truncated:
+        text += "; %s not run (truncated after level %d)" % (
+            ", ".join("L%d" % lv for lv in plan.truncated), plan.last)
+    return text
+
+
+def _pipeline(branches, levels, plan=None):
+    chain = _chain_text(levels, plan)
     return {"rigid": "rigid cascade (%s) on the raw images; fwd / inv = linear field of A" % chain,
             "affine": "affine cascade (%s) on the raw images; fwd / inv = linear field of A" % chain,
             "deform": "deform cascade (%s) on the raw images (inputs MNI-affine-aligned); fwd = u, "
@@ -449,6 +550,7 @@ def _run_predict(args, configure_device, rec):
     rec["visible_devices"] = [d.name for d in visible]
     logger.debug("visible devices: %s", visible)
     peek = _peek_config(args.checkpoint)
+    plan = _setup_levels(args, rec, peek[0])
     t = time.time()
     subs, images, labels, shape, aff, spacing = _read_subjects(args, rec)
     timing["read"] = time.time() - t
@@ -464,7 +566,7 @@ def _run_predict(args, configure_device, rec):
     rec.update(checkpoint=_checkpoint_record(loaded), model_config=loaded.model_cfg.to_dict(),
                knobs=loaded.knobs, precision=loaded.precision,
                training_group_sizes=loaded.training_group_sizes,
-               pipeline=_pipeline(args.branches, loaded.levels))
+               pipeline=_pipeline(args.branches, loaded.levels, plan))
     store = None
     if args.mode == "streamed":
         tdt = "float16" if loaded.precision["trainable"] == "mixed_float16" else "float32"
@@ -474,10 +576,10 @@ def _run_predict(args, configure_device, rec):
         rec["store"] = {"kind": store.kind, "dir": getattr(store, "directory", None),
                         "estimate_gb": est, "choice": store.choice}
         runner = RN.StreamedRunner(loaded, store, chunks={"l1": args.chunk_l1, "l2": args.chunk_l2,
-                                                          "l4": args.chunk_l4})
+                                                          "l4": args.chunk_l4}, plan=plan)
     else:
         rec["store"] = {"kind": "none (unchunked)", "dir": None, "estimate_gb": None}
-        runner = RN.UnchunkedRunner(loaded)
+        runner = RN.UnchunkedRunner(loaded, plan=plan)
     os.makedirs(args.out, exist_ok=True)
     writer = _Writer(args, subs, images, labels, aff, shape, spacing, k_check)
     logger.info("run: %d subjects, branches %s, mode %s, level-%d checkpoint step %s, trainable %s",
@@ -608,7 +710,9 @@ def _run_check(args, configure_device, rec):
     rec["visible_devices"] = [d.name for d in visible]
     logger.debug("visible devices: %s", visible)
     n = int(args.n_subjects)
-    _check_unchunked(n, _peek_config(args.checkpoint), args.branches)   # config only, no model
+    peek = _peek_config(args.checkpoint)
+    plan = _setup_levels(args, rec, peek[0])
+    _check_unchunked(n, peek, args.branches)   # config only, no model
     t = time.time()
     subs, images, labels, shape, aff, spacing = _read_subjects(args, rec, n_first=n)
     del labels
@@ -620,8 +724,8 @@ def _run_check(args, configure_device, rec):
     lin, dfm = RN.branch_tasks(args.branches)
     tasks = tuple(x for x in (lin, dfm) if x is not None)
     models = loaded.stage_models()
-    keys = ["l%d" % lv for lv in loaded.levels]
-    caps = {"l%d" % lv: ST.chunk_cap(lv, models[lv].config, tasks) for lv in loaded.levels}
+    keys = ["l%d" % lv for lv in plan.run]
+    caps = {"l%d" % lv: ST.chunk_cap(lv, models[lv].config, tasks) for lv in plan.run}
     flags = {k: getattr(args, "chunk_" + k) for k in keys}
     res = CLI.resolve_check_chunks(n, flags, caps)
     chunks = {k: res[k] for k in keys}
@@ -637,15 +741,16 @@ def _run_check(args, configure_device, rec):
     rec["bounds"] = bounds
     logger.info("check-streaming: %d subjects, branches %s, chunks %s, bound set %s",
                 n, args.branches, rec["chunks"], bound_set)
-    un, sum_un, peak_un, t_un = _collect_side(RN.UnchunkedRunner(loaded), images, args.branches,
-                                              shape, spacing)
+    un, sum_un, peak_un, t_un = _collect_side(RN.UnchunkedRunner(loaded, plan=plan), images,
+                                              args.branches, shape, spacing)
     tdt = "float16" if bound_set == "mixed_float16" else "float32"
     est = SToR.estimate_store_gb(loaded.level, loaded.model_cfg, n, args.branches, tdt)
     store_dir = os.environ.get("TMPDIR") or os.path.join(os.path.dirname(os.path.abspath(args.out)),
                                                          "_stream_tmp")
     store = SToR.choose_store("auto", est, store_dir)
     try:
-        st, sum_st, peak_st, t_st = _collect_side(RN.StreamedRunner(loaded, store, chunks=chunks),
+        st, sum_st, peak_st, t_st = _collect_side(RN.StreamedRunner(loaded, store, chunks=chunks,
+                                                                    plan=plan),
                                                   images, args.branches, shape, spacing)
     finally:
         store.close()
@@ -670,7 +775,7 @@ def _run_check(args, configure_device, rec):
 CHECK_KEYS = ("status", "message", "command", "git_commit", "git_commit_source", "precision",
               "bounds", "chunks", "chunk_bounds", "n_subjects", "subjects", "subject_dirs",
               "branches", "differences", "exceeded", "gpu_peak_mb", "timing_s", "grid",
-              "checkpoint", "device", "visible_devices", "input_range", "warnings")
+              "checkpoint", "device", "visible_devices", "input_range", "warnings", "levels")
 
 
 def run_check_streaming(args, configure_device=True):

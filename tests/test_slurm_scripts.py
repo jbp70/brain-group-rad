@@ -256,6 +256,16 @@ class TestStatic(unittest.TestCase):
         run = [ln for ln in pred if " predict.py run " in ln]
         self.assertEqual(len(run), 1)
         self.assertTrue(run[0].endswith("$EXTRA </dev/null || exit $?"), run[0])
+        # predict-levels: LEVELS / ALLOW_UNTRAINED_SKIP -> $LEVEL_FLAGS (empty by default) on 1a-1c, 2.
+        self.assertIn("LEVELS=${LEVELS:-}\n", text)
+        self.assertIn("ALLOW_UNTRAINED_SKIP=${ALLOW_UNTRAINED_SKIP:-}\n", text)
+        self.assertIn('LEVEL_FLAGS=""\n', text)
+        self.assertIn('if [ -n "$LEVELS" ]; then LEVEL_FLAGS="--levels $LEVELS"; fi\n', text)
+        self.assertIn('if [ "$ALLOW_UNTRAINED_SKIP" = "1" ]; then LEVEL_FLAGS="$LEVEL_FLAGS '
+                      '--allow-untrained-skip"; fi\n', text)
+        for ln in pred:
+            self.assertEqual(ln.count(" $LEVEL_FLAGS "), 1, ln)
+        self.assertIn(' --out "$FIELDS" $LEVEL_FLAGS $EXTRA </dev/null', run[0])
         ev = [ln for ln in sing if " -m evaluation " in ln]
         self.assertEqual(len(ev), 2)
         self.assertIn("check-convention", ev[0])
@@ -328,6 +338,30 @@ class TestStubRuns(unittest.TestCase):
         self.assertIn("check_mixed_run.py", calls[1])
         self.assertIn("--expect-bn-recal true", calls[1])
         self.assertTrue(os.path.isdir(os.path.join(self.tmp, "scratch", "manual")))
+
+    def test_predict_levels_flags(self):
+        """predict-levels: LEVELS unset -> no level flag (the predict.py calls equal the LEVELS run's
+        calls with the flags removed); LEVELS / ALLOW_UNTRAINED_SKIP reach steps 1a, 1b, 1c and 2."""
+        base = dict(OUT=os.path.join(self.tmp, "out"), EXTRA=None, CHECK_CHUNKS=None, BRANCHES=None)
+        r, calls = self.run_script(PREDICT, LEVELS=None, ALLOW_UNTRAINED_SKIP=None, **base)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        pred = [c for c in calls if " predict.py " in c]
+        self.assertEqual(len(pred), 4, calls)
+        for c in calls:
+            self.assertNotIn("--levels", c)
+            self.assertNotIn("--allow-untrained-skip", c)
+        r2, calls2 = self.run_script(PREDICT, LEVELS="2,1", ALLOW_UNTRAINED_SKIP="1", **base)
+        self.assertEqual(r2.returncode, 0, r2.stderr)
+        pred2 = [c for c in calls2 if " predict.py " in c]
+        self.assertEqual(len(pred2), 4, calls2)
+        for c in pred2:
+            self.assertEqual((c + " ").count(" --levels 2,1 --allow-untrained-skip "), 1, c)
+        self.assertEqual([c.replace(" --levels 2,1 --allow-untrained-skip", "") for c in calls2], calls)
+        r3, calls3 = self.run_script(PREDICT, LEVELS="4", ALLOW_UNTRAINED_SKIP=None, **base)
+        self.assertEqual(r3.returncode, 0, r3.stderr)
+        for c in (c for c in calls3 if " predict.py " in c):
+            self.assertIn(" --levels 4 ", c + " ")
+            self.assertNotIn("--allow-untrained-skip", c)
 
     def test_train_requires_n(self):
         r, calls = self.run_script(TRAIN, **self.train_env(N=None))

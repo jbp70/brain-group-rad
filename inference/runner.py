@@ -29,6 +29,13 @@ execution, frozen stages included); per-image results between levels live in a h
 are freed as soon as they are consumed. `UnchunkedRunner`: each level stage is ONE tf.function on
 all N with the trainer's own cascade ops (`Trainer._cascade_val_fn` / `_cascade_val_deform_fn`
 without the baseline extras); limited by the int32 element bound (`loader.check_unchunked`).
+
+Level selection (predict-levels design 4.2): both runners take ``plan`` (`inference.levels.LevelPlan`,
+None = all levels). None or the normalised full plan runs the default path above, unchanged. Other
+plans run `_linear_sel` / `_deform_sel`: truncated levels are not run (the last run level's fields
+are upsampled to level 1, A passes unchanged); a skipped level contributes the identity (A = I,
+U = U_inv = 0) and later stages run on warp(x, 0) / x o I^-1 and compose with it, as the trainer's
+stage skip. u_ckpt / u_inv_ckpt / v / v_raw are None unless the checkpoint's own stage runs.
 """
 import contextlib
 import logging
@@ -38,6 +45,7 @@ import numpy as np
 import tensorflow as tf
 
 from data_loading import params as P
+from inference import levels as LVS
 from inference import loader as LD
 from inference import streaming as ST
 from models import cascade as CS
@@ -51,6 +59,7 @@ BRANCHES = {"rigid": ("rigid", None), "affine": ("affine", None), "deform": (Non
 DEFAULT_CHUNKS = {"l1": 2, "l2": 8, "l4": 32}
 SRC_AFFINE = "src_affine"
 _POOLS = {1: 0, 2: 1, 4: 2}          # 2x2x2 poolings from level 1 to the level
+_ZERO = object()                     # level selection: skipped levels so far = identity fields
 
 
 def branch_tasks(branches):
@@ -133,12 +142,25 @@ class _Phases(object):
 class _Runner(object):
     mode = None
 
-    def __init__(self, loaded):
+    def __init__(self, loaded, plan=None):
         self.loaded = loaded
         self.level = loaded.level
         self.levels = loaded.levels
         self.models = loaded.stage_models()
         self._fns = {}
+        if plan is not None and tuple(plan.ckpt_levels) != tuple(self.levels):
+            raise ValueError("level plan for levels %s, checkpoint levels %s"
+                             % (list(plan.ckpt_levels), list(self.levels)))
+        self.plan = plan
+
+    def _is_default(self):
+        """True iff the unchanged default path runs (no plan or the normalised full plan)."""
+        return self.plan is None or self.plan.default
+
+    def _plan_dict(self):
+        if self.plan is not None:
+            return self.plan.to_dict()
+        return LVS.plan(self.levels, None).to_dict()
 
     def _fn(self, key, body, signature=None):
         fn = self._fns.get(key)
@@ -150,7 +172,14 @@ class _Runner(object):
         return {"mode": self.mode, "level": self.level, "n": int(n), "branches": branches,
                 "A": None, "chunks": {"l%d" % lv: {} for lv in self.levels},
                 "chunk_sizes": chunk_sizes, "capped": {}, "stats": {"max_abs_v": {}},
-                "fp16_max_abs": {}, "timing_s": None, "gpu_peak_mb": None}
+                "fp16_max_abs": {}, "timing_s": None, "gpu_peak_mb": None,
+                "levels": self._plan_dict()}
+
+    def _new_summary_sel(self, n, branches, chunk_sizes):
+        """Summary of a non-default plan: chunk bounds for the run levels only."""
+        summary = self._new_summary(n, branches, chunk_sizes)
+        summary["chunks"] = {"l%d" % lv: {} for lv in self.plan.run}
+        return summary
 
     def _check(self, images, branches):
         x1 = _as_level1(images)
@@ -176,8 +205,8 @@ class StreamedRunner(_Runner):
 
     mode = "streamed"
 
-    def __init__(self, loaded, store, chunks=None, lean=True, record_fp16=True):
-        super(StreamedRunner, self).__init__(loaded)
+    def __init__(self, loaded, store, chunks=None, lean=True, record_fp16=True, plan=None):
+        super(StreamedRunner, self).__init__(loaded, plan)
         self.store = store
         self.chunks = dict(DEFAULT_CHUNKS)
         self.chunks.update(chunks or {})
@@ -317,6 +346,8 @@ class StreamedRunner(_Runner):
     def run(self, images, branches, sink=None):
         """Run ``branches`` on images [N, 160, 224, 192] (float32); results go to ``sink`` per
         chunk (see the module docstring). Returns the summary dict."""
+        if not self._is_default():
+            return self._run_sel(images, branches, sink)
         x1, lin, dfm = self._check(images, branches)
         n = x1.shape[0]
         sizes = {"l%d" % lv: self.chunks["l%d" % lv] for lv in self.levels}
@@ -343,6 +374,184 @@ class StreamedRunner(_Runner):
         summary["gpu_peak_mb"] = phases.gpu_peak_mb if phases.gpu else None
         return summary
 
+    # ---------------------------------------------------------------- level selection (predict-levels)
+    # Used only by a non-default plan; the default path above is not touched (design 4.2).
+    def _prewarp_deform_steps_fn(self, level, steps):
+        lean = self.lean
+
+        def body(x1, u_prev):
+            u_up = u_prev
+            for _ in range(steps):
+                u_up = diffeo.upsample_displacement(u_up)
+            return diffeo.warp(_pool_to(x1, level), u_up, lean=lean)
+        return self._fn(("prewarp_deform_steps", level, steps), body)
+
+    def _up_steps_fn(self, steps):
+        def body(u, u_inv):
+            for _ in range(steps):
+                u, u_inv = diffeo.upsample_displacement(u), diffeo.upsample_displacement(u_inv)
+            return u, u_inv
+        return self._fn(("up_steps", steps), body)
+
+    def _prewarp_deform_zero_fn(self, level):
+        """warp(pool(x1), 0) at ``level``: the trainer's pre-warp of a skipped-identity field."""
+        lean, shape = self.lean, list(P.LEVEL_SHAPE[level])
+
+        def body(x1):
+            x = _pool_to(x1, level)
+            zero = tf.zeros([tf.shape(x)[0]] + shape + [3], tf.float32)
+            return diffeo.warp(x, zero, lean=lean)
+        return self._fn(("prewarp_deform_zero", level), body)
+
+    def _zero_fields_fn(self, level):
+        """(0, 0) fields [k, X, Y, Z, 3] at ``level`` (k a Python int)."""
+        shape = list(P.LEVEL_SHAPE[level])
+
+        def body(k):
+            z = tf.zeros([k] + shape + [3], tf.float32)
+            return z, tf.zeros_like(z)
+        return self._fn(("zero_fields", level), body)
+
+    def _linear_sel(self, n, x1, task, summary, phases):
+        """Linear cascade of a non-default plan: a skipped level gives A = I (bitwise
+        `cascade.skip_linear`) before any level ran, or keeps the last A (`skip_to`, '4,1')."""
+        plan = self.plan
+        a_prev = None
+        ran = False
+        for lv in self.levels:
+            kind = plan.kind(lv)
+            if kind == "truncated":
+                break
+            if kind == "skipped":
+                if not ran:
+                    a_prev = tf.eye(4, batch_shape=[n], dtype=tf.float32)
+                continue
+            model, eng = self.models[lv], self._engine(lv)
+            if a_prev is None:
+                pool = self._pool_fn(lv)
+
+                def input_fn(i0, i1, pool=pool):
+                    return pool(x1[i0:i1])
+            else:
+                prewarp = self._prewarp_linear_fn(lv)
+
+                def input_fn(i0, i1, prewarp=prewarp, a_prev=a_prev):
+                    return prewarp(x1[i0:i1], a_prev[i0:i1])
+            with phases("%s:l%d" % (task, lv)):
+                a_raw = eng.linear(n, input_fn, task)
+                if a_prev is None:
+                    a = tf.cast(model.centering(a_raw), tf.float32)
+                else:
+                    a = CS.compose_linear(a_raw, a_prev, model.centering)
+            self._record(summary, lv, task, eng)
+            a_prev = a
+            ran = True
+        return a_prev
+
+    def _deform_sel(self, n, src, A, sink, summary, phases, free_src):
+        """Deform cascade of a non-default plan. ``prev``: None (nothing yet), _ZERO (identity so
+        far: input warp(pool(x), 0), composition with (0, 0) as the trainer's skip) or (store
+        names, level) of the last run level's fields."""
+        plan = self.plan
+        last = plan.last
+        prev = None
+        for lv in self.levels:
+            kind = plan.kind(lv)
+            if kind == "truncated":
+                break
+            if kind == "skipped":
+                if prev is None:
+                    prev = _ZERO
+                continue
+            eng = self._engine(lv)
+            is_last = lv == last
+            if prev is None:
+                pool = self._pool_fn(lv)
+
+                def input_fn(i0, i1, pool=pool):
+                    return pool(src(i0, i1))
+                prev_fn = None
+            elif prev is _ZERO:
+                prewarp0, zeros = self._prewarp_deform_zero_fn(lv), self._zero_fields_fn(lv)
+
+                def input_fn(i0, i1, prewarp0=prewarp0):
+                    return prewarp0(src(i0, i1))
+
+                def prev_fn(i0, i1, zeros=zeros):
+                    return zeros(i1 - i0)
+            else:
+                names, lp = prev
+                steps = _POOLS[lp] - _POOLS[lv]
+                if steps == 1:
+                    prewarp, up = self._prewarp_deform_fn(lv), self._up_fn()
+                else:
+                    prewarp, up = self._prewarp_deform_steps_fn(lv, steps), self._up_steps_fn(steps)
+
+                def input_fn(i0, i1, prewarp=prewarp, name=names[0]):
+                    return prewarp(src(i0, i1), self.store.get(name, i0, i1))
+
+                def prev_fn(i0, i1, up=up, names=names):
+                    return up(self.store.get(names[0], i0, i1), self.store.get(names[1], i0, i1))
+            if is_last and free_src:
+                inner = input_fn
+
+                def input_fn(i0, i1, inner=inner):     # free the source after the last P0 chunk
+                    x = inner(i0, i1)
+                    if i1 == n:
+                        self.store.free(SRC_AFFINE)
+                    return x
+            level_sink = (self._level_sink_sel(lv, A, sink, ckpt_fields=lv == self.level)
+                          if is_last else None)
+            with phases("deform:l%d" % lv):
+                res = eng.deform(n, input_fn, prev_fn=prev_fn, sink=level_sink)
+            self._record(summary, lv, "deform", eng)
+            if prev is not None and prev is not _ZERO:
+                for name in prev[0]:
+                    self.store.free(name)
+            prev = None if is_last else ((res["u"], res["u_inv"]), lv)
+
+    def _level_sink_sel(self, level, A, sink, ckpt_fields):
+        """`_level_sink` of a non-default plan: u_ckpt, u_inv_ckpt, v, v_raw only when the
+        checkpoint's trainable stage ran (``ckpt_fields``), else None (design 4.2 sink rule)."""
+        to_l1 = None if level == 1 else self._to_level1_fn(level)
+
+        def level_sink(i0, i1, d):
+            if sink is None:
+                return
+            U1, U1_inv = (d["u"], d["u_inv"]) if level == 1 else to_l1(d["u"], d["u_inv"])
+            fields = {"U1": U1, "U1_inv": U1_inv}
+            if ckpt_fields:
+                fields.update(u_ckpt=d["u"], u_inv_ckpt=d["u_inv"], v=d["v"], v_raw=d["v_raw"])
+            sink(i0, i1, self._res(None if A is None else A[i0:i1], fields))
+        return level_sink
+
+    def _run_sel(self, images, branches, sink):
+        x1, lin, dfm = self._check(images, branches)
+        n = x1.shape[0]
+        sizes = {"l%d" % lv: self.chunks["l%d" % lv] for lv in self.plan.run}
+        summary = self._new_summary_sel(n, branches, sizes)
+        phases = _Phases()
+        A = None
+        if lin is not None:
+            A = self._linear_sel(n, x1, lin, summary, phases)
+        if dfm is not None:
+            if A is not None:
+                self._resample(n, x1, A, phases)
+
+                def src(i0, i1):
+                    return self.store.get(SRC_AFFINE, i0, i1)
+            else:
+                def src(i0, i1):
+                    return x1[i0:i1]
+            self._deform_sel(n, src, A, sink, summary, phases, free_src=A is not None)
+        elif sink is not None:
+            for i0, i1 in _bounds(n, self.chunks["l1"]):
+                sink(i0, i1, self._res(A[i0:i1]))
+        summary["A"] = None if A is None else A.numpy()
+        summary["timing_s"] = phases.timing
+        summary["gpu_peak_mb"] = phases.gpu_peak_mb if phases.gpu else None
+        return summary
+
 
 # ============================================================================ unchunked
 class UnchunkedRunner(_Runner):
@@ -354,8 +563,8 @@ class UnchunkedRunner(_Runner):
 
     mode = "unchunked"
 
-    def __init__(self, loaded, lean=True):
-        super(UnchunkedRunner, self).__init__(loaded)
+    def __init__(self, loaded, lean=True, plan=None):
+        super(UnchunkedRunner, self).__init__(loaded, plan)
         self.lean = bool(lean)
 
     def _spec(self, n, level, channels=1):
@@ -428,6 +637,8 @@ class UnchunkedRunner(_Runner):
 
     def run(self, images, branches, sink=None):
         """As `StreamedRunner.run`, one chunk [0, N) (``check_unchunked`` first)."""
+        if not self._is_default():
+            return self._run_sel(images, branches, sink)
         x1, lin, dfm = self._check(images, branches)
         n = x1.shape[0]
         LD.check_unchunked(n, self.level, self.loaded.model_cfg, branches,
@@ -457,6 +668,146 @@ class UnchunkedRunner(_Runner):
             summary["stats"]["max_abs_v"]["l%d" % self.level] = float(
                 tf.reduce_max(tf.abs(out["v"])))
             for lv in self.levels:
+                summary["chunks"]["l%d" % lv][dfm] = [(0, n)]
+        if sink is not None:
+            sink(0, n, self._res(A, fields))
+        summary["A"] = None if A is None else A.numpy()
+        summary["timing_s"] = phases.timing
+        summary["gpu_peak_mb"] = phases.gpu_peak_mb if phases.gpu else None
+        return summary
+
+    # ---------------------------------------------------------------- level selection (predict-levels)
+    # The trainer's own functions with tf.constant(True) as the skip tensor (design 4.2 table).
+    def _frozen_skips(self):
+        skipped = self.plan.skipped
+        return 4 in skipped, 2 in skipped
+
+    def _linear_sel(self, x1, task, n, phases):
+        """A of a non-default plan (trainable stage only when ``plan.last`` is the checkpoint level)."""
+        model, frozen, lv, plan = self.loaded.model, self.loaded.frozen, self.level, self.plan
+        if frozen is None:                              # level 4: the full plan only
+            return self._linear(x1, task, n, phases)
+        x = self._pool(x1, lv, n, phases)
+        spec, aspec = self._spec(n, lv), tf.TensorSpec((n, 4, 4), tf.float32)
+        chain = lv == 1
+        skip4, skip2 = self._frozen_skips()
+        last = plan.last
+        sel = plan.selected
+
+        def frozen_body(x):
+            s = tf.constant(True)
+            if chain:
+                if skip4 or skip2:
+                    return frozen.linear_skip(x, task, skip4=s if skip4 else None,
+                                              skip2=s if skip2 else None)
+                if last == 4:
+                    return frozen.linear_stages(x, task)["A4"]
+                if last == 2:
+                    return frozen.linear(x, task)
+                return frozen.linear_stages(x, task)["A"]
+            a = frozen.linear(x, task)
+            if skip4:
+                a = CS.skip_linear(s, a)
+            return a
+        f_frozen = self._fn(("linear_frozen_sel", task, n, sel), frozen_body, [spec])
+        with phases("%s:frozen" % task):
+            a_prev = _sync(f_frozen(x))
+        if last != lv:
+            return a_prev
+        sp = P.LEVEL_SPACING[lv]
+
+        def body(x, a_prev):
+            x_in = CS.prewarp_linear(x, a_prev, sp)
+            out = model(x_in, task=task, training=False)
+            return CS.compose_linear(out["A_raw"], a_prev, model.centering)
+        f_train = self._fn(("linear_sel", task, n), body, [spec, aspec])
+        with phases("%s:l%d" % (task, lv)):
+            return _sync(f_train(x, a_prev))
+
+    def _deform_sel(self, x1, n, phases):
+        """Fields of a non-default plan: {'U1', 'U1_inv'} plus 'u_ckpt', 'u_inv_ckpt', 'v',
+        'v_raw' when the trainable stage runs (else None)."""
+        model, frozen, lv, lean, plan = (self.loaded.model, self.loaded.frozen, self.level,
+                                         self.lean, self.plan)
+        to_l1 = self._fn(("to_l1_sel", n), lambda u, u_inv: (
+            _up_to_level1(u, self.level), _up_to_level1(u_inv, self.level)))
+
+        def level1(u, u_inv):
+            return (u, u_inv) if lv == 1 else to_l1(u, u_inv)
+        if frozen is None:                              # level 4: the full plan only
+            out = self._deform(x1, n, phases)
+        else:
+            x = self._pool(x1, lv, n, phases)
+            spec, fspec = self._spec(n, lv), self._spec(n, lv, 3)
+            chain = lv == 1
+            skip4, skip2 = self._frozen_skips()
+            last = plan.last
+
+            def frozen_body(x):
+                s = tf.constant(True)
+                if chain:
+                    if skip4 or skip2:
+                        prev = frozen.deform_skip(x, skip4=s if skip4 else None,
+                                                  skip2=s if skip2 else None)
+                    elif last == 4:
+                        st = frozen.deform_stages(x)
+                        return st["U4"], st["U4_inv"]
+                    else:
+                        prev = frozen.deform(x)
+                    return prev["U"], prev["U_inv"]
+                prev = frozen.deform(x)
+                U, U_inv = prev["U"], prev["U_inv"]
+                if skip4:
+                    U, U_inv = CS.skip_fields(s, [U, U_inv])
+                return U, U_inv
+            f_frozen = self._fn(("deform_frozen_sel", n, plan.selected), frozen_body, [spec])
+            with phases("deform:frozen"):
+                U, U_inv = _sync(f_frozen(x))
+            if last != lv:
+                U1, U1_inv = level1(U, U_inv)
+                return {"U1": U1, "U1_inv": U1_inv, "u_ckpt": None, "u_inv_ckpt": None,
+                        "v": None, "v_raw": None}
+
+            def body(x, U, U_inv):
+                x_in = diffeo.warp(tf.cast(x, tf.float32), U, lean=lean)
+                out = model(x_in, task="deform", training=False)
+                u, u_inv = diffeo.compose_cascade(U, U_inv, out["u"], out["u_inv"], lean=lean)
+                return {"u": tf.cast(u, tf.float32), "u_inv": tf.cast(u_inv, tf.float32),
+                        "v": tf.cast(out["v"], tf.float32), "v_raw": tf.cast(out["v_raw"], tf.float32)}
+            f_train = self._fn(("deform_sel", n), body, [spec, fspec, fspec])
+            with phases("deform:l%d" % lv):
+                out = _sync(f_train(x, U, U_inv))
+        U1, U1_inv = level1(out["u"], out["u_inv"])
+        return {"U1": U1, "U1_inv": U1_inv, "u_ckpt": out["u"], "u_inv_ckpt": out["u_inv"],
+                "v": out["v"], "v_raw": out["v_raw"]}
+
+    def _run_sel(self, images, branches, sink):
+        x1, lin, dfm = self._check(images, branches)
+        n = x1.shape[0]
+        LD.check_unchunked(n, self.level, self.loaded.model_cfg, branches,
+                           self.loaded.knobs["split_group_conv"])
+        plan = self.plan
+        summary = self._new_summary_sel(n, branches, {"l%d" % lv: 0 for lv in plan.run})
+        phases = _Phases()
+        x1_t = tf.constant(x1)
+        A, fields = None, None
+        if lin is not None:
+            A = self._linear_sel(x1_t, lin, n, phases)
+            for lv in plan.run:
+                summary["chunks"]["l%d" % lv][lin] = [(0, n)]
+        if dfm is not None:
+            src = x1_t
+            if A is not None:
+                fn = self._fn(("resample_sel", n), lambda x, a: CS.prewarp_linear(
+                    x, a, P.LEVEL_SPACING[1]), [self._spec(n, 1), tf.TensorSpec((n, 4, 4), tf.float32)])
+                with phases("affine+deform:resample"):
+                    src = _sync(fn(x1_t, A))
+            fields = self._deform_sel(src, n, phases)
+            del src
+            if plan.last == self.level:
+                summary["stats"]["max_abs_v"]["l%d" % self.level] = float(
+                    tf.reduce_max(tf.abs(fields["v"])))
+            for lv in plan.run:
                 summary["chunks"]["l%d" % lv][dfm] = [(0, n)]
         if sink is not None:
             sink(0, n, self._res(A, fields))

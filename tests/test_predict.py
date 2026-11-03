@@ -64,6 +64,15 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 GATE = 1e-3                                    # AC 3 gates (coordinate vox, moved, inverse mm)
 B_STREAM, B_EXACT, B_EXACT_FALLBACK = 1e-4, 1e-6, 1e-5
 BRANCH_ORDER = ("rigid", "affine", "deform", "affine+deform")
+# predict.json `pipeline` of a default level-2 run, as written before predict-levels (literal).
+DEFAULT_PIPELINE_L2 = {
+    "rigid": "rigid cascade (L4 -> L2) on the raw images; fwd / inv = linear field of A",
+    "affine": "affine cascade (L4 -> L2) on the raw images; fwd / inv = linear field of A",
+    "deform": "deform cascade (L4 -> L2) on the raw images (inputs MNI-affine-aligned); fwd = u, "
+              "inv = u_inv",
+    "affine+deform": "affine cascade (L4 -> L2); images resampled once into the affine central space "
+                     "(I o A^-1, trilinear, zero fill); deform cascade (L4 -> L2) on them; fwd = "
+                     "A^-1 o (id + u), inv its inverse"}
 
 
 def _say(msg):
@@ -98,9 +107,10 @@ def _diff(a, b, mask=None):
     return float(d.max())
 
 
-def _collect(loaded, images, branches, streamed=False):
+def _collect(loaded, images, branches, streamed=False, plan=None):
     """Internal results (numpy) of the unchunked runner, or of the streamed runner with the `run`
-    default chunks (the script's own computation): A [N, 4, 4] or None, U1 / U1_inv or None."""
+    default chunks (the script's own computation): A [N, 4, 4] or None, U1 / U1_inv or None.
+    ``plan``: a predict-levels `LevelPlan` for the runner (None = default)."""
     n = images.shape[0]
     got = {}
 
@@ -111,9 +121,10 @@ def _collect(loaded, images, branches, streamed=False):
                 got.setdefault(k, np.zeros((n,) + a.shape[1:], a.dtype))[i0:i1] = a
     if streamed:
         with RamStore() as store:
-            StreamedRunner(loaded, store, chunks=dict(CLI.RUN_CHUNK_DEFAULTS)).run(images, branches, sink)
+            StreamedRunner(loaded, store, chunks=dict(CLI.RUN_CHUNK_DEFAULTS), plan=plan).run(
+                images, branches, sink)
     else:
-        UnchunkedRunner(loaded).run(images, branches, sink)
+        UnchunkedRunner(loaded, plan=plan).run(images, branches, sink)
     return got.get("A"), got.get("U1"), got.get("U1_inv")
 
 
@@ -760,6 +771,15 @@ class TestLevel2Convention(unittest.TestCase):
             rec = _json(os.path.join(self.out[b], "predict.json"))
             self.assertEqual(rec["status"], "ok", (b, rec["message"], rec["internal_check"]))
             self.assertTrue(rec["internal_check"]["passed"], rec["internal_check"])
+            # predict-levels test 6: default runs keep today's pipeline text, levels.default true
+            self.assertEqual(rec["pipeline"], DEFAULT_PIPELINE_L2[b])
+            self.assertEqual(rec["pipeline"], PR._pipeline(b, (4, 2)))
+            lv = rec["levels"]
+            self.assertTrue(lv["default"])
+            self.assertIsNone(lv["requested"])
+            self.assertEqual((lv["selected"], lv["skipped"], lv["truncated"]), ([4, 2], [], []))
+            self.assertEqual(lv["exposure"]["entries"], [])
+            self.assertFalse(lv["allow_untrained_skip"])
             for i, s in enumerate(self.sdirs):
                 fwd, inv, moved = _files(self.out[b], s)
                 r = CN.internal_check(self.images[i], moved, fwd, inv, b,
@@ -940,6 +960,182 @@ class TestLevel2Convention(unittest.TestCase):
                 self.assertEqual(rec2["chunk_bounds"]["streamed"][lv][task], [[0, 2], [2, 3]], (lv, task))
         _say("check-streaming L2 N 3 affine+deform (recorded): exit %d, %s" % (
             code2, {k: "%.2e" % v for k, v in rec2["differences"]["affine+deform"].items()}))
+
+
+# ============================================================================ predict-levels
+SKIP_ARGS = {"cascade_skip_prob": 0.0,
+             "cascade_skip_stage_parsed": {"rigid": {"4": 0.0}, "affine": {"4": 0.0}, "deform": {"4": 0.15}}}
+
+
+class TestLevelsEndToEnd(unittest.TestCase):
+    """predict-levels design 11 (end to end) on a TINY level-2 cascade whose config.json says deform
+    level 4 was skipped with p 0.15 and linear never: `run --levels 4 / 2` (files, predict.json
+    `levels`, internal check, written fields == the runner under the plan, check-convention),
+    refusal / --allow-untrained-skip, level not in the checkpoint, low-exposure WARNING,
+    check-streaming --levels."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp(prefix="bgr_predlv_")
+        cls.proc = os.path.join(cls.tmp, "proc")
+        dirs, cls.images = write_subjects(cls.proc, 3, textured=True, seed=2)
+        cls.sdirs = [os.path.basename(d) for d in dirs]
+        cfg = tiny_config(**STAGE_KW)
+        m4 = GroupRegLevelModel(4, cfg).build_model(2)
+        randomize(m4, 3, 0.02)
+        frozen = CS.FrozenStage.from_model(m4)
+        m2 = GroupRegLevelModel(2, cfg, lean_sampler=True, split_group_conv=True).build_model(1)
+        m2.copy_weights_from(m4)
+        randomize(m2, 4, 0.01)
+        cls.loaded = LoadedModel(2, m2, frozen)
+        TestLevel2Convention._scale_svf_heads(cls.loaded, cls.images, (frozen.model, m2))
+        # Each selection keeps only part of the cascade's field: double the SVF heads until both
+        # `4` and `2` reach max |U1| >= 4 vox (else check-convention cannot separate the
+        # conventions: AMBIGUOUS at max |U1| 2.1 vox, mean |fwd| 0.43 mm).
+        from inference import levels as LV
+        cls.svf_doublings = 0
+        for _ in range(4):
+            mags = [float(np.abs(_collect(cls.loaded, cls.images, "deform", streamed=True,
+                                          plan=LV.plan((4, 2), sel))[1]).max()) for sel in ((4,), (2,))]
+            if min(mags) >= 4.0:
+                break
+            for model in (frozen.model, m2):
+                k = model.deform_decoder.svf_head.kernel
+                k.assign(k * 2.0)
+            cls.svf_doublings += 1
+        cls.mags = mags
+        cls.ckpt = save_cascade_run(cls.tmp, "l2skip", m2, frozen, args=SKIP_ARGS)
+        low = {"cascade_skip_prob": 0.0, "cascade_skip_stage_parsed": {"deform": {"4": 0.04}}}
+        cls.ckpt_low = save_cascade_run(cls.tmp, "l2low", m2, frozen, args=low)
+        cls.out, cls.codes = {}, {}
+        for sel in ("4", "2"):
+            out = os.path.join(cls.tmp, "out_L%s" % sel)
+            cls.codes[sel] = PR.run_predict(_run(cls.ckpt, cls.proc, out, "--branches", "deform", "--levels",
+                                                 sel, "--check-internal", "3"), configure_device=False)
+            cls.out[sel] = out
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+        free_memory()
+
+    def test_run_levels_files_and_record(self):
+        from inference import levels as LV
+        _say("levels e2e: SVF heads doubled %d more times; last measured max |U1| for `4` / `2`: %s"
+             % (self.svf_doublings, ["%.2f" % m for m in self.mags]))
+        self.assertEqual(self.codes, {"4": 0, "2": 0})
+        expect = {"4": ((4,), [], [2], "deform cascade (L4; L2 not run (truncated after level 4)) on the raw images"),
+                  "2": ((2,), [4], [], "deform cascade (L4 skipped (identity) -> L2) on the raw images")}
+        for sel, (selected, skipped, trunc, pipe) in expect.items():
+            out = self.out[sel]
+            rec = _json(os.path.join(out, "predict.json"))
+            self.assertEqual(rec["status"], "ok", rec["message"])
+            self.assertTrue(rec["internal_check"]["passed"], rec["internal_check"])
+            self.assertTrue(rec["pipeline"].startswith(pipe), rec["pipeline"])
+            lv = rec["levels"]
+            self.assertEqual((lv["requested"], lv["selected"], lv["skipped"], lv["truncated"], lv["default"]),
+                             (sel, list(selected), skipped, trunc, False))
+            self.assertEqual(lv["checkpoint_levels"], [4, 2])
+            self.assertEqual(lv["upsampled_from_level"], selected[-1])
+            self.assertFalse(lv["exposure"]["forced"])
+            self.assertEqual(sorted(rec["chunks"]["bounds"]), ["l%d" % selected[-1]])
+            if sel == "2":
+                ent = lv["exposure"]["entries"]
+                self.assertEqual(len(ent), 1)
+                self.assertEqual((ent[0]["task"], ent[0]["level"], ent[0]["status"], ent[0]["p"]),
+                                 ("deform", 2, "trained", {"4": 0.15}))
+                self.assertEqual(lv["exposure"]["runs"]["2"]["source"], "args.cascade_skip_stage_parsed")
+            else:
+                self.assertEqual(lv["exposure"]["entries"], [])
+            for name in ("atlas.nii.gz", "atlas_seg.nii.gz"):
+                self.assertTrue(os.path.isfile(os.path.join(out, name)), name)
+            plan = LV.plan((4, 2), selected)
+            _, U1, U1i = _collect(self.loaded, self.images, "deform", streamed=True, plan=plan)
+            e = 0.0
+            for i, s in enumerate(self.sdirs):
+                fwd, inv, moved = _files(out, s)
+                self.assertEqual(fwd.shape, GRID_SHAPE + (3,))
+                e = max(e, _diff(fwd, U1[i]), _diff(inv, U1i[i]))
+            _say("--levels %s: written fields vs the streamed runner under the plan %.2e vox; max |U1| %.3f"
+                 % (sel, e, float(np.abs(U1).max())))
+            self.assertLessEqual(e, B_EXACT_FALLBACK)
+
+    def test_check_convention_on_skip_output(self):
+        for sel in ("2", "4"):
+            out = self.out[sel]
+            tpl = os.path.join(out, "{subject_dir}_%s.nii.gz")
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                code = EV.main(["check-convention", "--processed-dir", self.proc, "--fwd", tpl % "fwd",
+                                "--inv", tpl % "inv", "--moved", tpl % "moved", "--n-subjects", "3", "--out",
+                                os.path.join(self.tmp, "conv_%s.json" % sel)])
+            self.assertEqual(code, 0, buf.getvalue())
+            self.assertIn("RESULT: use  --components xyz --signs +++ --units mm", buf.getvalue())
+            best = _json(os.path.join(self.tmp, "conv_%s.json" % sel))["ranking"][0]
+            self.assertEqual((best["components"], best["signs"], best["swap_roles"]), ("xyz", "+++", False))
+            _say("--levels %s check-convention: best %s %s ncc %.4f" % (sel, best["components"], best["signs"],
+                                                                      best["ncc"]))
+
+    def test_refusal_and_force(self):
+        out = os.path.join(self.tmp, "out_refused")
+        with self.assertLogs("inference.predict", "ERROR"):
+            code = PR.run_predict(_run(self.ckpt, self.proc, out, "--branches", "affine", "--levels", "2"),
+                                  configure_device=False)
+        self.assertEqual(code, CLI.EXIT_INPUT)
+        rec = _json(os.path.join(out, "predict.json"))
+        self.assertEqual(rec["status"], "error")
+        self.assertIn("--allow-untrained-skip", rec["message"])
+        ent = rec["levels"]["exposure"]["entries"]
+        self.assertEqual([(e["task"], e["level"], e["status"]) for e in ent], [("affine", 2, "untrained")])
+        self.assertIsNone(rec["n_subjects"])                     # refused before reading subjects
+        self.assertFalse([f for f in os.listdir(out) if f.endswith("_fwd.nii.gz")])
+        out2 = os.path.join(self.tmp, "out_forced")
+        code2 = PR.run_predict(_run(self.ckpt, self.proc, out2, "--branches", "affine", "--levels", "2",
+                                    "--allow-untrained-skip"), configure_device=False)
+        rec2 = _json(os.path.join(out2, "predict.json"))
+        self.assertEqual(code2, 0, rec2["message"])
+        self.assertTrue(rec2["levels"]["exposure"]["forced"])
+        self.assertTrue(rec2["levels"]["allow_untrained_skip"])
+        self.assertTrue(any("forced (--allow-untrained-skip)" in w for w in rec2["warnings"]), rec2["warnings"])
+        self.assertTrue(os.path.isfile(os.path.join(out2, self.sdirs[0] + "_fwd.nii.gz")))
+        _say("refusal: %s" % rec["message"])
+
+    def test_level_not_in_checkpoint(self):
+        out = os.path.join(self.tmp, "out_l1")
+        with self.assertLogs("inference.predict", "ERROR"):
+            code = PR.run_predict(_run(self.ckpt, self.proc, out, "--branches", "deform", "--levels", "1"),
+                                  configure_device=False)
+        self.assertEqual(code, CLI.EXIT_INPUT)
+        rec = _json(os.path.join(out, "predict.json"))
+        self.assertIn("level-2 run with levels [4, 2]", rec["message"])
+        self.assertEqual(rec["levels"], {"requested": "1", "checkpoint_levels": [4, 2], "selected": None})
+
+    def test_low_exposure_warning(self):
+        args = _run(self.ckpt_low, self.proc, os.path.join(self.tmp, "out_low"), "--branches", "deform",
+                    "--levels", "2")
+        rec = {}
+        with self.assertLogs("inference.predict", "WARNING") as logs:
+            plan = PR._setup_levels(args, rec, 2)
+        self.assertEqual(plan.selected, (2,))
+        self.assertTrue(any("about 4.00 % of training steps" in m for m in logs.output), logs.output)
+        self.assertEqual(rec["levels"]["exposure"]["min_joint"], {"deform": 0.04})
+
+    def test_check_streaming_levels(self):
+        for sel in ("2", "4"):
+            out = os.path.join(self.tmp, "check_L%s.json" % sel)
+            code = PR.run_check_streaming(_parse("check-streaming", "--checkpoint", self.ckpt, "--processed-dir",
+                                                 self.proc, "--out", out, "--n-subjects", "3", "--levels", sel),
+                                          configure_device=False)
+            rec = _json(out)
+            self.assertEqual(code, 0, rec.get("message"))
+            self.assertEqual(rec["status"], "pass")
+            key = "l" + sel
+            self.assertEqual(rec["chunks"], {key: 2, "source": {key: "default"}, "capped": {}})
+            self.assertEqual(rec["chunk_bounds"]["streamed"], {key: {"deform": [[0, 2], [2, 3]]}})
+            self.assertEqual(rec["chunk_bounds"]["unchunked"], {key: {"deform": [[0, 3]]}})
+            self.assertEqual(rec["levels"]["selected"], [int(sel)])
+            _say("check-streaming --levels %s: %s" % (sel, {k: "%.2e" % v for k, v in
+                                                          rec["differences"]["deform"].items()}))
 
 
 # ============================================================================ level 1: (b) files
