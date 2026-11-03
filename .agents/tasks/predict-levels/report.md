@@ -244,3 +244,28 @@ rtx8000, running 13 h), so every submission above needs Jay's exception.
 SUBMITTED (Jay approved all four as an exception, 6 active jobs; clone at 8028b32): 10548270
 `L4`, 10548271 `L42`, 10548272 `L21`, 10548273 `L1` (results/predict_mindboggle/
 r1sw_lr1e-4_s3000_deform_L{4,42,21,1}, logs/bgr-predict-L*-<job>.out).
+
+## 7. Ablation results (all 4 jobs COMPLETED, 33-38 min each, exit 0)
+
+Gates: float32 streaming check (1a) PASS for all four; check-convention xyz +++ mm for all four.
+predict.json `levels`: L4 selected [4] truncated [2, 1]; L42 [4, 2] truncated [1]; L21 [2, 1]
+skipped [4] min_joint deform 0.15; L1 [1] skipped [4, 2] min_joint deform 0.0225. Non-blocking
+records: fp16 check (1b) exceeded its provisional bounds (rc 4) for L21, L1 and also for the
+existing 4,2,1 run; it passed for L4 and L42. The affine+deform record (1c) was refused (rc 2) for
+L21 and L1, as expected.
+
+Template-only metrics, mean over 101 Mindboggle subjects (4,2,1 = existing run
+r1sw_lr1e-4_s3000_deform):
+
+| metric | `4` | `4,2` | `4,2,1` | `2,1` | `1` |
+|---|---|---|---|---|---|
+| template Dice | 0.613 | 0.680 | **0.699** | 0.689 | 0.652 |
+| Dice cortical / subcortical | 0.578 / 0.665 | 0.659 / 0.711 | 0.684 / 0.722 | 0.669 / 0.719 | 0.630 / 0.685 |
+| template LNCC | 0.498 | 0.656 | **0.781** | 0.755 | 0.679 |
+| template NCC | 0.906 | 0.955 | 0.981 | 0.980 | 0.968 |
+| folding fwd / inv % | 0.0002 / 0.0002 | 0.015 / 0.048 | 0.211 / 0.491 | 0.280 / 0.642 | 0.110 / 0.083 |
+| log-Jacobian std fwd / inv | 0.319 / 0.351 | 0.459 / 0.570 | 0.684 / 0.852 | 0.743 / 1.041 | 0.852 / 1.121 |
+| inverse error fwd / inv mm | 0.40 / 0.42 | 0.62 / 0.64 | 0.76 / 0.75 | 0.63 / 0.77 | 0.32 / 0.42 |
+| centrality mean / max mm | 0.30 / 2.00 | 0.51 / 3.70 | 0.63 / 4.49 | 0.51 / 3.55 | 0.28 / 1.72 |
+| atlas_intensity_std | 0.108 | 0.080 | **0.059** | 0.060 | 0.069 |
+| mean |fwd| mm | 2.03 | 2.53 | 2.79 | 2.33 | 1.74 |
