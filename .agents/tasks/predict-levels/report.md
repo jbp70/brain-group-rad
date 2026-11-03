@@ -240,3 +240,7 @@ deform branch:
 
 squeue at that time: 2 jobs active (10542695 bgr-antsgw, basic, running 1 d; 10543287 r4cfgB0,
 rtx8000, running 13 h), so every submission above needs Jay's exception.
+
+SUBMITTED (Jay approved all four as an exception, 6 active jobs; clone at 8028b32): 10548270
+`L4`, 10548271 `L42`, 10548272 `L21`, 10548273 `L1` (results/predict_mindboggle/
+r1sw_lr1e-4_s3000_deform_L{4,42,21,1}, logs/bgr-predict-L*-<job>.out).
