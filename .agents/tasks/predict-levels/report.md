@@ -197,3 +197,46 @@ done
 Names: r1sw_lr1e-4_s3000_deform_L4, _L42, _L21, _L1 (no commas in directories or evaluation
 `--method`). Four jobs exceed the 2-active-job rule: they need Jay's per-job exception (or submit
 two at a time).
+
+The same four submissions written out (run from the clone after `git pull`):
+
+```bash
+P=/autofs/space/crater_001/users/jn85/BrainRegProjects/GroupwiseReg
+CK=$P/scratch/predict_ckpts/r1sw_lr1e-4_wd1e-1_n8_d4_s3000/ckpt/best_deform
+CC="--chunk-l4 3 --chunk-l2 3 --chunk-l1 3 --tol-field-max-mm 0.005"
+CKPT=$CK NAME=r1sw_lr1e-4_s3000_deform_L4  BRANCHES=deform LEVELS=4   CHECK_CHUNKS="$CC" sbatch --job-name=bgr-predict-L4  slurm/predict_mindboggle.sh
+CKPT=$CK NAME=r1sw_lr1e-4_s3000_deform_L42 BRANCHES=deform LEVELS=4,2 CHECK_CHUNKS="$CC" sbatch --job-name=bgr-predict-L42 slurm/predict_mindboggle.sh
+CKPT=$CK NAME=r1sw_lr1e-4_s3000_deform_L21 BRANCHES=deform LEVELS=2,1 CHECK_CHUNKS="$CC" sbatch --job-name=bgr-predict-L21 slurm/predict_mindboggle.sh
+CKPT=$CK NAME=r1sw_lr1e-4_s3000_deform_L1  BRANCHES=deform LEVELS=1   CHECK_CHUNKS="$CC" sbatch --job-name=bgr-predict-L1  slurm/predict_mindboggle.sh
+```
+
+Outputs: `$P/results/predict_mindboggle/r1sw_lr1e-4_s3000_deform_L{4,42,21,1}/` (fields,
+check_streaming_*.json, convention.json, eval_template), logs `$P/logs/bgr-predict-L*-<job>.out`.
+Expected: `L1` logs the low-exposure WARNING (2.25 %); step 1c (affine+deform record) exits 2 for
+`L21` and `L1` (linear level 4 never skipped in training) and the job continues.
+
+## 6. Cluster state (2026-11-03)
+
+Cluster clone pulled to `d20ddf3` (the report commit on top of code commit `5b27491`).
+
+Configs of the chain behind `scratch/predict_ckpts/r1sw_lr1e-4_wd1e-1_n8_d4_s3000` (read with
+grep on the login node):
+* `config.json` (level 1): `cascade_skip_deform` 4:0.15,2:0.15, `cascade_skip_linear`
+  4:0,2:0.15, `cascade_skip_prob` 0; `cascade_skip_stage_parsed` deform {4: 0.15, 2: 0.15},
+  rigid / affine {4: 0.0, 2: 0.15}; `cascade.source_config` =
+  `results/r2_s15000_lr3e-4_wd1e-1_n32_d16/config.json` (exists, readable; stage origins
+  r4sw_C_s16000 last-16000 and r2_s15000 last-15000).
+* Source (level 2): `cascade_skip_stage_parsed` deform {4: 0.15}, rigid / affine {4: 0.0}.
+
+So the source config is found and no entry is `unknown`. Exposure the new code computes for the
+deform branch:
+
+| `--levels` | kind | level-2 stage (r2 run) | level-1 stage (r1sw run) | result |
+|---|---|---|---|---|
+| `4` | truncation after 4 | - | - | runs |
+| `4,2` | truncation after 2 | - | - | runs |
+| `2,1` | skip 4 | joint 0.15 | joint 0.15 (exact pattern 0.1275) | runs |
+| `1` | skip 4 and 2 | - | joint 0.15 x 0.15 = 0.0225 | runs, WARNING (< 5 %) |
+
+squeue at that time: 2 jobs active (10542695 bgr-antsgw, basic, running 1 d; 10543287 r4cfgB0,
+rtx8000, running 13 h), so every submission above needs Jay's exception.
