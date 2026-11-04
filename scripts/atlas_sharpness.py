@@ -60,6 +60,10 @@ def main(argv=None):
     p.add_argument("--seg", action="append", required=True, help="atlas segmentation(s) for the masks")
     p.add_argument("--dilate", type=int, default=2)
     p.add_argument("--out", required=True)
+    p.add_argument("--show-subject", action="append", default=[], metavar="SUBJECT_DIR",
+                   help="also plot this subject's moved image per method (file name contains "
+                        "'<SUBJECT_DIR>_moved'), with its native image from --native-dir; repeatable")
+    p.add_argument("--native-dir", default=None, help="processed dir with <SUBJECT_DIR>/image.nii.gz")
     a = p.parse_args(argv)
     os.makedirs(a.out, exist_ok=True)
 
@@ -144,7 +148,39 @@ def main(argv=None):
         fig.tight_layout()
         fig.savefig(os.path.join(a.out, "spread.png"), dpi=110)
         plt.close(fig)
-    print("wrote", os.path.join(a.out, "sharpness.json"), "atlases.png", "spread.png")
+    # Moved images of selected subjects (same slices / window; native image first, unwarped).
+    for subj in a.show_subject:
+        rows = []
+        if a.native_dir and os.path.isfile(os.path.join(a.native_dir, subj, "image.nii.gz")):
+            nat = load(os.path.join(a.native_dir, subj, "image.nii.gz"))
+            rows.append(("native (unwarped)", nat / (float(np.percentile(nat[nat > 0], 99.5)) or 1.0)))
+        for spec in a.method:
+            name, rest = spec.split("=", 1)
+            parts = rest.split(",", 1)
+            if len(parts) < 2:
+                continue
+            hits = [f for f in glob.glob(parts[1]) if os.path.basename(f).startswith(subj + "_moved")]
+            if hits:
+                x = load(hits[0])
+                rows.append((name, x / (float(np.percentile(x[brain], 99.5)) or 1.0)))
+        if not rows:
+            print("WARNING: no images found for subject %s" % subj)
+            continue
+        fig, axes = plt.subplots(len(rows), 4, figsize=(16, 4 * len(rows)), squeeze=False)
+        for i, (n, img) in enumerate(rows):
+            for j, (title, f) in enumerate(views):
+                axes[i][j].imshow(f(img), cmap="gray", vmin=0, vmax=1, origin="lower")
+                axes[i][j].set_title("%s  %s  %s" % (subj, n, title), fontsize=9)
+            axes[i][3].imshow(img[zoom[0], zoom[1], cz].T, cmap="gray", vmin=0, vmax=1, origin="lower",
+                              interpolation="nearest")
+            axes[i][3].set_title("%s  axial zoom" % n, fontsize=9)
+            for ax in axes[i]:
+                ax.axis("off")
+        fig.tight_layout()
+        fig.savefig(os.path.join(a.out, "moved_%s.png" % subj), dpi=100)
+        plt.close(fig)
+    print("wrote", os.path.join(a.out, "sharpness.json"), "atlases.png", "spread.png",
+          " ".join("moved_%s.png" % s for s in a.show_subject))
     return 0
 
 

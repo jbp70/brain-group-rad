@@ -34,6 +34,10 @@ for r in $RUNS; do
     PI+=(--method "$r=$F/{subject_dir}_moved.nii.gz,$F/{subject_dir}_fwd.nii.gz")
 done
 SH+=(--method "multimorph=$MM/atlas.nii.gz,$MM/*_T1w_moved.nii.gz")
+# Moved-image panels of a few subjects (native image first), e.g. SHOW_SUBJECTS="OASIS-TRT-20-1_T1w".
+SHOW_SUBJECTS=${SHOW_SUBJECTS:-"OASIS-TRT-20-1_T1w MMRR-21-1_T1w NKI-RS-22-1_T1w"}
+for s in $SHOW_SUBJECTS; do SH+=(--show-subject "$s"); done
+SH+=(--native-dir "$PROJ/data/processed/mindboggle")
 PI+=(--method "multimorph=$MM/{subject_dir}_moved.nii.gz,$MM/{subject_dir}_fwd.nii.gz")
 mkdir -p "$OUT"
 echo "host $(hostname)  job ${SLURM_JOB_ID:-none}  repo $(git -C "$REPO" log --oneline -1)  runs: $RUNS"
