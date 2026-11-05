@@ -39,6 +39,7 @@
 #   EXTRA         more flags for `predict.py run`, e.g. "--check-internal 4"
 #   LEVELS        cascade levels for steps 1a, 1b, 1c and 2 (predict-levels), e.g. 4 | 4,2 | 2,1 | 1
 #                 (default empty: all levels of the checkpoint, no flag). Use NAME without commas.
+#   SCRATCH_ROOT  parent of TMPDIR (default /scratch; glacier: a folder under $PROJ)
 #   ALLOW_UNTRAINED_SKIP  1 adds --allow-untrained-skip (run a skip the chain never trained with;
 #                 default empty: such a selection is refused with exit 2). Step 1c (affine+deform)
 #                 is refused for LEVELS 2,1 / 2 / 1 on checkpoints whose linear level 4 was never
@@ -75,7 +76,9 @@ ALLOW_UNTRAINED_SKIP=${ALLOW_UNTRAINED_SKIP:-}
 LEVEL_FLAGS=""
 if [ -n "$LEVELS" ]; then LEVEL_FLAGS="--levels $LEVELS"; fi
 if [ "$ALLOW_UNTRAINED_SKIP" = "1" ]; then LEVEL_FLAGS="$LEVEL_FLAGS --allow-untrained-skip"; fi
-export TMPDIR=/scratch/${SLURM_JOB_ID:-manual}
+# SCRATCH_ROOT (default /scratch, node-local on SLURM): on glacier set it inside the project folder
+# (e.g. $PROJ/scratch/glacier_tmp), since glacier's /scratch is outside the approved folders.
+export TMPDIR=${SCRATCH_ROOT:-/scratch}/${SLURM_JOB_ID:-manual}
 mkdir -p "$TMPDIR" "$OUT"
 echo "host $(hostname)  job ${SLURM_JOB_ID:-none}  repo $(git -C "$REPO" log --oneline -1)"
 echo "checkpoint $CKPT  branches $BRANCHES  out $OUT  levels ${LEVELS:-all}"
