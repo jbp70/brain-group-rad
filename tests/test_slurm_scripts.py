@@ -21,6 +21,7 @@ M10C = os.path.join(REPO, "slurm", "m10_batch_memory_capped.sh")
 M11SRC = os.path.join(REPO, "slurm", "m11_random_sources.sh")
 M11 = os.path.join(REPO, "slurm", "m11_fp32_width_memory.sh")
 PREDICT = os.path.join(REPO, "slurm", "predict_mindboggle.sh")
+EVAL_SYNTH = os.path.join(REPO, "slurm", "eval_synth.sh")
 # Env of slurm/m11_random_sources.sh removed from the inherited environment (TestM11Sources).
 M11_SOURCE_ENV = ("SOURCES_DIR", "SOURCE_WIDTHS", "SOURCE_L4_ONLY", "SOURCE_N", "SOURCE_TIMEOUT", "BGR_DRY_RUN",
                   "STUB_FAIL_LEVEL",
@@ -273,9 +274,28 @@ class TestStatic(unittest.TestCase):
         self.assertIn('CONV="--components xyz --signs +++ --units mm"', text)
         self.assertIn("sbatch slurm/eval_mindboggle.sh", text)
 
+    def test_eval_synth_header(self):
+        """synth-contrast design 8 (FEAT-005): exact SBATCH policy lines, usage line, approval note."""
+        text = _read(EVAL_SYNTH)
+        self.assertNotIn("\r", text)
+        self.assertNotIn("entre", text.lower())
+        for line in ("#SBATCH -A qtim\n", "#SBATCH -p rtx8000\n", "#SBATCH --gpus=1\n", "#SBATCH -N 1\n",
+                     "#SBATCH --ntasks-per-node=1\n", "#SBATCH --cpus-per-task=3\n", "#SBATCH --mem=128G\n",
+                     "#SBATCH --time=08:00:00\n", "#SBATCH --output=%s/%%x-%%j.out\n" % LOGS,
+                     "#SBATCH --error=%s/%%x-%%j.err\n" % LOGS, "set -euo pipefail\n"):
+            self.assertIn(line, text)
+        self.assertEqual(len(re.findall(r"^#SBATCH --mem=", text, re.M)), 1)
+        for k in ("DO NOT submit without Jay's approval", SIF, "mkdir -p %s" % LOGS,
+                  'RUNS="<real-only config B L1 run> $R/r1_cfgB_synth05" sbatch --job-name=evalsyn '
+                  '--time=08:00:00 --mem=128G slurm/eval_synth.sh',
+                  'sstat -j "$SLURM_JOB_ID.batch" --format=MaxRSS >> "$OUT/sstat.txt"',
+                  'OUT="${OUT:-$PROJ/results/eval_synth/$JOB_ID}"', "singularity exec --nv", "</dev/null"):
+            self.assertIn(k, text, k)
+        self.assertTrue(all(ord(c) < 128 for c in text))
+
     @unittest.skipIf(BASH is None, "bash not available")
     def test_bash_syntax(self):
-        for path in SCRIPTS + (M10C, M11, PREDICT):
+        for path in SCRIPTS + (M10C, M11, PREDICT, EVAL_SYNTH):
             r = subprocess.run([BASH, "-n", path], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                universal_newlines=True)
             self.assertEqual(r.returncode, 0, r.stderr)
@@ -1122,6 +1142,168 @@ class TestM11Job(unittest.TestCase):
         self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
         self.assertEqual(len(calls), 2, calls)
         self.assertIn("collector exit code 2", r.stdout)
+
+
+VERIFY_SYNTH = os.path.join(REPO, "slurm", "verify_synth.sh")
+SYNTH_PREVIEW = os.path.join(REPO, "slurm", "synth_preview.sh")
+SYNTH_PREVIEW_ENV = ("PROJ", "REPO", "DATA", "SIF", "SLURM_JOB_ID", "N", "SEED", "N_GROUPS", "SPLIT", "LABEL_SET",
+                     "BGR_DRY_RUN")
+
+
+class TestSynthScripts(unittest.TestCase):
+    """synth-contrast FEAT-004 (plan deviations D-c / D-d): slurm/verify_synth.sh (GPU checks s1-s3,
+    rtx8000) and slurm/synth_preview.sh (CPU preview PNGs on the basic partition)."""
+
+    def common(self, text):
+        self.assertNotIn("\r", text)
+        self.assertTrue(all(ord(c) < 128 for c in text))
+        self.assertIn("#SBATCH -A qtim\n", text)
+        self.assertNotIn("entre", text.lower())
+        self.assertNotRegex(text, r"(?m)^#SBATCH -A (?!qtim$)")
+        for line in ("#SBATCH -N 1\n", "#SBATCH --ntasks-per-node=1\n",
+                     "#SBATCH --output=%s/%%x-%%j.out\n" % LOGS, "#SBATCH --error=%s/%%x-%%j.err\n" % LOGS):
+            self.assertIn(line, text)
+        self.assertIn(SIF, text)
+        self.assertIn("DO NOT submit without Jay's approval", text)
+        self.assertEqual(len(re.findall(r"(?m)^#SBATCH --mem=", text)), 1)
+
+    def test_verify_synth_header(self):
+        text = _read(VERIFY_SYNTH)
+        self.common(text)
+        for line in ("#SBATCH -p rtx8000\n", "#SBATCH --gpus=1\n", "#SBATCH --cpus-per-task=3\n",
+                     "#SBATCH --mem=64G\n", "#SBATCH --time=01:00:00\n"):
+            self.assertIn(line, text)
+        for k in ("--checks s", "for lvl in 4 1; do", '--out "$OUT/verify_synth_l$lvl.json"',
+                  'OUT="$PROJ/scratch/verify_synth"', "sbatch slurm/verify_synth.sh", "</dev/null"):
+            self.assertIn(k, text, k)
+
+    def test_synth_preview_header(self):
+        text = _read(SYNTH_PREVIEW)
+        self.common(text)
+        for line in ("#SBATCH -p basic\n", "#SBATCH --cpus-per-task=2\n", "#SBATCH --mem=16G\n",
+                     "#SBATCH --time=00:30:00\n"):
+            self.assertIn(line, text)
+        self.assertNotIn("--gpus", text)
+        self.assertNotIn("--nv", text)                         # CPU only, container without --nv
+        self.assertIn("singularity exec -B /autofs -B /cluster -B /space", text)
+        self.assertIn("BGR_DRY_RUN=1", text)
+        self.assertIn("mkdir -p %s" % LOGS, text)
+
+    @unittest.skipIf(BASH is None, "bash not available")
+    def test_bash_syntax(self):
+        for path in (VERIFY_SYNTH, SYNTH_PREVIEW):
+            r = subprocess.run([BASH, "-n", path], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               universal_newlines=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+
+    @unittest.skipIf(BASH is None, "bash not available")
+    def test_synth_preview_dry_run(self):
+        tmp = tempfile.mkdtemp(prefix="synth_preview_test_")
+        try:
+            env = {k: v for k, v in os.environ.items() if k not in SYNTH_PREVIEW_ENV}
+            env.update(PROJ=tmp, BGR_DRY_RUN="1", SLURM_JOB_ID="77")
+
+            def run(**extra):
+                e = dict(env, **extra)
+                return subprocess.run([BASH, SYNTH_PREVIEW], env=e, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                      universal_newlines=True, stdin=subprocess.DEVNULL)
+
+            r = run()
+            self.assertEqual(r.returncode, 0, r.stderr)
+            lines = [ln for ln in r.stdout.splitlines() if ln.startswith("PREVIEW: ")]
+            self.assertEqual(len(lines), 3, r.stdout)
+            for lvl, ln in zip((4, 2, 1), lines):
+                self.assertIn("singularity exec -B /autofs -B /cluster -B /space %s python scripts/synth_preview.py"
+                              % SIF, ln)
+                self.assertIn("--data %s/data/npy_v2 --level %d --n 8 --seed 0 --groups 2 --split train "
+                              "--label-set synthfine --out %s/scratch/synth_preview/77/l%d.png" % (tmp, lvl, tmp, lvl),
+                              ln)
+                self.assertNotIn("--nv", ln)
+            self.assertEqual(os.listdir(tmp), [])                # dry run writes nothing
+            for bad in (dict(N="x"), dict(N_GROUPS="-1"), dict(LABEL_SET="a b")):
+                r = run(**bad)
+                self.assertEqual(r.returncode, 2, (bad, r.stdout, r.stderr))
+                self.assertIn("ERROR", r.stderr)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+EVAL_SYNTH_ENV = ("RUNS", "LEVEL", "OUT", "PRESETS", "DATA", "BGR_DRY_RUN", "PROJ", "REPO", "SIF",
+                  "SCRATCH_ROOT", "SLURM_JOB_ID", "TMPDIR")
+
+
+@unittest.skipIf(BASH is None, "bash not available")
+class TestEvalSynthScript(unittest.TestCase):
+    """synth-contrast FEAT-005: slurm/eval_synth.sh dry run (argv parses with eval_synth.py's
+    parser, nothing written), validation exits 2, stub run (one --nv container call)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="evalsyn_")
+        self.env = {k: v for k, v in os.environ.items() if k not in EVAL_SYNTH_ENV}
+        self.env.update(PROJ=os.path.join(self.tmp, "proj"), SLURM_JOB_ID="88")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def run_script(self, **extra):
+        e = dict(self.env, **extra)
+        return subprocess.run([BASH, EVAL_SYNTH], env=e, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              universal_newlines=True, stdin=subprocess.DEVNULL)
+
+    def test_dry_run_argv(self):
+        import sys
+        if REPO not in sys.path:
+            sys.path.insert(0, REPO)
+        import eval_synth as ES
+        r = self.run_script(BGR_DRY_RUN="1", RUNS="a b")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        lines = [ln for ln in r.stdout.splitlines() if ln.startswith("MAIN: ")]
+        self.assertEqual(len(lines), 1, r.stdout)
+        argv = lines[0][len("MAIN: "):].split()
+        self.assertEqual(argv[:2], ["python", "eval_synth.py"])
+        self.assertEqual(argv[2:], ["--runs", "a", "b", "--level", "1", "--out",
+                                    os.path.join(self.tmp, "proj", "results", "eval_synth", "88")])
+        ns = ES.build_parser().parse_args(argv[2:])
+        self.assertEqual((ns.runs, ns.level, ns.presets, ns.data, ns.sanity_gate), (["a", "b"], 1, "", None, "on"))
+        r = self.run_script(BGR_DRY_RUN="1", RUNS="a", LEVEL="4", PRESETS="random_0,t2_like", DATA="/d",
+                            OUT="/o")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        argv = [ln for ln in r.stdout.splitlines() if ln.startswith("MAIN: ")][0].split()[3:]
+        self.assertEqual(argv, ["--runs", "a", "--level", "4", "--out", "/o", "--presets", "random_0,t2_like",
+                                "--data", "/d"])
+        ES.build_parser().parse_args(argv)
+        self.assertEqual(os.listdir(self.tmp), [])           # dry run writes nothing
+
+    def test_validation_exits_2(self):
+        for bad in (dict(RUNS=""), dict(RUNS="a b c"), dict(RUNS="a", LEVEL="3"),
+                    dict(RUNS="a", PRESETS="t2 like")):
+            r = self.run_script(BGR_DRY_RUN="1", **bad)
+            self.assertEqual(r.returncode, 2, (bad, r.stdout, r.stderr))
+            self.assertIn("ERROR", r.stderr)
+            self.assertNotIn("MAIN:", r.stdout)
+
+    def test_stub_run(self):
+        bindir = os.path.join(self.tmp, "bin")
+        os.makedirs(bindir)
+        log = os.path.join(self.tmp, "calls.log")
+        for name, body in (("singularity", '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s"\nexit 5\n' % log),
+                           ("git", "#!/bin/sh\nexit 0\n"), ("sstat", "#!/bin/sh\necho MaxRSS\necho 1234K\n")):
+            p = os.path.join(bindir, name)
+            with open(p, "w") as f:
+                f.write(body)
+            os.chmod(p, os.stat(p).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        os.makedirs(os.path.join(self.tmp, "repo"))
+        out = os.path.join(self.tmp, "out")
+        r = self.run_script(RUNS="r1 r2", OUT=out, REPO=os.path.join(self.tmp, "repo"),
+                            SIF=os.path.join(self.tmp, "x.sif"), SCRATCH_ROOT=os.path.join(self.tmp, "scratch"),
+                            PATH=bindir + os.pathsep + os.environ.get("PATH", ""))
+        self.assertEqual(r.returncode, 5, r.stderr)              # the container's exit code
+        calls = _read(log).splitlines()
+        self.assertEqual(len(calls), 1, calls)
+        self.assertIn("exec --nv", calls[0])
+        self.assertIn("python eval_synth.py --runs r1 r2 --level 1 --out %s" % out, calls[0])
+        self.assertIn("1234K", _read(os.path.join(out, "sstat.txt")))
+        self.assertTrue(os.path.isdir(os.path.join(self.tmp, "scratch", "88")))
 
 
 if __name__ == "__main__":

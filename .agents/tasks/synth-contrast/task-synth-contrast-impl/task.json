@@ -1,0 +1,7 @@
+{
+  "task_id": "task-synth-contrast-impl",
+  "task_description": "Implement the approved SynthMorph-style synthetic-contrast training design (.agents/tasks/synth-contrast/design.md v4 + review NITs + orchestrator decisions OD1-OD6 in plan.md): add-only synthfine label export, TF-side hierarchical contrast synthesis under tf.cond with a separate cortical parcel deviation, DALI label input for the linear pipelines, trainer/CLI wiring with keyword-only labels and synthetic BN-recal slots, run-checker rules, SLURM script env, preview tool, GPU checks and a separate post-training synthetic evaluation. Default off must be bit-identical. No commits, pushes or cluster jobs.",
+  "status": "completed",
+  "feature_order": ["FEAT-001", "FEAT-002", "FEAT-003", "FEAT-004", "FEAT-005"],
+  "blocked_reason": null
+}

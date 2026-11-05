@@ -11,7 +11,10 @@ Commands:
   export-npy         processed NIfTI -> per-level .npy (full, _2, _4): float32 image,
                      uint8 train18 labels; T1w only by default; chunkable (--start/--end)
   export-merge       merge the export-npy manifest parts into export_manifest.csv
-  export-check       verify an export (dtypes, shapes, label range, world centers)
+  export-check       verify an export (dtypes, shapes, label range, world centers,
+                     synthfine/train18 consistency)
+  export-add-labels  add-only: add the synthfine label set to an existing export
+                     (--phase files per row chunk, then --phase manifest once)
   cleanup            delete work/, mask.nii.gz and/or qc.png of completed rows (--dry-run first)
   n-chunks           number of SLURM array tasks for a manifest and chunk size
 
@@ -228,6 +231,22 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--sample", type=int, default=20, help="random cases to check (default 20; 0 = all)")
     s.add_argument("--seed", type=int, default=0)
 
+    s = sub.add_parser("export-add-labels", help="add-only: add a label set (synthfine) to an existing export",
+                       formatter_class=argparse.RawDescriptionHelpFormatter,
+                       description=__import__("preprocessing.add_labels", fromlist=["x"]).__doc__)
+    s.add_argument("--out-root", default=None,
+                   help="processed NIfTI root with <dataset>/<subject_dir>/labels_synthseg.nii.gz "
+                        "(required for --phase files)")
+    s.add_argument("--export-root", required=True, help="existing export root (export_manifest.csv)")
+    s.add_argument("--label-set", default="synthfine", help="label set to add (only synthfine)")
+    s.add_argument("--phase", choices=("files", "manifest"), required=True,
+                   help="files: per-case npy for manifest rows [--start, --end); manifest: once after all "
+                        "file chunks, appends the set to the manifest, parts and LUTs")
+    s.add_argument("--start", type=int, default=None,
+                   help="first export_manifest.csv data row (inclusive, default 0; --phase files only)")
+    s.add_argument("--end", type=int, default=None,
+                   help="last data row (exclusive, clipped to the row count, default all; --phase files only)")
+
     s = sub.add_parser("cleanup", help="delete work/, mask.nii.gz, qc.png of completed rows",
                        formatter_class=argparse.RawDescriptionHelpFormatter,
                        description=__import__("preprocessing.cleanup", fromlist=["x"]).__doc__)
@@ -434,6 +453,15 @@ def cmd_export_check(a) -> int:
     return 0 if not problems else 1
 
 
+def cmd_export_add_labels(a) -> int:
+    from .add_labels import run_phase
+    try:
+        return int(run_phase(a.phase, a.export_root, a.label_set, a.out_root, a.start, a.end))
+    except ValueError as e:  # usage: unsupported set, invalid range, --start/--end with manifest
+        log.error("export-add-labels: %s", e)
+        return 2
+
+
 def cmd_cleanup(a) -> int:
     from .cleanup import cleanup
     try:
@@ -467,7 +495,7 @@ class _StderrHandler(logging.StreamHandler):
 COMMANDS = {"check-tools": cmd_check_tools, "build-manifest": cmd_build_manifest,
             "build-target-grid": cmd_build_target_grid, "run": cmd_run, "synthseg": cmd_synthseg,
             "qc-summary": cmd_qc_summary, "export-npy": cmd_export_npy, "export-merge": cmd_export_merge,
-            "export-check": cmd_export_check, "cleanup": cmd_cleanup, "n-chunks": cmd_n_chunks}
+            "export-check": cmd_export_check, "export-add-labels": cmd_export_add_labels, "cleanup": cmd_cleanup, "n-chunks": cmd_n_chunks}
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

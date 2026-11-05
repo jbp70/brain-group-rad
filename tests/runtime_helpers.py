@@ -43,11 +43,50 @@ def free_memory():
     gc.collect()
 
 
-def write_fake_export(tmp, n_train=3, n_val=2, level=4, seed=0, labels=False):
+def fine_labels_from_train18(lab, rng):
+    """train18-class label map (uint8, e.g. `fd.synthetic_label_phantom` labels 1..8 read as
+    train18 classes) -> synthfine ids (uint8, same shape) with
+    ``luts.synthfine_to_train18_table()[fine] == lab`` (synth-contrast tests).
+
+    ``lab``: [X, Y, Z] (x = axis 0). Every class voxel gets a fine id of its class: class 2
+    (cortex) is split into 4 spatially coherent parcels (4 equal x slabs of the class's own x
+    extent, parcel ids drawn from the 72 cortical ids with ``rng``), classes
+    with two (hemispheric) fine ids are split left/right at the x mid-plane, single-id classes
+    map directly."""
+    from preprocessing import luts
+    lab = np.asarray(lab)
+    if lab.size and int(lab.max()) >= P.N_TRAIN_LABELS:
+        raise ValueError("train18 labels must be < %d" % P.N_TRAIN_LABELS)
+    table = luts.synthfine_to_train18_table()[:len(luts.LUTS["synthfine"]["map"])]
+    x = np.arange(lab.shape[0]).reshape((-1,) + (1,) * (lab.ndim - 1))
+    x = np.broadcast_to(x, lab.shape)
+    out = np.zeros(lab.shape, np.uint8)
+    for c in np.unique(lab):
+        c = int(c)
+        if c == 0:
+            continue
+        ids = np.nonzero(table == c)[0]
+        sel = lab == c
+        if c == 2:
+            parcels = np.sort(rng.choice(ids, size=4, replace=False))
+            xs = x[sel]
+            lo, span = int(xs.min()), int(xs.max()) - int(xs.min()) + 1
+            out[sel] = parcels[np.minimum((xs - lo) * 4 // span, 3)]
+        elif ids.size == 2:
+            out[sel] = np.where(x[sel] < lab.shape[0] // 2, ids[0], ids[1])
+        else:
+            out[sel] = ids[0]
+    return out
+
+
+def write_fake_export(tmp, n_train=3, n_val=2, level=4, seed=0, labels=False, fine_labels=False):
     """Tiny export (manifest + level .npy images + template mask) under <tmp>/export.
 
     ``labels=True``: images come from `fd.synthetic_label_phantom` and each case also gets its
-    aligned ``labels_train18<suffix>.npy`` (uint8) and the ``labels_l<k>`` column."""
+    aligned ``labels_train18<suffix>.npy`` (uint8) and the ``labels_l<k>`` column.
+    ``fine_labels=True`` (with ``labels=True``): also ``labels_synthfine<suffix>.npy``
+    (`fine_labels_from_train18`, own rng so the images are unchanged), listed in ``labels_l<k>``
+    as ``labels_train18<suffix>.npy;labels_synthfine<suffix>.npy``."""
     import csv
     import os
     from runtime import fixed_data as fd
@@ -56,6 +95,7 @@ def write_fake_export(tmp, n_train=3, n_val=2, level=4, seed=0, labels=False):
     suffix = P.level_suffix(level)
     rows = []
     rng = np.random.default_rng(seed)
+    fine_rng = np.random.default_rng(seed + 1) if (labels and fine_labels) else None
     for split, n in (("train", n_train), ("val", n_val)):
         for i in range(n):
             sub = "%s_%02d" % (split, i)
@@ -68,6 +108,10 @@ def write_fake_export(tmp, n_train=3, n_val=2, level=4, seed=0, labels=False):
                 img, lab = fd.synthetic_label_phantom(shape, rng)
                 lname = "labels_train18%s.npy" % suffix
                 np.save(os.path.join(d, lname), lab)
+                if fine_rng is not None:
+                    fname = "labels_synthfine%s.npy" % suffix
+                    np.save(os.path.join(d, fname), fine_labels_from_train18(lab, fine_rng))
+                    lname = lname + ";" + fname
                 row["labels_l%d" % level] = lname
             else:
                 img = fd.smooth_phantom(shape, rng)[0]

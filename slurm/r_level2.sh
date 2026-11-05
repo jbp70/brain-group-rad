@@ -111,6 +111,21 @@
 # The per-task non-finite guard (--nonfinite-patience-task, default 20) is always on; override
 # with EXTRA_ARGS. The checker also fails a task with > 5 % non-finite steps in any 500-step
 # window after step 100 (--max-window-nonfinite-frac 0.05).
+#
+# Synthetic contrast (design .agents/tasks/synth-contrast/design.md 5.5 / 7.2; default off).
+#   SYNTH_PROB (default 0; 0 <= p <= 1), SYNTH_JITTER (0.08), SYNTH_DEVICE (gpu | cpu),
+#   SYNTH_LABEL_SET (synthfine; needs the export-add-labels synthfine export). The four
+#   --synth-* flags appear in MAIN (before EXTRA_ARGS) ONLY when SYNTH_PROB > 0, and then the
+#   checker gets --expect-synth-prob $SYNTH_PROB; with SYNTH_PROB 0 the command lines are unchanged.
+#   MIN_TASK_STEPS (default empty = not passed; e.g. rigid:20,affine:20,deform:40) -> checker
+#   --min-task-steps (every listed task traced once and executed at least that many steps).
+#   GPU_POLL (true | false, default false): nvidia-smi device-memory poll on the host every 5 s into
+#   $RESULTS/$RUN_NAME/gpu_poll.csv while main.py runs (stopped after main.py, trap on EXIT).
+#   Smoke criterion: max(memory.used) <= memory.total - 512 MiB, and within 0.5 GB of the paired
+#   p 0 run. Paired L2 smokes after both L4 smokes finished (design 7.2; R = $PROJ/results):
+#   for P in 0 0.5; do T=${P/./}
+#     RUN_NAME=r2syn_smoke_p$T CASCADE_FROM=$R/r4syn_smoke_p$T/ckpt/last STEPS=200 VAL_EVERY=100 WARMUP=50 PROJECT_STEPS=15000 PROJECT_VAL_EVERY=500 WD=1e-1 SYNTH_PROB=$P GPU_POLL=true MIN_TASK_STEPS=rigid:20,affine:20,deform:40 EXTRA_ARGS="--group-config B --lambda-smooth 0.5" sbatch --job-name=r2synsm$T --time=03:00:00 --mem=64G slurm/r_level2.sh
+#   done
 set -euo pipefail
 
 PROJ="${PROJ:-/autofs/space/crater_001/users/jn85/BrainRegProjects/GroupwiseReg}"
@@ -265,6 +280,38 @@ if [ "$DEFORM_DECODER_DTYPE" != policy ]; then
 fi
 if is_pos "$BN_EPSILON_OVERRIDE"; then MITIG_ARGS="$MITIG_ARGS --bn-epsilon-override $BN_EPSILON_OVERRIDE"; fi
 
+# Synthetic contrast (synth-contrast design 5.5; default off: no flag is emitted at SYNTH_PROB 0).
+SYNTH_PROB="${SYNTH_PROB:-0}"
+SYNTH_JITTER="${SYNTH_JITTER:-0.08}"
+SYNTH_DEVICE="${SYNTH_DEVICE:-gpu}"
+SYNTH_LABEL_SET="${SYNTH_LABEL_SET:-synthfine}"
+GPU_POLL="${GPU_POLL:-false}"
+MIN_TASK_STEPS="${MIN_TASK_STEPS:-}"
+need_float SYNTH_PROB "$SYNTH_PROB"
+need_float SYNTH_JITTER "$SYNTH_JITTER"
+awk -v x="$SYNTH_PROB" 'BEGIN { exit !(x + 0 <= 1) }' || die "SYNTH_PROB must be <= 1, got '$SYNTH_PROB'"
+need_choice SYNTH_DEVICE "$SYNTH_DEVICE" gpu cpu
+need_choice GPU_POLL "$GPU_POLL" true false
+LABEL_SET_RE='^[A-Za-z0-9_-]+$'
+[[ "$SYNTH_LABEL_SET" =~ $LABEL_SET_RE ]] || die "SYNTH_LABEL_SET must match [A-Za-z0-9_-]+, got '$SYNTH_LABEL_SET'"
+# same syntax as TASK_RATIO (task:count list)
+if [ -n "$MIN_TASK_STEPS" ] && ! [[ "$MIN_TASK_STEPS" =~ $RATIO_RE ]]; then
+    die "MIN_TASK_STEPS must look like rigid:20,affine:20,deform:80 or be empty, got '$MIN_TASK_STEPS'"
+fi
+SYNTH_ARGS=""
+SYNTH_CHECK=""
+if is_pos "$SYNTH_PROB"; then
+    SYNTH_ARGS="--synth-prob $SYNTH_PROB --synth-jitter $SYNTH_JITTER --synth-device $SYNTH_DEVICE --synth-label-set $SYNTH_LABEL_SET"
+    SYNTH_CHECK="--expect-synth-prob $SYNTH_PROB"
+fi
+if [ -n "$MIN_TASK_STEPS" ]; then SYNTH_CHECK="$SYNTH_CHECK --min-task-steps $MIN_TASK_STEPS"; fi
+# GPU_POLL: device-level memory poll on the host (outside the container, where CUDA_VISIBLE_DEVICES
+# names the allocated GPU; unset -> device 0), every 5 s into $RESULTS/$RUN_NAME/gpu_poll.csv.
+POLL_DEV="${CUDA_VISIBLE_DEVICES:-0}"
+POLL_DEV="${POLL_DEV%%,*}"
+POLL_CMD=(nvidia-smi -i "$POLL_DEV" --query-gpu=timestamp,memory.used,memory.total
+          --format=csv,noheader,nounits -l 5)
+
 DEFORM_LOSSES="--lambda-dice-template 1 --lambda-pdice 1 --lambda-ncc-template 1 --lambda-ncc-pair 1 --lambda-smooth 0.5 --p-pdice 0.1"
 if [ "$HAS_DEFORM" = true ]; then
     if [ "$GRAD_CKPT" = none ]; then
@@ -312,7 +359,7 @@ MAIN=(main.py --data "$DATA" --results "$RESULTS" --run-name "$RUN_NAME" --level
       --cascade-skip-linear "$SKIP_LINEAR" --cascade-skip-deform "$SKIP_DEFORM" $LIN_ARGS
       --val-pair-chunk "$VAL_PAIR_CHUNK" --val-png true
       --num-threads "${SLURM_CPUS_PER_TASK:-3}" --log-every 25 --log-backend jsonl
-      $VAL_ARGS $DEFORM_ARGS $MEM_ARGS $WIDTH_ARGS $MITIG_ARGS $EXTRA_ARGS)
+      $VAL_ARGS $DEFORM_ARGS $MEM_ARGS $WIDTH_ARGS $MITIG_ARGS $SYNTH_ARGS $EXTRA_ARGS)
 # AMP: the dynamic loss scale overflows a few times early on (m8: 10-11 of 8000), hence 0.06.
 # Per task: FAIL if > 5 % of a task's steps in any 500-step window after step 100 are non-finite.
 # shellcheck disable=SC2206
@@ -320,11 +367,12 @@ CHECK=(tests/gpu/check_mixed_run.py "$RESULTS/$RUN_NAME" --tasks "$TASKS" --step
        --expect-min-pairs "$MIN_PAIRS" --max-nonfinite-frac 0.06 --max-window-nonfinite-frac 0.05
        --memory-budget-mb 36864
        --project-steps "$PROJECT_STEPS" --project-val-every "$PROJECT_VAL_EVERY" --expect-enc-grad true
-       $BALANCE_CHECK $LEVEL_CHECK_ARGS)
+       $BALANCE_CHECK $LEVEL_CHECK_ARGS $SYNTH_CHECK)
 
 if [ "$BGR_DRY_RUN" = "1" ]; then
     echo "MAIN: python ${MAIN[*]}"
     echo "CHECK: python ${CHECK[*]}"
+    if [ "$GPU_POLL" = true ]; then echo "POLL: ${POLL_CMD[*]} > $RESULTS/$RUN_NAME/gpu_poll.csv"; fi
     exit 0
 fi
 
@@ -349,10 +397,28 @@ echo "optimizer $OPTIMIZER | lr $LR | wd $WD | grad balance $GRAD_BALANCE ($BAL_
 echo "memory: grad ckpt $GRAD_CKPT | pair recompute $PAIR_RECOMPUTE | lean losses $LEAN_LOSSES | tf memory limit ${TF_MEM_LIMIT_MB} MB (0 = growth) | val group ${VAL_GROUP_SIZE:-default} | val pair chunk $VAL_PAIR_CHUNK"
 echo "widths: filters ${FILTERS:-default} | decoder ${DECODER_WIDTHS:-default}"
 echo "fp16 act clip $FP16_ACT_CLIP ($FP16_ACT_CLIP_SCOPE) | deform decoder dtype $DEFORM_DECODER_DTYPE | bn epsilon override $BN_EPSILON_OVERRIDE (0 = off)"
+echo "synth: p $SYNTH_PROB | jitter $SYNTH_JITTER | device $SYNTH_DEVICE | label set $SYNTH_LABEL_SET | gpu poll $GPU_POLL | min task steps ${MIN_TASK_STEPS:-none}"
+
+POLL_PID=""
+stop_poll() {
+    if [ -n "$POLL_PID" ]; then
+        kill "$POLL_PID" 2>/dev/null || true
+        wait "$POLL_PID" 2>/dev/null || true
+        POLL_PID=""
+    fi
+}
+if [ "$GPU_POLL" = true ]; then
+    mkdir -p "$RESULTS/$RUN_NAME"
+    "${POLL_CMD[@]}" > "$RESULTS/$RUN_NAME/gpu_poll.csv" 2>/dev/null &
+    POLL_PID=$!
+    trap stop_poll EXIT
+    echo "gpu poll: pid $POLL_PID -> $RESULTS/$RUN_NAME/gpu_poll.csv (device $POLL_DEV)"
+fi
 
 rc=0
 singularity exec --nv -B /scratch -B /autofs -B /cluster -B /space -B /vast "$SIF" \
     python "${MAIN[@]}" </dev/null || rc=$?
+stop_poll
 echo "main.py exit code $rc $(date -Is)"
 if [ "$rc" -ne 0 ]; then
     exit "$rc"

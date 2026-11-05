@@ -142,6 +142,10 @@ class LinearDataModule:
         the trainer keeps writing through.
       control_init: {task: `params.control_vector` keyword dict} initial values (None -> the
         task's ranges with G = identity).
+      synth_label_set: label set read for synthetic contrast (synth-contrast design 5.1, e.g.
+        'synthfine'), or None (default: today's pipelines exactly). When given, the files are
+        resolved here (`synth_label_files`), both linear pipelines get them as `label_files` and
+        the deformable pipeline reads them instead of the train18 labels.
     """
 
     def __init__(self, export_root, level, batch_size, seed=0, split="train", shuffle=True,
@@ -149,7 +153,7 @@ class LinearDataModule:
                  deform_residual_affine=P.DEFAULT_DEFORM_RESIDUAL_AFFINE, num_threads=4,
                  prefetch_queue_depth=1, device_id=0, contrast=None, manifest_path=None,
                  shuffle_mode="epoch", control_dir=None, control_init=None, deform_batch_size=None,
-                 deform_ranges=None):
+                 deform_ranges=None, synth_label_set=None):
         self.export_root = export_root
         self.level = P.check_level(level)
         self.batch_size = int(batch_size)
@@ -172,9 +176,15 @@ class LinearDataModule:
         self.contrast = contrast
         self.files = manifest_files(self.rows, self.level, split=None, contrast=contrast)
         self._label_files = None
+        self.synth_label_set = synth_label_set
+        self._synth_label_files = None
         if len(self.files) < self.batch_size:
             raise ValueError("split %r has %d images at level %d, fewer than the group size %d"
                              % (split, len(self.files), self.level, self.batch_size))
+        if synth_label_set is not None:
+            # Resolved eagerly (and cached): a case without the set is a startup ValueError
+            # naming it, before any pipeline or GPU work.
+            _ = self.synth_label_files
         self._datasets = {}
         self.control_dir = control_dir
         self.control_writers = {}
@@ -204,19 +214,43 @@ class LinearDataModule:
                                                label_set=DEFAULT_LABEL_SET, contrast=self.contrast)
         return self._label_files
 
+    @property
+    def synth_label_files(self):
+        """Label files of `synth_label_set` (synthetic contrast, design 5.1, e.g. synthfine) of
+        the same rows, in the same order as `files` (cached; None without a set)."""
+        if self.synth_label_set is None:
+            return None
+        if self._synth_label_files is None:
+            self._synth_label_files = manifest_files(self.rows, self.level, split=None,
+                                                     kind="labels",
+                                                     label_set=self.synth_label_set,
+                                                     contrast=self.contrast)
+        return self._synth_label_files
+
     def pipeline(self, task):
+        synth = self.synth_label_set is not None
         if task == P.DEFORM_TASK:
             if len(self.files) < self.deform_batch_size:
                 raise ValueError("split %r has %d images at level %d, fewer than the deform group "
                                  "size %d" % (self.split, len(self.files), self.level,
                                               self.deform_batch_size))
             return dali_loader.DeformPipeline(
-                self.level, self.files, self.label_files, self.deform_batch_size,
+                self.level, self.files,
+                self.synth_label_files if synth else self.label_files, self.deform_batch_size,
                 seed=self.seed + TASK_SEED_OFFSET[task], file_root=self.export_root,
                 shuffle=self.shuffle, residual_affine=self.deform_residual_affine,
                 residual_ranges=self.deform_ranges, intensity_aug=self.intensity_aug,
                 num_threads=self.num_threads, device_id=self.device_id,
                 prefetch_queue_depth=self.prefetch_queue_depth, shuffle_mode=self.shuffle_mode)
+        if synth:
+            return dali_loader.LinearPipeline(
+                task, self.level, self.files, self.batch_size,
+                seed=self.seed + TASK_SEED_OFFSET[task], file_root=self.export_root,
+                shuffle=self.shuffle, intensity_aug=self.intensity_aug,
+                num_threads=self.num_threads, device_id=self.device_id,
+                prefetch_queue_depth=self.prefetch_queue_depth, shuffle_mode=self.shuffle_mode,
+                control_file=self.control_file(task), label_files=self.synth_label_files,
+                **self.ranges[task])
         return dali_loader.LinearPipeline(
             task, self.level, self.files, self.batch_size, seed=self.seed + TASK_SEED_OFFSET[task],
             file_root=self.export_root, shuffle=self.shuffle, intensity_aug=self.intensity_aug,

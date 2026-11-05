@@ -452,6 +452,77 @@ class TestArgs(unittest.TestCase):
                     A.parse_args(["--data", "x", "--task-ratio", "deform:1", flag, "true"])
 
 
+class TestSynthArgs(unittest.TestCase):
+    """Synthetic-contrast flags (synth-contrast design 5.4, OD1)."""
+    TF = ["--data", "x", "--intensity-aug-device", "tf"]
+
+    def test_defaults_off(self):
+        a = A.parse_args(["--data", "x"])
+        self.assertEqual((a.synth_prob, a.synth_jitter, a.synth_device, a.synth_label_set,
+                          a.synth_hier_dev_cortex), (0.0, 0.08, "gpu", "synthfine", 0.25))
+        self.assertIsNone(A.synth_config_from_args(a))
+        self.assertIsNone(A.train_config_from_args(a).synth)
+        # A Namespace without synth fields (older config.json): off.
+        self.assertIsNone(A.synth_config_from_args(argparse.Namespace(level=4)))
+        d = A.args_to_dict(a)
+        self.assertEqual({k: d[k] for k in d if k.startswith("synth_")},
+                         {"synth_prob": 0.0, "synth_jitter": 0.08, "synth_device": "gpu",
+                          "synth_label_set": "synthfine", "synth_hier_dev_cortex": 0.25})
+
+    def test_values_pass_through(self):
+        a = A.parse_args(self.TF + ["--synth-prob", "0.5", "--synth-jitter", "0.1",
+                                    "--synth-device", "cpu", "--synth-label-set", "fine_v-2",
+                                    "--synth-hier-dev-cortex", "0.3"])
+        cfg = A.synth_config_from_args(a)
+        self.assertIsInstance(cfg, P.SynthConfig)
+        self.assertEqual((cfg.prob, cfg.jitter, cfg.device, cfg.label_set, cfg.hier_dev_cortex),
+                         (0.5, 0.1, "cpu", "fine_v-2", 0.3))
+        self.assertEqual(cfg.hier_dev, P.SynthConfig().hier_dev)     # other fields default
+        self.assertEqual(A.train_config_from_args(a).synth, cfg)
+        # --intensity-aug false is allowed (nothing to overwrite).
+        a = A.parse_args(["--data", "x", "--intensity-aug", "false", "--synth-prob", "1"])
+        self.assertEqual(A.synth_config_from_args(a).prob, 1.0)
+
+    def test_validation_table(self):
+        import contextlib
+        import io
+        cases = ((["--synth-prob", "-0.1"], "--synth-prob"),
+                 (["--synth-prob", "1.5"], "--synth-prob"),
+                 (["--synth-prob", "nan"], "--synth-prob"),
+                 (["--synth-jitter", "-0.01"], "--synth-jitter"),
+                 (["--synth-jitter", "0.6"], "--synth-jitter"),
+                 (["--synth-jitter", "inf"], "--synth-jitter"),
+                 (["--synth-hier-dev-cortex", "-1"], "--synth-hier-dev-cortex"),
+                 (["--synth-hier-dev-cortex", "0.51"], "--synth-hier-dev-cortex"),
+                 (["--synth-hier-dev-cortex", "nan"], "--synth-hier-dev-cortex"),
+                 (["--synth-label-set", "a/b"], "--synth-label-set"),
+                 (["--synth-label-set", ""], "--synth-label-set"),
+                 (["--synth-label-set", "fine\n"], "--synth-label-set"),
+                 (["--synth-device", "tpu"], "--synth-device"))
+        for bad, msg in cases:
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                with self.assertRaises(SystemExit, msg=str(bad)) as cm:
+                    A.parse_args(self.TF + bad)
+            self.assertEqual(cm.exception.code, 2, bad)
+            self.assertIn(msg, err.getvalue(), bad)
+        cross = ((["--data", "x", "--synth-prob", "0.5"], "--intensity-aug-device tf"),
+                 (["--data", "x", "--intensity-aug-device", "dali", "--synth-prob", "0.5"],
+                  "--intensity-aug-device tf"),
+                 (["--overfit-one-group", "--overfit-synthetic", "--intensity-aug", "false",
+                   "--synth-prob", "0.5"], "--overfit-one-group"),
+                 (self.TF + ["--shuffle-mode", "buffer", "--synth-prob", "0.5"], "--shuffle-mode epoch"))
+        for bad, msg in cross:
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                with self.assertRaises(SystemExit, msg=str(bad)) as cm:
+                    A.parse_args(bad)
+            self.assertEqual(cm.exception.code, 2, bad)
+            self.assertIn(msg, err.getvalue(), bad)
+        # The cross-checks only apply with p > 0.
+        A.parse_args(["--data", "x", "--shuffle-mode", "buffer", "--synth-jitter", "0.2"])
+
+
 class TestCascadeSourceLevel1(TempDirCase):
     """Milestone 9 phase 2 (design 4.2): load_cascade_source(path, 1) and fingerprints_match."""
 

@@ -14,7 +14,7 @@ PROJ = "/autofs/space/crater_001/users/jn85/BrainRegProjects/GroupwiseReg"
 def test_found_scripts():
     names = {os.path.basename(s) for s in SLURM}
     assert names == {"run_array.sh", "synthseg_batch.sh", "qc_export.sh", "build_target_grid.sh",
-                     "export_array.sh"}
+                     "export_array.sh", "add_labels_array.sh"}
     assert os.path.join(PKG, "run_in_container.sh") in SCRIPTS
 
 
@@ -88,7 +88,7 @@ def test_slurm_placeholders(path):
 def test_synthseg_gpu_toggle():
     text = open(os.path.join(PKG, "slurm", "synthseg_batch.sh")).read()
     assert "export USE_GPU=1" in text and "export USE_GPU=0" in text and "--synthseg-cpu" in text
-    for name in ("run_array.sh", "build_target_grid.sh", "qc_export.sh", "export_array.sh"):
+    for name in ("run_array.sh", "build_target_grid.sh", "qc_export.sh", "export_array.sh", "add_labels_array.sh"):
         assert "export USE_GPU=${USE_GPU:-0}" in open(os.path.join(PKG, "slurm", name)).read()
 
 
@@ -137,6 +137,58 @@ def test_export_array_optional_label_sets(tmp_path):
     assert "--optional-label-sets" not in argv and argv[argv.index("--label-sets") + 1] == "train18"
     argv = _export_argv(tmp_path, {"OPTIONAL_LABEL_SETS": "lumir10,seg4", "LABEL_SETS": "train18"})
     assert argv[argv.index("--optional-label-sets") + 1] == "lumir10,seg4"
+
+
+def test_add_labels_array_policy():
+    text = open(os.path.join(PKG, "slurm", "add_labels_array.sh")).read()
+    lines = _sbatch(text)
+    # CPU partition basic, account qtim, no GPU, at most two tasks at once, fair share (~15 GB/core).
+    assert _opt(lines, "partition") == "basic" and _opt(lines, "account") == "qtim"
+    assert _opt(lines, "job-name") == "bgr_add_labels" and _opt(lines, "array") == "0-0%2"
+    assert not [line for line in lines if "--gpus" in line or "--gres" in line]
+    assert _mem_gb(_opt(lines, "mem")) <= 15 * int(_opt(lines, "cpus-per-task"))
+    assert _opt(lines, "cpus-per-task") == "1" and _opt(lines, "mem") == "8G" and _opt(lines, "time") == "02:00:00"
+    for key in ("output", "error"):
+        assert _opt(lines, key).startswith(PROJ + "/logs/")
+    # Usage: the files array, the manifest and the check job, every sbatch --array with %2.
+    usage = [line for line in text.splitlines() if line.startswith("#") and "sbatch" in line and "--array" in line]
+    assert len(usage) == 3, usage
+    assert all(re.search(r"--array=(\S+|0-\$\(\( .* \)\))%2 ", line) for line in usage), usage
+    assert "--export=ALL,CHUNK=500,LABEL_SET=synthfine" in usage[0] and "(N + 499) / 500 - 1" in usage[0]
+    assert "PHASE=manifest" in usage[1] and "PHASE=check" in usage[2]
+    for s in ("PHASE=${PHASE:-files}", "CHUNK=${CHUNK:-500}", "LABEL_SET=${LABEL_SET:-synthfine}",
+              "OUT_ROOT=${OUT_ROOT:-$PROJ/data/processed}", "EXPORT_ROOT=${EXPORT_ROOT:-$PROJ/data/npy_v2}"):
+        assert s in text, s
+
+
+def _wrapper_argv(tmp_path, script, env_extra, rc=0):
+    """Run a preprocessing slurm wrapper with a stub run_in_container.sh printing its argv."""
+    repo = tmp_path / "repo"
+    (repo / "preprocessing").mkdir(parents=True, exist_ok=True)
+    (repo / "preprocessing" / "run_in_container.sh").write_text('printf "ARG %s\\n" "$@"\n')
+    env = {k: v for k, v in os.environ.items() if k not in ("PHASE", "CHUNK", "LABEL_SET", "SLURM_ARRAY_TASK_ID")}
+    env.update(REPO_DIR=str(repo), **env_extra)
+    res = subprocess.run(["bash", os.path.join(PKG, "slurm", script)], env=env, stdout=subprocess.PIPE,
+                         stderr=subprocess.PIPE, universal_newlines=True)
+    assert res.returncode == rc, res.stderr
+    return [line[4:] for line in res.stdout.splitlines() if line.startswith("ARG ")], res.stderr
+
+
+def test_add_labels_array_argv(tmp_path):
+    argv, _ = _wrapper_argv(tmp_path, "add_labels_array.sh", {"SLURM_ARRAY_TASK_ID": "2"})
+    assert argv == ["export-add-labels", "--out-root", PROJ + "/data/processed", "--export-root",
+                    PROJ + "/data/npy_v2", "--label-set", "synthfine", "--phase", "files", "--start", "1000",
+                    "--end", "1500"]
+    argv, _ = _wrapper_argv(tmp_path, "add_labels_array.sh", {"SLURM_ARRAY_TASK_ID": "1", "CHUNK": "7"})
+    assert argv[argv.index("--start") + 1] == "7" and argv[argv.index("--end") + 1] == "14"
+    argv, _ = _wrapper_argv(tmp_path, "add_labels_array.sh", {"PHASE": "manifest", "SLURM_ARRAY_TASK_ID": "3"})
+    assert argv == ["export-add-labels", "--export-root", PROJ + "/data/npy_v2", "--label-set", "synthfine",
+                    "--phase", "manifest"]
+    argv, _ = _wrapper_argv(tmp_path, "add_labels_array.sh", {"PHASE": "check"})
+    assert argv == ["export-check", "--export-root", PROJ + "/data/npy_v2", "--sample", "0"]
+    for env in ({"PHASE": "merge"}, {"CHUNK": "0"}, {"CHUNK": "abc"}, {"CHUNK": "-5"}):
+        argv, err = _wrapper_argv(tmp_path, "add_labels_array.sh", env, rc=2)
+        assert argv == [] and "ERROR" in err
 
 
 def test_qc_export_defaults():

@@ -18,6 +18,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -631,7 +632,8 @@ class TestPython36(unittest.TestCase):
 class TestScriptsStatic(unittest.TestCase):
 
     def test_headers(self):
-        for path, limit in ((R4, "24:00:00"), (R2, "24:00:00"), (R1, "60:00:00")):
+        # synth-contrast OD3: level 1 requests 128G (MaxRSS ~94 GB), levels 4 / 2 keep 64G
+        for path, limit, mem in ((R4, "24:00:00", "64G"), (R2, "24:00:00", "64G"), (R1, "60:00:00", "128G")):
             text = _read(path)
             header = text[:text.index("set -euo pipefail")]
             with self.subTest(os.path.basename(path)):
@@ -640,8 +642,16 @@ class TestScriptsStatic(unittest.TestCase):
                 self.assertIn("#SBATCH -A qtim\n", text)
                 self.assertNotIn("entre", text.lower())
                 self.assertNotRegex(text, r"(?m)^#SBATCH -A (?!qtim$)")
+                self.assertEqual(len(re.findall(r"(?m)^#SBATCH --mem=", text)), 1)
+                # synth-contrast paragraph (design 5.5 / 7.2) with the GPU_POLL criterion
+                for k in ("Synthetic contrast (design .agents/tasks/synth-contrast/design.md 5.5 / 7.2",
+                          "SYNTH_PROB", "SYNTH_JITTER", "SYNTH_DEVICE", "SYNTH_LABEL_SET", "GPU_POLL",
+                          "MIN_TASK_STEPS", "ONLY when SYNTH_PROB > 0",
+                          "max(memory.used) <= memory.total - 512 MiB",
+                          'EXTRA_ARGS="--group-config B --lambda-smooth 0.5"'):
+                    self.assertIn(k, header, k)
                 for line in ("#SBATCH --gpus=1\n", "#SBATCH -N 1\n", "#SBATCH --ntasks-per-node=1\n",
-                             "#SBATCH --cpus-per-task=3\n", "#SBATCH -p rtx8000\n", "#SBATCH --mem=64G\n",
+                             "#SBATCH --cpus-per-task=3\n", "#SBATCH -p rtx8000\n", "#SBATCH --mem=%s\n" % mem,
                              "#SBATCH --time=%s\n" % limit,
                              "#SBATCH --output=%s/%%x-%%j.out\n" % LOGS, "#SBATCH --error=%s/%%x-%%j.err\n" % LOGS):
                     self.assertIn(line, text)
@@ -678,8 +688,15 @@ class TestScriptsStatic(unittest.TestCase):
                   "NOT a collapse signal"):
             self.assertIn(k, r4, k)
         r1 = _read(R1)
-        for k in ("36.7 GB", "MIN_PAIRS=1", "39000 MB", "TF_MEM_LIMIT_MB=34000"):
+        for k in ("36.7 GB", "MIN_PAIRS=1", "41500 MB", "TF_MEM_LIMIT_MB=34000", "42500", "94 GB",
+                  "--time=04:00:00 --mem=128G slurm/r_level1.sh", "--time=60:00:00 --mem=128G slurm/r_level1.sh"):
             self.assertIn(k, r1, k)
+        self.assertNotIn("39000 MB", r1)
+        self.assertNotIn("--mem=64G", r1)
+        for path, k in ((R4, "sbatch --job-name=r4synsm$T --time=02:00:00 --mem=64G slurm/r_level4.sh"),
+                        (R2, "sbatch --job-name=r2synsm$T --time=03:00:00 --mem=64G slurm/r_level2.sh"),
+                        (R1, "sbatch --job-name=r1synsm$T --time=04:00:00 --mem=128G slurm/r_level1.sh")):
+            self.assertIn(k, _read(path), path)
         # retrain recipe: d12hs widths at every level, BN trainable at level 2, float32_fine at level 1
         for path in SCRIPTS:
             text = _read(path)
@@ -965,7 +982,7 @@ class TestScriptsDryRun(unittest.TestCase):
                                 ["--deform-group-size", "4"],
                                 ["--gradient-checkpointing", "full", "--lean-sampler", "true", "--pair-recompute",
                                  "true", "--lean-losses", "true"],
-                                ["--min-pairs", "n"], ["--max-pairs", "64"], ["--gpu-memory-limit-mb", "40000"],
+                                ["--min-pairs", "n"], ["--max-pairs", "64"], ["--gpu-memory-limit-mb", "42500"],
                                 ["--val-image-chunk", "1"], ["--val-pair-chunk", "1"], ["--bn-recal-validate", "false"],
                                 ["--cascade-skip-linear", "4:0,2:0.15"], ["--cascade-skip-deform", "4:0.15,2:0.15"],
                                 ["--curriculum", "false"], ["--optimizer", "adamw"], ["--lowres-method", "tent"],
@@ -1057,6 +1074,115 @@ class TestScriptsDryRun(unittest.TestCase):
         r = self.run_script(R4, dry=False, FAKE_MAIN_RC="4")
         self.assertEqual(r.returncode, 4, r.stderr)
         self.assertEqual(len(_read(self.log).splitlines()), 1)
+
+    # ------------------------------------------------------------------ synth-contrast (design 5.5)
+    SYNTH_SEQ = ["--synth-prob", "0.5", "--synth-jitter", "0.08", "--synth-device", "gpu",
+                 "--synth-label-set", "synthfine"]
+    SMOKE_EXTRA = "--group-config B --lambda-smooth 0.5"
+
+    def levels(self):
+        return ((R4, {}), (R2, self.l2()), (R1, self.l2()))
+
+    def test_synth_default_off(self):
+        """Default command lines carry no synth / min-task-steps / poll addition."""
+        for path, base in self.levels():
+            with self.subTest(os.path.basename(path)):
+                main, chk, out = self.dry(path, **base)
+                self.assertFalse([a for a in main if a.startswith("--synth-")], main)
+                for flag in ("--expect-synth-prob", "--min-task-steps"):
+                    self.assertNotIn(flag, chk)
+                self.assertFalse([ln for ln in out.splitlines() if ln.startswith("POLL")], out)
+                # SYNTH_PROB=0 explicitly (and other synth env at non-defaults) changes nothing
+                main0, chk0, out0 = self.dry(path, **dict(base, SYNTH_PROB="0", SYNTH_DEVICE="cpu",
+                                                          SYNTH_JITTER="0.1"))
+                self.assertEqual((main0, chk0), (main, chk))
+
+    def test_synth_on(self):
+        for path, base in self.levels():
+            with self.subTest(os.path.basename(path)):
+                main, chk, _ = self.dry(path, **dict(base, SYNTH_PROB="0.5", EXTRA_ARGS=self.SMOKE_EXTRA))
+                self.assertEqual(main[-4:], self.SMOKE_EXTRA.split())            # EXTRA_ARGS still last
+                self.assertEqual(main[-12:-4], self.SYNTH_SEQ)                   # synth flags right before it
+                self.assertEqual(sum(a.startswith("--synth-") for a in main), 4)
+                self.assert_seqs(chk, (["--expect-synth-prob", "0.5"],))
+                self.assertNotIn("--min-task-steps", chk)
+                self.check_parses(main)
+                main, _, _ = self.dry(path, **dict(base, SYNTH_PROB="1", SYNTH_DEVICE="cpu", SYNTH_JITTER="0",
+                                                   SYNTH_LABEL_SET="synth-fine_2"))
+                self.assert_seqs(main, (["--synth-prob", "1", "--synth-jitter", "0", "--synth-device", "cpu",
+                                         "--synth-label-set", "synth-fine_2"],))
+
+    def test_min_task_steps(self):
+        for path, base in self.levels():
+            with self.subTest(os.path.basename(path)):
+                main, chk, _ = self.dry(path, **dict(base, MIN_TASK_STEPS="rigid:20,affine:20,deform:80"))
+                self.assert_seqs(chk, (["--min-task-steps", "rigid:20,affine:20,deform:80"],))
+                self.assertNotIn("--expect-synth-prob", chk)
+                self.assertFalse([a for a in main if a.startswith("--synth-")])
+
+    def test_gpu_poll_dry(self):
+        for path, base in self.levels():
+            with self.subTest(os.path.basename(path)):
+                _, _, out = self.dry(path, **dict(base, GPU_POLL="true", RUN_NAME="pp"))   # dry: nothing written
+                poll = [ln for ln in out.splitlines() if ln.startswith("POLL: ")]
+                self.assertEqual(poll, ["POLL: nvidia-smi -i 0 --query-gpu=timestamp,memory.used,memory.total "
+                                        "--format=csv,noheader,nounits -l 5 > %s"
+                                        % os.path.join(self.tmp, "results", "pp", "gpu_poll.csv")])
+                _, _, out = self.dry(path, **dict(base, GPU_POLL="true", CUDA_VISIBLE_DEVICES="3,1"))
+                self.assertIn("POLL: nvidia-smi -i 3 ", out)
+
+    def test_synth_invalid_env(self):
+        for env in (dict(SYNTH_PROB="abc"), dict(SYNTH_PROB="1.5"), dict(SYNTH_PROB="-0.5"),
+                    dict(SYNTH_JITTER="x"), dict(SYNTH_DEVICE="tpu"), dict(GPU_POLL="yes"),
+                    dict(MIN_TASK_STEPS="deform80"), dict(MIN_TASK_STEPS="warp:3"), dict(SYNTH_LABEL_SET="a b"),
+                    dict(SYNTH_LABEL_SET="a/b")):
+            for path, base in self.levels():
+                r = self.run_script(path, **dict(base, **env))
+                self.assertEqual(r.returncode, 2, (path, env, r.stdout, r.stderr))
+                self.assertIn("ERROR", r.stderr)
+                self.assertNotIn("MAIN: ", r.stdout)
+
+    def test_gpu_poll_stub_run(self):
+        """Real (non-dry) path with GPU_POLL=true: the stub nvidia-smi is started with the poll argv
+        before main.py, writes into gpu_poll.csv and is stopped after main.py returns."""
+        argv_file = os.path.join(self.tmp, "poll_argv.txt")
+        pid_file = os.path.join(self.tmp, "poll_pid.txt")
+        _write_exec(os.path.join(self.bin, "nvidia-smi"),
+                    '#!/bin/bash\ncase "$*" in\n*"-l 5"*)\n  printf "%%s|" "$@" > "%s"\n  echo $$ > "%s"\n'
+                    '  echo "2026/11/05 10:00:00.000, 1234, 49152"\n  exec sleep 60 ;;\nesac\nexit 0\n'
+                    % (argv_file, pid_file))
+        for path, base in self.levels():
+            with self.subTest(os.path.basename(path)):
+                for f in (argv_file, pid_file, self.log):
+                    if os.path.exists(f):
+                        os.remove(f)
+                run = "poll_" + os.path.basename(path)[:-3]
+                main, chk, _ = self.dry(path, **dict(base, SYNTH_PROB="0.5", GPU_POLL="true", RUN_NAME=run))
+                t0 = time.time()
+                r = self.run_script(path, dry=False, **dict(base, SYNTH_PROB="0.5", GPU_POLL="true",
+                                                            RUN_NAME=run, CUDA_VISIBLE_DEVICES="2"))
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertLess(time.time() - t0, 30)                      # the poll did not keep it alive
+                self.assertIn("synth: p 0.5 | jitter 0.08 | device gpu | label set synthfine | gpu poll true",
+                              r.stdout)
+                self.assertEqual(_read(argv_file).rstrip("|").split("|"),
+                                 ["-i", "2", "--query-gpu=timestamp,memory.used,memory.total",
+                                  "--format=csv,noheader,nounits", "-l", "5"])
+                csv = os.path.join(self.tmp, "results", run, "gpu_poll.csv")
+                self.assertIn(", 1234, 49152", _read(csv))
+                pid = int(_read(pid_file).strip())
+                for _ in range(50):                                       # killed after main.py
+                    try:
+                        os.kill(pid, 0)
+                    except OSError:
+                        break
+                    time.sleep(0.1)
+                else:
+                    self.fail("poll process %d still alive" % pid)
+                calls = _read(self.log).splitlines()
+                self.assertEqual(len(calls), 2, calls)
+                a0 = calls[0].rstrip("|").split("|")
+                self.assertEqual(a0[a0.index("python") + 2:], main)
 
     # ------------------------------------------------------------------ main.py accepts the lines
 

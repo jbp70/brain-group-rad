@@ -573,6 +573,50 @@ class TestIntensityAugPostprocess(unittest.TestCase):
         np.testing.assert_array_equal(out, ref)
 
 
+class TestSynthCallSignature(unittest.TestCase):
+    """synth-contrast design 5.2: ``labels`` / ``synth_override`` are keyword-only; the off-path
+    positional signatures are unchanged."""
+
+    def test_signatures(self):
+        import inspect
+        kinds = inspect.Parameter
+        for cls, positional, kwonly in (
+                (pp.LinearPostprocess, ["images", "t_dali", "rt_dali", "flip_axes"],
+                 ["labels", "synth_override"]),
+                (pp.DeformPostprocess, ["images", "labels", "t_dali", "flip_axes"],
+                 ["synth_override"])):
+            params = list(inspect.signature(cls.__call__).parameters.values())[1:]
+            self.assertEqual([p.name for p in params if p.kind == kinds.POSITIONAL_OR_KEYWORD],
+                             positional, cls)
+            self.assertEqual([p.name for p in params if p.kind == kinds.KEYWORD_ONLY], kwonly, cls)
+            self.assertTrue(all(p.default is None for p in params if p.kind == kinds.KEYWORD_ONLY))
+            init = list(inspect.signature(cls.__init__).parameters.values())
+            self.assertEqual(init[-1].name, "synth")
+            self.assertIsNone(init[-1].default)
+
+    def test_positional_extra_arg_rejected(self):
+        n = 2
+        images = np.zeros((n,) + P.LEVEL_SHAPE[4] + (1,), np.float32)
+        labels = np.zeros((n,) + P.LEVEL_SHAPE[4] + (1,), np.uint8)
+        t, rt = random_dali_batch(np.random.default_rng(0), "rigid", 4, n)
+        on = P.SynthConfig(prob=1.0)
+        for cfg in (None, on):
+            lin = pp.LinearPostprocess("rigid", 4, seed=1, synth=cfg)
+            with self.assertRaises(TypeError):
+                lin(images, t, rt, None, labels)
+            dpost = pp.DeformPostprocess(4, seed=1, synth=cfg)
+            with self.assertRaises(TypeError):
+                dpost(images, labels, None, None, True)
+        # Off: today's positional calls still work and give no 'synth' key.
+        out = pp.LinearPostprocess("rigid", 4, seed=1)(images, t, rt, [False, False, False])
+        self.assertNotIn("synth", out)
+        out = pp.DeformPostprocess(4, seed=1)(images, labels, None, [False, False, False])
+        self.assertNotIn("synth", out)
+        # On: keyword labels reach the synthesis.
+        out = pp.LinearPostprocess("rigid", 4, seed=1, synth=on)(images, t, rt, labels=labels)
+        self.assertTrue(bool(out["synth"].numpy()))
+
+
 class TestBrainS(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="m2_template_")

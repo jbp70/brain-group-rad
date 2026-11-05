@@ -238,6 +238,67 @@ AUG_COLUMNS = {
 N_AUG_UNIFORMS = 16
 
 
+# ---------------------------------------------------------------------------- synthetic contrast
+# SynthMorph-style synthetic-contrast training (synth-contrast design sections 4-5). The TF code
+# is `data_loading.synth`; the post-processes own a third generator seeded with
+# post-process seed + SYNTH_SEED_OFFSET (design 4.4), so the flip / pair stream and the TF-aug
+# stream are the same as without synthesis.
+SYNTH_SEED_OFFSET = 104729
+SYNTH_DEVICES = ("gpu", "cpu")            # --synth-device (design 6.4: cpu = fallback)
+SYNTH_LABEL_SET_DEFAULT = "synthfine"     # --synth-label-set (design 3.1)
+# Group uniforms U[0, 1) drawn once per call (design 4.4; the log-gamma group normal is drawn
+# separately): flag (< prob -> synthetic group), blur family (< pet_family_prob -> PET), blur base
+# FWHM within the family range, remask (< remask_prob), bias log-field std (x bias_std_max).
+SYNTH_COLUMNS = {"flag": 0, "blur_family": 1, "blur_base": 2, "remask": 3, "bias_std": 4}
+N_SYNTH_GROUP_UNIFORMS = 5
+
+
+@dataclass
+class SynthConfig:
+    """Synthetic-contrast parameters (synth-contrast design 4.1 / 4.3, orchestrator OD1).
+
+    prob: probability that a group is fully synthetic (--synth-prob; 0 = off, design 4.1).
+    jitter: per-image, per-fine-label relative half-width of the mean/std jitter
+      (--synth-jitter; d ~ U(-jitter, jitter), x (1 + d); design 4.3).
+    std_max: within-label voxel std of a class ~ U(0, std_max) per group (design 4.3).
+    fwhm_mr_mm: MR-like blur family, FWHM U(lo, hi) mm per group (design 4.3).
+    fwhm_pet_mm: PET-like blur family, FWHM U(lo, hi) mm per group (design 4.3).
+    pet_family_prob: probability of the PET blur family per group (design 4.3).
+    fwhm_image_jitter: per-image, per-axis relative FWHM jitter, x U(1 - j, 1 + j) (design 4.3).
+    bias_grid: bias-field control points per axis, at fixed fractions of the extent (same
+      physical spacing at every level; design 4.2 step 4).
+    bias_std_max: log bias-field std ~ U(0, bias_std_max) per group, field per image (design 4.3).
+    gamma_log_std: gamma = exp(N(0, gamma_log_std)) per group (design 4.3).
+    noise_std_max: white-noise std ~ U(0, noise_std_max) per image (design 4.3).
+    remask_prob: probability (per group) of multiplying by (label > 0) after the blur and after
+      the noise (skull-stripped look; design 4.2 steps 3 and 7).
+    hier_dev: half-width of the per-fine-label deviation around its train18 class mean for
+      non-cortical fine ids (design 4.3).
+    hier_dev_cortex: the same half-width for the 72 cortical fine ids (train18 class 2,
+      `preprocessing.luts.synthfine_cortex_ids`; orchestrator decision OD1, --synth-hier-dev-cortex).
+    norm_quantile: robust in-mask normalisation quantile (design 4.2 step 5).
+    device: 'gpu' (default) or 'cpu' (true branch placed on /cpu:0; design 6.4, --synth-device).
+    label_set: label set read as the fine labels (--synth-label-set; design 3.1).
+    """
+    prob: float = 0.0
+    jitter: float = 0.08
+    std_max: float = 0.08
+    fwhm_mr_mm: tuple = (0.0, 3.0)
+    fwhm_pet_mm: tuple = (4.0, 8.0)
+    pet_family_prob: float = 0.5
+    fwhm_image_jitter: float = 0.10
+    bias_grid: int = 4
+    bias_std_max: float = 0.3
+    gamma_log_std: float = 0.25
+    noise_std_max: float = 0.03
+    remask_prob: float = 0.5
+    hier_dev: float = 0.1
+    hier_dev_cortex: float = 0.25
+    norm_quantile: float = 0.995
+    device: str = "gpu"
+    label_set: str = SYNTH_LABEL_SET_DEFAULT
+
+
 # ---------------------------------------------------------------------------- DALI formulas
 def dali_center(shape_xyz, pixel_center=DALI_PIXEL_CENTER):
     """Image center in DALI coordinates (DALI axis order W, H, D = reversed array axes)."""

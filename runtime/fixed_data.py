@@ -192,7 +192,7 @@ class ValidationSet:
 
     @classmethod
     def build(cls, images, task, level, group_size, n_groups=None, ranges=None, seed=1234,
-              target_iters=10, global_transform=None):
+              target_iters=10, global_transform=None, group_images_fn=None):
         """Groups g = images[perm[(g Nv + k) % n_val]], k < Nv; default n_groups = ceil(n_val / Nv).
 
         Seeding depends only on (seed, task, g): the permutation uses (seed, task id) and the
@@ -204,6 +204,12 @@ class ValidationSet:
         (seed, task id, g, VAL_G_SEED)) composed last, T_i <- G T_i and T_target_i <- G T_target_i,
         with the same groups and per-image transforms as without it. ``G`` and ``G_params`` are
         stored in each group.
+
+        ``group_images_fn``: optional callable (g, idx) -> float32 [Nv, X, Y, Z, 1] that replaces
+        ``images[idx]`` as the template-space images of group g before rendering (post-training
+        synthetic-contrast evaluation, synth-contrast design section 8). None (default) = today's
+        code path; the hook draws no randomness from the builder's generators, so the groups,
+        transforms and G are the same with and without it.
         """
         level = P.check_level(level)
         if task not in VAL_TASK_SEED:
@@ -231,7 +237,8 @@ class ValidationSet:
                 G = global_matrix_mm(gp["axis"], gp["angle_deg"], gp["translation_mm"])
                 T, tgt = G @ T, G @ tgt
                 extra = {"G": G, "G_params": gp}
-            rendered = render_group(images[idx], T, P.LEVEL_SPACING[level])
+            src = images[idx] if group_images_fn is None else group_images_fn(g, idx)
+            rendered = render_group(src, T, P.LEVEL_SPACING[level])
             groups.append(dict({"images": rendered, "T": T, "T_target": tgt,
                                 "A_star": cls._targets(tgt, target_iters), "index": idx}, **extra))
         return cls(task, level, groups)
@@ -250,24 +257,27 @@ class ValidationSet:
 
 
 def build_validation_sets(images, tasks, level, group_size, n_groups=None, ranges=None, seed=1234,
-                          target_iters=10, global_transform=None):
+                          target_iters=10, global_transform=None, group_images_fn=None):
     """{task: ValidationSet.build(...)} for each task, all with the same base ``seed``.
 
     ``ranges``: {task: ranges dict} or None. Each set depends only on (seed, task, group index),
     so e.g. the rigid set is the same for task ratios 'rigid:1' and 'affine:1,rigid:2'.
     ``global_transform``: optional dict(rotation_deg, translation_mm); adds a set
     ``<task>_g`` per task (same groups and per-image transforms plus one fixed G per group).
+    ``group_images_fn``: optional hook passed to every `ValidationSet.build` (plain and ``_g``
+    sets); None = today's sets (synth-contrast design section 8).
     """
     ranges = ranges or {}
     out = {}
     for t in tasks:
         out[t] = ValidationSet.build(images, t, level, group_size, n_groups, ranges.get(t), seed=seed,
-                                     target_iters=target_iters)
+                                     target_iters=target_iters, group_images_fn=group_images_fn)
     if global_transform is not None:
         for t in tasks:
             out[t + VAL_G_SUFFIX] = ValidationSet.build(
                 images, t, level, group_size, n_groups, ranges.get(t), seed=seed,
-                target_iters=target_iters, global_transform=global_transform)
+                target_iters=target_iters, global_transform=global_transform,
+                group_images_fn=group_images_fn)
     return out
 
 
@@ -435,9 +445,14 @@ class DeformValidationSet:
         self.group_size = int(self.groups[0]["images"].shape[0]) if self.groups else 0
 
     @classmethod
-    def build(cls, images, labels, level, group_size, n_groups=None, seed=1234):
+    def build(cls, images, labels, level, group_size, n_groups=None, seed=1234,
+              group_images_fn=None):
         """Groups g = cases perm[(g Nv + k) % n_val], k < Nv, perm from
-        default_rng([seed, VAL_DEFORM_SEED]); default n_groups = ceil(n_val / Nv)."""
+        default_rng([seed, VAL_DEFORM_SEED]); default n_groups = ceil(n_val / Nv).
+
+        ``group_images_fn``: optional callable (g, idx) -> float32 [Nv, X, Y, Z, 1] replacing
+        ``images[idx]`` of group g; the labels stay ``labels[idx]`` (synth-contrast design
+        section 8). None (default) = today's groups."""
         level = P.check_level(level)
         shape = tuple(P.LEVEL_SHAPE[level])
         images = np.asarray(images, np.float32).reshape((-1,) + shape + (1,))
@@ -454,7 +469,11 @@ class DeformValidationSet:
         groups = []
         for g in range(int(n_groups)):
             idx = np.asarray([perm[(g * nv + k) % n_val] for k in range(nv)])
-            groups.append({"images": images[idx], "labels": labels[idx], "index": idx})
+            if group_images_fn is None:
+                imgs = images[idx]
+            else:
+                imgs = np.asarray(group_images_fn(g, idx), np.float32).reshape((nv,) + shape + (1,))
+            groups.append({"images": imgs, "labels": labels[idx], "index": idx})
         return cls(level, groups)
 
     @classmethod

@@ -28,6 +28,18 @@ missing from the LUT is an error (no silent assignment).
                8 caudate (11, 50)
                9 putamen (12, 51)
             Applied to labels_synthseg.nii.gz (raw SynthSeg ids) -> uint8.
+  synthfine same map and names as synthseg (103 contiguous ids, uint8), used
+            for synthetic-contrast training (design synth-contrast 3.1/3.2). Its
+            coarse levels use the NESTED majority vote of export.nested_block_mode,
+            so synthfine_to_train18_table()[labels_synthfine_k] == labels_train18_k
+            voxel for voxel at every level. synthfine_to_train18_table() is the
+            single fine -> train18 table for the exporter and the TF pipeline.
+            synthfine_cortex_ids(): the 72 synthfine ids whose train18 class is
+            CORTEX_TRAIN18_ID (2): {2, 20} (raw 3/42) U {33..102} (DK parcels
+            1001-1035 / 2001-2035, incl. 1004/2004 corpus callosum, which SynthSeg
+            never outputs). Synthesis gives these parcels a larger per-parcel
+            deviation (orchestrator decision OD1: tau/amyloid PET varies by
+            cortical region, so the contrast model must vary within the cortex).
   lumir10   LUMIR25 coarse validation labels: assumed 0..10 (10 classes +
             background; values UNVERIFIED -- export fails loudly if wrong).
   seg4      Neurite-OASIS seg4: assumed 0..4 (UNVERIFIED).
@@ -132,10 +144,32 @@ LUTS: Dict[str, Dict[str, object]] = {
     "synthseg": _build(_synthseg_entries(), "SynthSeg 2.0 labels table + DK parcellation (--parc)"),
     "train18": _build_merged(TRAIN18_CLASSES, "SynthSeg 2.0 --parc ids merged to 18 training classes "
                                               "(left/right and all cortex merged)"),
+    "synthfine": _build(_synthseg_entries(), "SynthSeg 2.0 --parc ids, contiguous (synthfine: train18-consistent "
+                                             "nested downsampling)"),
     "lumir10": _build(_identity(10), "LUMIR25 coarse labels, assumed 0..10 (unverified)"),
     "seg4": _build(_identity(4), "Neurite-OASIS seg4, assumed 0..4 (unverified)"),
     "seg35": _build(_identity(35), "Neurite-OASIS seg35, assumed 0..35 (unverified)"),
 }
+
+
+CORTEX_TRAIN18_ID = 2
+
+
+def synthfine_to_train18_table() -> np.ndarray:
+    """uint8 [256]: entry k = train18 id of the raw SynthSeg id mapped to synthfine id k; 103..255 = 0."""
+    t18: Dict[int, int] = LUTS["train18"]["map"]  # type: ignore[assignment]
+    fine: Dict[int, int] = LUTS["synthfine"]["map"]  # type: ignore[assignment]
+    table = np.zeros(256, dtype=np.uint8)
+    for o, k in fine.items():
+        table[k] = t18[o]
+    return table
+
+
+def synthfine_cortex_ids() -> np.ndarray:
+    """Sorted int64 synthfine ids (< 103) of train18 class CORTEX_TRAIN18_ID (72 ids, OD1)."""
+    n = len(LUTS["synthfine"]["map"])  # type: ignore[arg-type]
+    table = synthfine_to_train18_table()[:n]
+    return np.nonzero(table == CORTEX_TRAIN18_ID)[0].astype(np.int64)
 
 
 def get_lut(name: str, luts: Optional[Dict[str, Dict[str, object]]] = None) -> Optional[Dict[str, object]]:

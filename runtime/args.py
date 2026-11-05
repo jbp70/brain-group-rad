@@ -80,14 +80,23 @@ Pattern from the rigid project's ``runtime/args.py`` (argparse + ``str2bool``). 
   float32 | float32_fine (needs --amp; float32 / float32_fine need 'deform' in --task-ratio;
   float32_fine = only the decoder stages d2, d1 and the SVF norm/head in float32,
   fp32-decoder-width), --bn-epsilon-override 0. None is a ModelConfig field.
+* synthetic contrast (`.agents/tasks/synth-contrast/design.md` 5.4): --synth-prob 0 (off, no op,
+  no generator, no config.json `synth` record), --synth-jitter 0.08 (in [0, 0.5]),
+  --synth-device gpu | cpu, --synth-label-set synthfine (^[A-Za-z0-9_-]+$),
+  --synth-hier-dev-cortex 0.25 (in [0, 0.5], orchestrator OD1). --synth-prob > 0 needs
+  --intensity-aug-device tf or --intensity-aug false and is refused with --overfit-one-group or
+  --shuffle-mode buffer. `synth_config_from_args` -> SynthConfig or None (p 0).
 """
 import argparse
 import collections
 import datetime
 import math
+import re
 
 from data_loading import params as P
 from models.config import ModelConfig
+
+SYNTH_LABEL_SET_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 DEFAULT_GROUP_SIZE = {4: 32, 2: 8, 1: 2}
 # Curriculum start values (--<task>-*-start). None = the end value (--<task>-*): the rigid
@@ -465,6 +474,25 @@ def build_parser():
                    help="simulated low-res of the intensity augmentation (retrain-prereqs design "
                    "section 3): 'nn' (NN down + linear up, default, as DALI) or 'tent' "
                    "(triangle-filtered down + linear up, shift-free; needs --intensity-aug-device tf)")
+    g.add_argument("--synth-prob", type=float, default=0.0,
+                   help="synthetic contrast (synth-contrast design 5.4): probability in [0, 1] that "
+                   "a training group is fully synthetic (one SynthMorph-style contrast per group, "
+                   "rendered from the --synth-label-set labels); 0 = off (default, no op added). "
+                   "> 0 needs --intensity-aug-device tf or --intensity-aug false, not with "
+                   "--overfit-one-group or --shuffle-mode buffer")
+    g.add_argument("--synth-jitter", type=float, default=0.08,
+                   help="synthetic contrast (design 5.4): per-image, per-label relative jitter of "
+                   "the group's label means / stds, in [0, 0.5]")
+    g.add_argument("--synth-device", choices=list(P.SYNTH_DEVICES), default="gpu",
+                   help="synthetic contrast (design 5.4 / 6.4): where the synthesis runs ('gpu' "
+                   "default; 'cpu' = memory fallback, same values)")
+    g.add_argument("--synth-label-set", default=P.SYNTH_LABEL_SET_DEFAULT,
+                   help="synthetic contrast (design 5.4 / 3.1): label set of the manifest read as "
+                   "the fine labels (labels_<set>_<k>.npy), name matching ^[A-Za-z0-9_-]+$")
+    g.add_argument("--synth-hier-dev-cortex", type=float, default=0.25,
+                   help="synthetic contrast (design 5.4, orchestrator OD1): half-width of the "
+                   "per-parcel mean deviation of the cortical fine labels (other labels 0.1), "
+                   "in [0, 0.5]")
     g = p.add_argument_group("curriculum and global transform (design 3.2 v3.5; both default off)")
     g.add_argument("--curriculum", type=str2bool, default=False,
                    help="linear ramp of the per-image ranges from the --<task>-*-start values to "
@@ -618,6 +646,23 @@ def parse_args(argv=None):
                      "has no intensity augmentation)")
     if args.lowres_method == "tent" and intensity_aug_device(args) == "dali":
         parser.error("--lowres-method tent needs --intensity-aug-device tf (DALI only has nn)")
+    # Synthetic contrast (synth-contrast design 5.4).
+    for flag, val, hi in (("--synth-prob", args.synth_prob, 1.0),
+                          ("--synth-jitter", args.synth_jitter, 0.5),
+                          ("--synth-hier-dev-cortex", args.synth_hier_dev_cortex, 0.5)):
+        if not (math.isfinite(val) and 0.0 <= val <= hi):
+            parser.error("%s must be finite and in [0, %g], got %r" % (flag, hi, val))
+    if not SYNTH_LABEL_SET_RE.fullmatch(args.synth_label_set):
+        parser.error("--synth-label-set must match ^[A-Za-z0-9_-]+$, got %r" % args.synth_label_set)
+    if args.synth_prob > 0:
+        if intensity_aug_device(args) not in ("tf", "off"):
+            parser.error("--synth-prob > 0 needs --intensity-aug-device tf or --intensity-aug false "
+                         "(the DALI-side augmentation would be overwritten by the synthesis)")
+        if args.overfit_one_group:
+            parser.error("--synth-prob > 0 cannot be combined with --overfit-one-group")
+        if args.shuffle_mode == "buffer":
+            parser.error("--synth-prob > 0 needs --shuffle-mode epoch (aligned image / label "
+                         "readers)")
     if args.group_size is None:
         args.group_size = DEFAULT_GROUP_SIZE[args.level]
     if not (math.isfinite(args.loss_scale_mm2) and args.loss_scale_mm2 > 0):
@@ -928,7 +973,21 @@ def train_config_from_args(args):
                        intensity_aug_tf=intensity_aug_tf(args),
                        pair_recompute=bool(args.pair_recompute),
                        task_start_steps=dict(getattr(args, "task_start_steps_parsed", {})),
-                       task_start_ramp_steps=int(getattr(args, "task_start_ramp_steps", 0)))
+                       task_start_ramp_steps=int(getattr(args, "task_start_ramp_steps", 0)),
+                       synth=synth_config_from_args(args))
+
+
+def synth_config_from_args(args):
+    """`params.SynthConfig` from the --synth-* flags (synth-contrast design 5.4), or None when
+    --synth-prob is 0 (default; also for a Namespace without synth fields, e.g. an older
+    config.json), so the default path builds no new object."""
+    prob = float(getattr(args, "synth_prob", 0.0))
+    if prob == 0:
+        return None
+    return P.SynthConfig(prob=prob, jitter=float(getattr(args, "synth_jitter", 0.08)),
+                         device=getattr(args, "synth_device", "gpu"),
+                         label_set=getattr(args, "synth_label_set", P.SYNTH_LABEL_SET_DEFAULT),
+                         hier_dev_cortex=float(getattr(args, "synth_hier_dev_cortex", 0.25)))
 
 
 def intensity_aug_device(args):

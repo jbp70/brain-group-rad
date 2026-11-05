@@ -21,7 +21,7 @@ cd "$REPO"
 source ~/miniconda3/etc/profile.d/conda.sh
 export PYTHONDONTWRITEBYTECODE=1
 
-PYFILES="models/*.py data_loading/*.py runtime/*.py main.py tests/*.py tests/gpu/*.py scripts/memory_model.py scripts/step_times_from_metrics.py slurm/sweep_level4.py scripts/summarize_runs.py scripts/collect_memory_runs.py predict.py inference/*.py evaluation/*.py"
+PYFILES="models/*.py data_loading/*.py runtime/*.py main.py tests/*.py tests/gpu/*.py scripts/memory_model.py scripts/step_times_from_metrics.py slurm/sweep_level4.py scripts/summarize_runs.py scripts/collect_memory_runs.py scripts/synth_preview.py scripts/compare_synth_eval.py predict.py eval_synth.py inference/*.py evaluation/*.py"
 # Login-node helpers (retrain-prereqs design 7.4): Python 3.6 syntax, stdlib only.
 PY36FILES="slurm/sweep_level4.py scripts/summarize_runs.py"
 status=0
@@ -46,7 +46,8 @@ python tests/np_reference.py || status=1
 python -c "import data_loading.params, data_loading.dali_loader as d; print('data_loading imports without TF/DALI; DALI_AVAILABLE =', d.DALI_AVAILABLE)" || status=1
 python -c "import runtime.args, runtime.schedulers, sys; assert 'tensorflow' not in sys.modules; print('runtime.args / runtime.schedulers import without TF')" || status=1
 python main.py --help >/dev/null && echo "main.py --help OK (no TF)" || status=1
-for s in tests/gpu/run_verify_glacier.sh tests/gpu/run_overfit_glacier.sh slurm/train_debug.sh slurm/m7_three_task.sh slurm/m8_memory.sh slurm/m8_level2_cascade.sh slurm/m9_memory.sh slurm/m9_level1_cascade.sh slurm/m10_batch_memory.sh slurm/m10_batch_memory_capped.sh slurm/m11_random_sources.sh slurm/m11_fp32_width_memory.sh slurm/r_level4.sh slurm/r_level2.sh slurm/r_level1.sh slurm/predict_mindboggle.sh slurm/eval_mindboggle.sh; do
+python -c "import sys, eval_synth; assert 'tensorflow' not in sys.modules" && python eval_synth.py --help >/dev/null && echo "eval_synth.py --help OK (no TF)" || status=1
+for s in tests/gpu/run_verify_glacier.sh tests/gpu/run_overfit_glacier.sh slurm/train_debug.sh slurm/m7_three_task.sh slurm/m8_memory.sh slurm/m8_level2_cascade.sh slurm/m9_memory.sh slurm/m9_level1_cascade.sh slurm/m10_batch_memory.sh slurm/m10_batch_memory_capped.sh slurm/m11_random_sources.sh slurm/m11_fp32_width_memory.sh slurm/r_level4.sh slurm/r_level2.sh slurm/r_level1.sh slurm/predict_mindboggle.sh slurm/eval_mindboggle.sh slurm/verify_synth.sh slurm/synth_preview.sh slurm/eval_synth.sh; do
     bash -n "$s" && echo "bash -n $s OK" || status=1
 done
 # TF-free unit tests (milestone 9: memory model, width presets, step times, SLURM scripts) in the

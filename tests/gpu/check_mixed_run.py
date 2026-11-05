@@ -82,6 +82,19 @@ Tasks: rigid, affine (linear) and deform. Passes (exit 0) when:
   - ``loss_scale`` INFO line whenever ``optimizer/loss_scale`` is logged (AMP): last / min value
     and the number of log windows at the floor (<= 1); "WARN" in the text when the last value is
     at the floor. Never a failure.
+* synth-contrast (`.agents/tasks/synth-contrast/design.md` 5.6, plan OD2), optional and off by
+  default (no result line without the flags). The number of executed steps of a task,
+  n_task_steps(t), is the sum of ``train_<t>/window_steps`` over the metrics.jsonl records: each
+  record is one LOG WINDOW (e.g. 25 steps), not one step.
+  - ``--expect-synth-prob p`` (p in [0, 1]): per task ``synth_frac_<task>``: the window_steps-
+    weighted mean of ``train_<task>/synth_frac`` over the records holding both keys; PASS iff
+    n_task_steps > 0 and |mean - p| <= 4 sqrt(p (1 - p) / n_task_steps) (p 0 or 1: equality).
+    INFO lines with the window-weighted means of ``train_<task>/loss_real`` / ``loss_synth``.
+    With ``--expect-bn-recal true`` and p > 0 also ``bn_recal_synth``: the bn_recalibration
+    event's ``synth_batches[t] == floor(planned[t] p)`` for every task, INFO ``synth_batches_used``.
+  - ``--min-task-steps rigid:20,affine:20,deform:80``: per listed task ``min_task_steps_<task>``
+    FAILs unless its ``trace_counts`` entry is 1 AND n_task_steps >= the threshold (a task that
+    never traced or never ran fails instead of passing the other checks vacuously).
 INFO lines carry passed=True and the detail prefix 'INFO', so they never change the PASS/FAIL
 tally; they are printed with the label INFO.
 Prints one line per criterion and writes nothing.
@@ -90,6 +103,7 @@ import argparse
 import json
 import math
 import os
+import re
 import struct
 import sys
 
@@ -123,6 +137,9 @@ PROJECT_MARGIN = 1.3
 LOSS_SCALE_KEY = "optimizer/loss_scale"
 MIN_WINDOW_TASK_STEPS = 20       # buckets with fewer steps of the task are not judged
 LOSS_SCALE_FLOOR = 1.0
+# synth-contrast (design 5.6): synthetic-step fraction bound and the --min-task-steps syntax.
+SYNTH_FRAC_SIGMAS = 4.0
+MIN_TASK_STEPS_RE = re.compile(r"^(rigid|affine|deform):[0-9]+(,(rigid|affine|deform):[0-9]+)*$")
 
 
 def _f32(x):
@@ -614,11 +631,83 @@ def _loss_scale_info(recs):
     return [("loss_scale", True, detail)]
 
 
+def task_steps(recs, t):
+    """Executed training steps of task ``t``: the sum of ``train_<t>/window_steps`` over the
+    metrics.jsonl records (synth-contrast plan OD2). Each record is one log WINDOW, not one step,
+    so counting records would under-count by the log interval."""
+    key = "train_%s/window_steps" % t
+    return sum(int(r["data"][key]) for r in recs if _finite(r["data"].get(key)))
+
+
+def _window_mean(recs, t, key):
+    """window_steps-weighted mean of ``key`` over the records holding it and window_steps."""
+    wk = "train_%s/window_steps" % t
+    num = den = 0.0
+    for r in recs:
+        d = r["data"]
+        if _finite(d.get(key)) and _finite(d.get(wk)):
+            num += float(d[wk]) * float(d[key])
+            den += float(d[wk])
+    return (num / den if den > 0 else float("nan")), den
+
+
+def parse_min_task_steps(text):
+    """'rigid:20,affine:20,deform:80' -> {'rigid': 20, ...}; ValueError on any other syntax."""
+    if not MIN_TASK_STEPS_RE.match(text or ""):
+        raise ValueError("--min-task-steps must look like rigid:20,affine:20,deform:80, got %r" % (text,))
+    out = {}
+    for item in text.split(","):
+        t, n = item.split(":")
+        out[t] = int(n)
+    return out
+
+
+def _check_synth_prob(recs, tasks, p, expect_bn_recal):
+    """--expect-synth-prob (design 5.6): per task the window_steps-weighted synth_frac within
+    4 sqrt(p (1 - p) / n) of p (exact for p 0 / 1); INFO loss_real / loss_synth means; with the
+    BN-recal check and p > 0 the event's planned synthetic slot counts."""
+    res = []
+    for t in tasks:
+        n = task_steps(recs, t)
+        mean, n_w = _window_mean(recs, t, "train_%s/synth_frac" % t)
+        tol = SYNTH_FRAC_SIGMAS * math.sqrt(p * (1.0 - p) / n) if n > 0 else 0.0
+        ok = n > 0 and n_w > 0 and _finite(mean) and abs(mean - p) <= tol + 1e-12
+        res.append(("synth_frac_%s" % t, ok, "window-weighted train_%s/synth_frac %s over %d of %d task "
+                    "steps (expected %g +- %.4g)" % (t, _fmt(mean), int(n_w), n, p, tol)))
+        losses = ["%s %s" % (k, _fmt(_window_mean(recs, t, "train_%s/%s" % (t, k))[0]))
+                  for k in ("loss_real", "loss_synth")]
+        res.append(("synth_loss_%s" % t, True, "INFO synth losses %s (window-weighted): %s"
+                    % (t, ", ".join(losses))))
+    if expect_bn_recal and p > 0:
+        events = [r["data"] for r in recs if r["data"].get("event") == "bn_recalibration"]
+        ev = events[-1] if events else {}
+        planned, got = ev.get("planned") or {}, ev.get("synth_batches")
+        want = {t: int(math.floor(int(planned.get(t, 0)) * p)) for t in tasks}
+        ok = isinstance(got, dict) and all(got.get(t) == want[t] for t in tasks)
+        res.append(("bn_recal_synth", ok, "bn_recalibration synth_batches %s (expected floor(planned x %g) "
+                    "= %s)" % (got, p, want)))
+        res.append(("bn_recal_synth_used", True, "INFO synth_batches_used %s" % (ev.get("synth_batches_used"),)))
+    return res
+
+
+def _check_min_task_steps(recs, tasks_min, trace_counts):
+    """--min-task-steps (design 5.6): FAIL unless trace count 1 AND n_task_steps >= threshold."""
+    res = []
+    for t, need in sorted(tasks_min.items()):
+        n = task_steps(recs, t)
+        tc = (trace_counts or {}).get(t)
+        res.append(("min_task_steps_%s" % t, tc == 1 and n >= need,
+                    "task %s: trace count %s (expected 1), %d executed steps (expected >= %d)"
+                    % (t, tc, n, need)))
+    return res
+
+
 def check(run_dir, tasks, steps, expect_best=True, expect_init_weights=None, expect_enc_grad=False,
           expect_cascade=False, expect_bn_recal=False, expect_skip=False, grad_balance_rule=False,
           grad_balance_from_step=GRAD_BALANCE_FROM_STEP, max_nonfinite_frac=0.0, expect_cascade_stages=1,
           expect_min_pairs=None, memory_budget_mb=0, project_steps=0, project_val_every=0,
-          max_window_nonfinite_frac=0.0, nonfinite_window_steps=500, nonfinite_from_step=100):
+          max_window_nonfinite_frac=0.0, nonfinite_window_steps=500, nonfinite_from_step=100,
+          expect_synth_prob=None, min_task_steps=None):
     """Returns (ok, [(name, passed, detail)]). ``expect_init_weights`` None (not checked) |
     'none' (not checked) | 'full' | 'partial'; ``expect_enc_grad``: check the milestone-7
     encoder grad-norm diagnostics. Milestone 8 (module docstring): ``expect_cascade``,
@@ -630,7 +719,10 @@ def check(run_dir, tasks, steps, expect_best=True, expect_init_weights=None, exp
     nonfinite-fixes: ``max_window_nonfinite_frac`` F > 0 (default 0 = off) adds one
     ``nonfinite_window_<task>`` result per task (``nonfinite_window_steps`` W, records with step >
     ``nonfinite_from_step``); a ``loss_scale`` INFO line is added whenever
-    ``optimizer/loss_scale`` is logged. The defaults reproduce the milestone-8 checks."""
+    ``optimizer/loss_scale`` is logged. synth-contrast: ``expect_synth_prob`` p (None = off) adds
+    ``synth_frac_<task>`` (+ ``bn_recal_synth`` with ``expect_bn_recal`` and p > 0);
+    ``min_task_steps`` {task: n} (None = off) adds ``min_task_steps_<task>``. The defaults
+    reproduce the milestone-8 checks."""
     if expect_cascade_stages not in (1, 2):
         raise ValueError("expect_cascade_stages must be 1 or 2, got %r" % (expect_cascade_stages,))
     res = []
@@ -719,6 +811,10 @@ def check(run_dir, tasks, steps, expect_best=True, expect_init_weights=None, exp
         res += _gpu_peak(recs, memory_budget_mb)
     if project_steps > 0:
         res += _step_time(recs, tasks, args, project_steps, project_val_every)
+    if expect_synth_prob is not None:
+        res += _check_synth_prob(recs, tasks, float(expect_synth_prob), expect_bn_recal)
+    if min_task_steps:
+        res += _check_min_task_steps(recs, min_task_steps, tc)
     return all(p for _, p, _ in res), res
 
 
@@ -774,7 +870,24 @@ def main(argv=None):
     ap.add_argument("--nonfinite-from-step", type=int, default=100,
                     help="--max-window-nonfinite-frac ignores log records with step <= this (early AMP "
                     "loss-scale overflows; default %(default)s)")
+    ap.add_argument("--expect-synth-prob", type=float, default=None,
+                    help="synth-contrast: per task the window_steps-weighted mean of train_<task>/synth_frac "
+                    "within 4 sqrt(p (1 - p) / n_task_steps) of p (p in [0, 1]); with --expect-bn-recal "
+                    "true and p > 0 also the BN-recal synth_batches; default: not checked")
+    ap.add_argument("--min-task-steps", default=None,
+                    help="synth-contrast: e.g. rigid:20,affine:20,deform:80; FAIL unless each listed task "
+                    "traced once and executed at least that many steps (sum of train_<task>/window_steps); "
+                    "default: not checked")
     a = ap.parse_args(argv)
+    if a.expect_synth_prob is not None and not (math.isfinite(a.expect_synth_prob)
+                                                and 0 <= a.expect_synth_prob <= 1):
+        ap.error("--expect-synth-prob must be in [0, 1], got %r" % a.expect_synth_prob)
+    min_steps = None
+    if a.min_task_steps is not None:
+        try:
+            min_steps = parse_min_task_steps(a.min_task_steps)
+        except ValueError as e:
+            ap.error(str(e))
     if a.project_val_every < 0:
         ap.error("--project-val-every must be >= 0, got %d" % a.project_val_every)
     if not (math.isfinite(a.max_window_nonfinite_frac) and 0 <= a.max_window_nonfinite_frac <= 1):
@@ -795,7 +908,8 @@ def main(argv=None):
                     project_steps=a.project_steps, project_val_every=a.project_val_every,
                     max_window_nonfinite_frac=a.max_window_nonfinite_frac,
                     nonfinite_window_steps=a.nonfinite_window_steps,
-                    nonfinite_from_step=a.nonfinite_from_step)
+                    nonfinite_from_step=a.nonfinite_from_step,
+                    expect_synth_prob=a.expect_synth_prob, min_task_steps=min_steps)
     for name, passed, detail in res:
         label = "INFO" if passed and detail.startswith("INFO") else ("PASS" if passed else "FAIL")
         print("%s %-22s %s" % (label, name, detail))

@@ -10,8 +10,9 @@ import pytest
 from preprocessing import export as ex
 from preprocessing.cli import main
 from preprocessing.export import (MANIFEST_COLUMNS, block_average, block_mode, export_check, export_npy,
-                                  level_affine, merge_parts, world_center)
-from preprocessing.luts import LUTS, SYNTHSEG_STRUCTURES, TRAIN18_CLASSES, _build, _identity, apply_lut
+                                  level_affine, merge_parts, nested_block_mode, synthfine_level, world_center)
+from preprocessing.luts import (LUTS, SYNTHSEG_STRUCTURES, TRAIN18_CLASSES, _build, _identity, apply_lut,
+                                synthfine_cortex_ids, synthfine_to_train18_table)
 from preprocessing.qc import summarize
 
 from . import phantoms as ph
@@ -653,3 +654,114 @@ def test_export_check(tmp_path, capsys):
     assert len(problems) == 2 and any("max label 19 outside 0..18" in p for p in problems)
     assert any("image_4.npy mismatch" in p for p in problems)
     assert main(["export-check", "--export-root", exp, "--sample", "0"]) == 1
+
+
+# ----------------------------------------------------------------- synthfine (synth-contrast design 3.1/3.2)
+
+def _nested_ref(fine, k, table):
+    """Loop reference: parent class by majority (ties -> smallest), then its most frequent fine id."""
+    out = np.zeros(tuple(s // k for s in fine.shape), fine.dtype)
+    for i, j, l in np.ndindex(*out.shape):
+        blk = fine[i * k:(i + 1) * k, j * k:(j + 1) * k, l * k:(l + 1) * k].ravel()
+        par = table[blk]
+        v, c = np.unique(par, return_counts=True)
+        cstar = v[c == c.max()].min()
+        v, c = np.unique(blk[par == cstar], return_counts=True)
+        out[i, j, l] = v[c == c.max()].min()
+    return out
+
+
+def test_synthfine_luts():
+    t = synthfine_to_train18_table()
+    assert t.dtype == np.uint8 and t.shape == (256,) and (t[103:] == 0).all()
+    t18 = LUTS["train18"]["map"]
+    fine = LUTS["synthfine"]["map"]
+    assert len(fine) == 103 and list(fine.values()) == list(range(103))
+    assert dict(fine) == dict(LUTS["synthseg"]["map"]) and dict(LUTS["synthfine"]["names"]) == dict(
+        LUTS["synthseg"]["names"])
+    for o, k in fine.items():
+        assert t[k] == t18[o], o
+    ids = synthfine_cortex_ids()
+    assert ids.dtype == np.int64 and len(ids) == 72
+    np.testing.assert_array_equal(ids, [2, 20] + list(range(33, 103)))
+
+
+def test_nested_block_mode_property_random():
+    table = synthfine_to_train18_table()
+    rng = np.random.default_rng(7)
+    maps = [rng.integers(0, 103, SHAPE).astype(np.uint8),
+            rng.choice(np.array([0, 1, 2, 19, 20, 33, 34, 35, 60, 102], np.uint8), SHAPE)]
+    for f in maps:
+        for k in (2, 4):
+            n = nested_block_mode(f, k, table)
+            assert n.dtype == np.uint8 and n.shape == tuple(s // k for s in SHAPE)
+            np.testing.assert_array_equal(table[n], block_mode(table[f], k))
+            np.testing.assert_array_equal(n, _nested_ref(f, k, table))
+            np.testing.assert_array_equal(synthfine_level(f, k), n)
+    assert synthfine_level(maps[0], 1) is maps[0]
+    # The plain fine vote differs (cortex split over parcels): the reason for the nested rule.
+    assert (table[block_mode(maps[0], 2)] != block_mode(table[maps[0]], 2)).any()
+
+
+def test_nested_block_mode_fragmented_cortex_and_ties():
+    table = synthfine_to_train18_table()
+    # Design 3.2 example: 3 white matter (fine 1 = raw 2) + 5 cortex over 3 DK parcels (2 + 2 + 1).
+    blk = np.array([1, 1, 1, 34, 34, 33, 33, 35], np.uint8).reshape(2, 2, 2)
+    assert block_mode(blk, 2).item() == 1                # plain fine vote: white matter
+    assert block_mode(table[blk], 2).item() == 2         # train18: cortex
+    assert nested_block_mode(blk, 2, table).item() == 33  # a cortex parcel; parcel tie 33/34 -> smallest
+    # Class tie (4 WM / 4 cortex) -> smallest class (WM); fine tie 1/19 within WM -> smallest fine id.
+    assert nested_block_mode(np.array([40] * 4 + [19] * 4, np.uint8).reshape(2, 2, 2), 2, table).item() == 19
+    assert nested_block_mode(np.array([40] * 4 + [19, 1, 19, 1], np.uint8).reshape(2, 2, 2), 2, table).item() == 1
+    # Parcel tie with the larger id first -> smallest fine id.
+    assert nested_block_mode(np.array([40] * 4 + [35] * 4, np.uint8).reshape(2, 2, 2), 2, table).item() == 35
+    with pytest.raises(ValueError, match="synthfine ids up to 103"):
+        nested_block_mode(np.full((2, 2, 2), 103, np.uint8), 2, table)
+    with pytest.raises(ValueError, match="negative"):
+        nested_block_mode(np.full((2, 2, 2), -1, np.int16), 2, table)
+    with pytest.raises(ValueError, match="integer"):
+        nested_block_mode(np.zeros((2, 2, 2), np.float32), 2, table)
+    with pytest.raises(ValueError, match="not divisible"):
+        nested_block_mode(np.zeros((2, 2, 3), np.uint8), 2, table)
+
+
+def test_export_npy_synthfine_levels_and_check(tmp_path, capsys):
+    out = str(tmp_path / "out")
+    labs = {}
+    for i in range(2):
+        labs[i] = _subject(out, "s%d" % i, seed=i)[2]
+    exp = str(tmp_path / "npy")
+    assert main(["export-npy", "--out-root", out, "--export-root", exp, "--label-sets", "train18,synthfine"]) == 0
+    ref = str(tmp_path / "npy_t18")
+    assert main(["export-npy", "--out-root", out, "--export-root", ref]) == 0
+    table = synthfine_to_train18_table()
+    for i in range(2):
+        e, e0 = os.path.join(exp, "ds", "s%d" % i), os.path.join(ref, "ds", "s%d" % i)
+        assert sorted(f for f in os.listdir(e) if f.startswith("labels_synthfine")) == [
+            "labels_synthfine.npy", "labels_synthfine_2.npy", "labels_synthfine_4.npy"]
+        full = np.load(os.path.join(e, "labels_synthfine.npy"))
+        np.testing.assert_array_equal(full, apply_lut(labs[i], LUTS["synthseg"], "uint8"))
+        for sfx in ("", "_2", "_4"):
+            f = np.load(os.path.join(e, "labels_synthfine%s.npy" % sfx))
+            assert f.dtype == np.uint8
+            np.testing.assert_array_equal(table[f], np.load(os.path.join(e, "labels_train18%s.npy" % sfx)))
+        for f in ("labels_train18.npy", "labels_train18_2.npy", "labels_train18_4.npy", "image.npy",
+                  "image_2.npy", "image_4.npy"):
+            with open(os.path.join(e, f), "rb") as a, open(os.path.join(e0, f), "rb") as b:
+                assert a.read() == b.read(), f
+    r = _manifest(exp)[0]
+    assert r["label_levels"] == "train18:1,2,4;synthfine:1,2,4"
+    assert r["labels_l4"] == "labels_train18_4.npy;labels_synthfine_4.npy"
+    assert sorted(json.load(open(os.path.join(exp, "label_luts.json")))["luts"]) == ["synthfine", "train18"]
+    assert export_check(exp, sample=0)[1] == []
+    # A hand-corrupted level-4 voxel (fine id of another train18 class) is reported.
+    p = os.path.join(exp, "ds", "s1", "labels_synthfine_4.npy")
+    f4 = np.load(p)
+    f4[0, 0, 0] = 0 if table[f4[0, 0, 0]] != 0 else 1
+    np.save(p, f4)
+    problems = export_check(exp, sample=0)[1]
+    assert problems == ["ds/s1: labels_synthfine_4.npy inconsistent with labels_train18_4.npy at level 4 "
+                        "(1 voxels differ)"]
+    assert main(["export-check", "--export-root", exp, "--sample", "0"]) == 1
+    with pytest.raises(ValueError, match="synthfine is a remapped"):
+        export_npy(out, str(tmp_path / "raw"), remap_labels=False, label_sets=["synthfine"])

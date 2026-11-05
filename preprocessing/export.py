@@ -5,7 +5,8 @@ Layout (one folder per case; suffix "" = full resolution, _2 = 1/2, _4 = 1/4):
   <export_root>/<dataset>/<subject_dir>/
       image.npy  image_2.npy  image_4.npy                       (160x224x192, 80x112x96, 40x56x48)
       labels_train18.npy  labels_train18_2.npy  labels_train18_4.npy
-      [labels_synthseg.npy labels_synthseg_2.npy] [labels_<provided>.npy, e.g. labels_lumir10.npy] [mask.npy]
+      [labels_synthseg.npy labels_synthseg_2.npy] [labels_synthfine.npy labels_synthfine_2.npy labels_synthfine_4.npy]
+      [labels_<provided>.npy, e.g. labels_lumir10.npy] [mask.npy]
   <export_root>/manifest_parts/<part>.csv, <part>.luts.json   (one per export-npy run / chunk)
   <export_root>/export_manifest.csv, label_luts.json            (written by the merge step)
   <export_root>/template/template[_k].npy, template_mask[_k].npy, template_info.json
@@ -23,8 +24,14 @@ the export fails):
           LABEL_SET_LEVELS): remapped first (fixed LUT, preprocessing/luts.py),
           then block majority vote (mode of each block). Tie-break: the SMALLEST
           remapped label id wins (deterministic; e.g. a 4/4 background/cortex
-          block becomes background). Provided label sets (lumir10, seg4, seg35,
-          ...) are FULL RESOLUTION ONLY (evaluation).
+          block becomes background). synthfine (the synthseg ids, levels 1, 2, 4;
+          synthetic-contrast training) uses a NESTED vote instead
+          (nested_block_mode): first the train18 class of the block (exactly
+          train18's block mode), then the most frequent fine id of that class, so
+          luts.synthfine_to_train18_table()[synthfine_k] == train18_k everywhere
+          (export-check verifies it). Provided label sets (lumir10, seg4, seg35,
+          ...) are FULL RESOLUTION ONLY (evaluation). An existing export gets
+          synthfine through the add-only `export-add-labels` (preprocessing/add_labels.py).
   affine  level k voxel q has its center at full-resolution index k*q + (k-1)/2
           (2q+0.5, 4q+1.5), so A_k = A_1 @ [[k,0,0,(k-1)/2], ...] where A_1 is the
           corrected target-grid affine stamped on image.nii.gz. The world center
@@ -39,7 +46,8 @@ Defaults:
               --image-dtype float16 halves the image size (values in [0, 1]; max
               abs rounding error ~2.4e-4 near 1.0).
   label sets  --label-sets train18 (default). Opt-in: synthseg (the 103-id
-              SynthSeg --parc remap, uint8) and provided labels such as lumir10.
+              SynthSeg --parc remap, uint8), synthfine (same ids, nested vote at
+              levels 2/4) and provided labels such as lumir10.
               A validation export passes --optional-label-sets lumir10. train18 and
               synthseg are read from the RAW SynthSeg ids in labels_synthseg.nii.gz;
               any id missing from a fixed LUT fails the export (ids and case listed).
@@ -100,7 +108,7 @@ import numpy as np
 
 from . import nifti
 from .labels import to_label_dtype
-from .luts import apply_lut, get_lut, lut_dtype, lut_json
+from .luts import apply_lut, get_lut, lut_dtype, lut_json, synthfine_to_train18_table
 
 log = logging.getLogger(__name__)
 
@@ -113,10 +121,13 @@ DEFAULT_LEVELS = (1, 2, 4)
 DEFAULT_LABEL_SETS = ("train18",)
 DEFAULT_CONTRASTS = ("T1w",)
 # Label sets read from labels_synthseg.nii.gz (raw SynthSeg ids); others from labels_<name>.nii.gz.
-SYNTHSEG_SETS = ("train18", "synthseg")
+SYNTHSEG_SETS = ("train18", "synthseg", "synthfine")
 # Levels at which a label set is exported (those of --levels in this tuple); any set not listed
 # is full resolution only (1,). synthseg has no level 4 (many fine labels are a few voxels at 4 mm).
-LABEL_SET_LEVELS = {"train18": (1, 2, 4), "synthseg": (1, 2)}
+# synthfine has all levels (nested vote, train18-consistent; synthesis needs it at every level).
+LABEL_SET_LEVELS = {"train18": (1, 2, 4), "synthseg": (1, 2), "synthfine": (1, 2, 4)}
+# Number of synthfine ids (contiguous 0..102, the SynthSeg --parc remap).
+N_SYNTHFINE = 103
 _NAME = re.compile(r"^[A-Za-z0-9_-]+$")
 
 MISSING_OPTIONAL = "missing_optional_labels"
@@ -177,6 +188,52 @@ def block_mode(lab: np.ndarray, k: int, what: str = "labels") -> np.ndarray:
     if vals is not None:
         win = vals[win]
     return win.astype(lab.dtype).reshape(x, y, z)
+
+
+def nested_block_mode(fine: np.ndarray, k: int, table: np.ndarray, what: str = "labels") -> np.ndarray:
+    """Nested majority vote over k x k x k blocks (design synth-contrast 3.2).
+
+    fine: synthfine ids 0..102; table: fine id -> parent class (luts.synthfine_to_train18_table).
+    Per block: the parent class c* with the most voxels (ties -> smallest class; equals
+    block_mode(table[fine], k)), then the most frequent fine id among those of class c*
+    (ties -> smallest fine id), so table[result] == block_mode(table[fine], k) exactly.
+    Returns the input dtype.
+    """
+    if not np.issubdtype(fine.dtype, np.integer):
+        raise ValueError("%s: nested_block_mode needs an integer label map, got %s" % (what, fine.dtype))
+    _check_divisible(fine.shape, k, what)
+    x, y, z = (int(n) // k for n in fine.shape)
+    b = np.asarray(fine).reshape(x, k, y, k, z, k).transpose(0, 2, 4, 1, 3, 5).reshape(-1, k ** 3)
+    if b.size and int(b.min()) < 0:
+        raise ValueError("%s: negative label values" % what)
+    if b.size and int(b.max()) >= N_SYNTHFINE:
+        raise ValueError("%s: synthfine ids up to %d, expected 0..%d" % (what, int(b.max()), N_SYNTHFINE - 1))
+    nf = N_SYNTHFINE
+    nb = b.shape[0]
+    idx = np.arange(nb, dtype=np.int64)[:, None] * nf + b.astype(np.int64)
+    c64 = np.bincount(idx.ravel(), minlength=nb * nf).reshape(nb, nf)
+    del idx
+    counts = c64.astype(np.int16)  # counts <= k^3 = 64
+    del c64
+    g = np.asarray(table)[:nf].astype(np.int64)
+    n_cls = int(g.max()) + 1
+    pc = np.zeros((nb, n_cls), dtype=np.int32)
+    for c in range(n_cls):
+        cols = np.nonzero(g == c)[0]
+        if cols.size:
+            pc[:, c] = counts[:, cols].sum(axis=1, dtype=np.int32)
+    cstar = pc.argmax(axis=1)
+    del pc
+    masked = np.where(g[None, :] == cstar[:, None], counts, np.int16(-1))
+    win = masked.argmax(axis=1)
+    return win.astype(fine.dtype).reshape(x, y, z)
+
+
+def synthfine_level(fine_full: np.ndarray, k: int) -> np.ndarray:
+    """synthfine labels at level k: the full map at k == 1, else the nested vote (train18-consistent)."""
+    if k == 1:
+        return fine_full
+    return nested_block_mode(fine_full, k, synthfine_to_train18_table(), "synthfine level %d" % k)
 
 
 def level_affine(affine, k: int) -> np.ndarray:
@@ -411,6 +468,8 @@ def export_npy(out_root: str, export_root: str, datasets: Optional[Sequence[str]
                              % (ls, ",".join(str(k) for k in allowed)))
     if not remap_labels and "train18" in sets:
         raise ValueError("train18 is a remapped label set; drop --no-remap-labels or train18")
+    if not remap_labels and "synthfine" in sets:
+        raise ValueError("synthfine is a remapped label set; drop --no-remap-labels or synthfine")
     want_contrast = [c for c in _split_list(contrasts) if c.lower() != "any"]
     want_split = [s for s in _split_list(splits) if s.lower() != "any"]
     selected = start is not None or end is not None or rows is not None
@@ -504,8 +563,12 @@ def export_npy(out_root: str, export_root: str, datasets: Optional[Sequence[str]
                 return cache[key]
 
             for k in ls_levels:
-                make = full_labels if k == 1 else (lambda k=k, fl=full_labels, ls=ls: block_mode(
-                    fl(), k, "%s labels_%s" % (d, ls)))
+                if k == 1:
+                    make = full_labels
+                elif ls == "synthfine":  # nested vote: consistent with train18 at every level
+                    make = (lambda k=k, fl=full_labels: synthfine_level(fl(), k))
+                else:
+                    make = (lambda k=k, fl=full_labels, ls=ls: block_mode(fl(), k, "%s labels_%s" % (d, ls)))
                 items.append((os.path.join(dst, "labels_%s%s.npy" % (ls, level_suffix(k))), dt, lshape.get(
                     k, tuple(shape)), make))
         if missing:
@@ -671,8 +734,25 @@ def merge_parts(export_root: str) -> int:
 
 # ----------------------------------------------------------------- check
 
+def _synthfine_problems(case: str, d: str, fine_fn: str, t18_fn: str, k: int) -> List[str]:
+    """synthfine consistency rule: uint8, ids <= 102 and table[synthfine_k] == train18_k everywhere."""
+    fine = np.load(os.path.join(d, fine_fn))
+    t18 = np.load(os.path.join(d, t18_fn))
+    if fine.dtype != np.uint8:
+        return ["%s: %s has dtype %s, expected uint8" % (case, fine_fn, fine.dtype)]
+    if fine.size and int(fine.max()) >= N_SYNTHFINE:
+        return ["%s: %s max label %d outside 0..%d" % (case, fine_fn, int(fine.max()), N_SYNTHFINE - 1)]
+    n = int(np.count_nonzero(synthfine_to_train18_table()[fine] != t18))
+    if n:
+        return ["%s: %s inconsistent with %s at level %d (%d voxels differ)" % (case, fine_fn, t18_fn, k, n)]
+    return []
+
+
 def export_check(export_root: str, sample: int = 20, seed: int = 0) -> Tuple[int, List[str], List[str]]:
     """Verify files listed in export_manifest.csv: dtype/shape, label range, world centers.
+
+    Levels listing both synthfine and train18 also need synthfine_to_train18_table()[synthfine_k]
+    == train18_k for every voxel (synth-contrast design 3.4).
 
     sample > 0 checks that many random cases (seed), 0 checks all. Returns
     (n_checked, problems, report lines).
@@ -707,16 +787,20 @@ def export_check(export_root: str, sample: int = 20, seed: int = 0) -> Tuple[int
                 ls = fn[len("labels_"):-len(".npy")]
                 ls = ls[:-len(sfx)] if sfx else ls
                 files.append((fn, dts.get(ls, ""), ls))
+            ok_labels: Dict[str, str] = {}
             for fn, dt, ls in files:
                 st, desc = _npy_state(os.path.join(d, fn), dt, sh)
                 if st != "ok":
                     problems.append("%s: %s %s (%s; expected %s %s)" % (case, fn, st, desc, dt, r["shape_l%d" % k]))
                     continue
                 if ls is not None:
+                    ok_labels[ls] = fn
                     top = int(np.load(os.path.join(d, fn), mmap_mode="r").max())
                     label_max[ls] = max(label_max.get(ls, 0), top)
                     if ls in n_cls and top >= n_cls[ls]:
                         problems.append("%s: %s max label %d outside 0..%d" % (case, fn, top, n_cls[ls] - 1))
+            if "synthfine" in ok_labels and "train18" in ok_labels:
+                problems += _synthfine_problems(case, d, ok_labels["synthfine"], ok_labels["train18"], k)
             ak = _parse_vec(r["affine_l%d" % k]).reshape(4, 4)
             wc = world_center(sh, ak)
             if np.max(np.abs(wc - _parse_vec(r["world_center_l%d" % k]))) > 1e-4:

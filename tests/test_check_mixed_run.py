@@ -719,5 +719,147 @@ class TestLevel1Chain(CheckMixedRunCase):
         self.assertEqual(cmr.expected_pairs(16, 16, 0.1, 0), 24)
 
 
+def synth_fn(sizes, frac=None, losses=True):
+    """train_fn for synth-contrast runs: ``sizes`` {task: window_steps} or a callable(step) -> that
+    dict; ``frac(task, step)`` the logged train_<task>/synth_frac (None = not logged)."""
+    def fn(step):
+        d = {}
+        n_by_task = sizes(step) if callable(sizes) else sizes
+        for t, n in n_by_task.items():
+            d["train_%s/window_steps" % t] = n
+            if frac is not None:
+                d["train_%s/synth_frac" % t] = frac(t, step)
+                if losses:
+                    d.update({"train_%s/loss_real" % t: 2.0, "train_%s/loss_synth" % t: 3.0})
+        return d
+    return fn
+
+
+class TestSynthContrast(CheckMixedRunCase):
+    """synth-contrast design 5.6 / plan OD2: --expect-synth-prob and --min-task-steps, both
+    counting executed task steps as the sum of train_<task>/window_steps."""
+
+    SIZES = {"rigid": 6, "affine": 6, "deform": 13}
+
+    def details(self, res):
+        return dict((n, (p, x)) for n, p, x in res)
+
+    def synth_run(self, name, frac, sizes=None, steps=1000, tasks=TASKS3, **kw):
+        return self.run_dir(name, tasks, steps=steps, every=25,
+                            train_fn=synth_fn(sizes or self.SIZES, frac), **kw)
+
+    def test_task_steps_nit1(self):
+        # 4 log records x 25 deform steps = 100 executed steps (not 4 records)
+        d = self.run_dir("n1", ["deform"], steps=100, every=25, train_fn=synth_fn({"deform": 25}))
+        ok, res = cmr.check(d, ["deform"], 100, min_task_steps={"deform": 100})
+        self.assertTrue(ok, self.failed(res))
+        self.assertIn("100 executed steps (expected >= 100)", self.details(res)["min_task_steps_deform"][1])
+        ok, res = cmr.check(d, ["deform"], 100, min_task_steps={"deform": 101})
+        self.assertFalse(ok)
+        self.assertEqual(self.failed(res), ["min_task_steps_deform"])
+
+    def test_min_task_steps_zero_steps_or_no_trace_fails(self):
+        sizes = {"rigid": 6, "affine": 6, "deform": 0}
+        d = self.synth_run("z", None, sizes=sizes, steps=100)
+        ok, res = cmr.check(d, TASKS3, 100, min_task_steps={"rigid": 20, "affine": 20, "deform": 1})
+        self.assertEqual(self.failed(res), ["min_task_steps_deform"])
+        d2 = self.synth_run("t", None, steps=100, trace={"rigid": 1, "affine": 1, "deform": 0})
+        ok, res = cmr.check(d2, TASKS3, 100, min_task_steps={"deform": 10})
+        self.assertIn("min_task_steps_deform", self.failed(res))
+        self.assertIn("trace count 0", self.details(res)["min_task_steps_deform"][1])
+        # a task without window_steps at all (never logged) fails too
+        d3 = self.run_dir("none", TASKS3, steps=100, every=25)
+        ok, res = cmr.check(d3, TASKS3, 100, min_task_steps={"rigid": 1})
+        self.assertEqual(self.failed(res), ["min_task_steps_rigid"])
+
+    def test_synth_frac_within_and_outside_bound(self):
+        d = self.synth_run("in", lambda t, s: 0.5)
+        ok, res = cmr.check(d, TASKS3, 1000, expect_synth_prob=0.5)
+        self.assertTrue(ok, self.failed(res))
+        x = self.details(res)
+        self.assertIn("over 520 of 520 task steps", x["synth_frac_deform"][1])
+        self.assertTrue(x["synth_loss_rigid"][1].startswith("INFO synth losses rigid"))
+        self.assertIn("loss_real 2, loss_synth 3", x["synth_loss_rigid"][1])
+        # 0.6: deform tol 4 x 0.5 / sqrt(520) = 0.088 -> FAIL; rigid / affine tol 0.129 -> PASS
+        d2 = self.synth_run("out", lambda t, s: 0.6)
+        ok, res = cmr.check(d2, TASKS3, 1000, expect_synth_prob=0.5)
+        self.assertEqual(self.failed(res), ["synth_frac_deform"])
+        d3 = self.synth_run("out2", lambda t, s: 0.7)
+        self.assertEqual(sorted(self.failed(cmr.check(d3, TASKS3, 1000, expect_synth_prob=0.5)[1])),
+                         ["synth_frac_affine", "synth_frac_deform", "synth_frac_rigid"])
+
+    def test_weighting_by_window_steps(self):
+        # alternating windows: 1 step all synthetic, 49 steps all real -> weighted mean 0.02
+        # (the unweighted record mean would be 0.5)
+        def sizes(s):
+            return {"deform": 1 if (s // 25) % 2 else 49}
+
+        def frac(t, s):
+            return 1.0 if (s // 25) % 2 else 0.0
+        d = self.synth_run("w", frac, sizes=sizes, tasks=["deform"])
+        ok, res = cmr.check(d, ["deform"], 1000, expect_synth_prob=0.02)
+        self.assertTrue(ok, self.failed(res))
+        self.assertIn("synth_frac 0.02 ", self.details(res)["synth_frac_deform"][1])
+        ok, res = cmr.check(d, ["deform"], 1000, expect_synth_prob=0.5)
+        self.assertEqual(self.failed(res), ["synth_frac_deform"])
+
+    def test_exact_p0_p1_and_absent_keys(self):
+        d = self.synth_run("p0", lambda t, s: 0.0)
+        self.assertTrue(cmr.check(d, TASKS3, 1000, expect_synth_prob=0.0)[0])
+        self.assertFalse(cmr.check(d, TASKS3, 1000, expect_synth_prob=1.0)[0])
+        d1 = self.synth_run("p1", lambda t, s: 1.0)
+        self.assertTrue(cmr.check(d1, TASKS3, 1000, expect_synth_prob=1.0)[0])
+        # a p 0 (synthesis off) run logs no synth_frac: FAIL only when the option is given
+        off = self.synth_run("off", None)
+        ok, res = cmr.check(off, TASKS3, 1000)
+        self.assertTrue(ok, self.failed(res))
+        self.assertFalse([n for n, _, _ in res if n.startswith("synth") or n.startswith("min_task")
+                          or n.startswith("bn_recal_synth")])
+        ok, res = cmr.check(off, TASKS3, 1000, expect_synth_prob=0.0)
+        self.assertEqual(sorted(self.failed(res)), ["synth_frac_affine", "synth_frac_deform", "synth_frac_rigid"])
+
+    def test_bn_recal_synth_counts(self):
+        good = dict(BN_EVENT, synth_batches={"rigid": 1, "affine": 1, "deform": 2},
+                    synth_batches_used={"rigid": 1, "affine": 1, "deform": 1})
+        d = self.synth_run("bn", lambda t, s: 0.5, events=(good,), config=cascade_config())
+        ok, res = cmr.check(d, TASKS3, 1000, expect_bn_recal=True, expect_synth_prob=0.5)
+        self.assertTrue(ok, self.failed(res))
+        x = self.details(res)
+        self.assertTrue(x["bn_recal_synth"][0])
+        self.assertIn("synth_batches_used {'rigid': 1, 'affine': 1, 'deform': 1}", x["bn_recal_synth_used"][1])
+        bad = dict(good, synth_batches={"rigid": 1, "affine": 1, "deform": 1})
+        d2 = self.synth_run("bn2", lambda t, s: 0.5, events=(bad,), config=cascade_config())
+        ok, res = cmr.check(d2, TASKS3, 1000, expect_bn_recal=True, expect_synth_prob=0.5)
+        self.assertEqual(self.failed(res), ["bn_recal_synth"])
+        missing = self.synth_run("bn3", lambda t, s: 0.5, events=(BN_EVENT,), config=cascade_config())
+        ok, res = cmr.check(missing, TASKS3, 1000, expect_bn_recal=True, expect_synth_prob=0.5)
+        self.assertEqual(self.failed(res), ["bn_recal_synth"])
+        # without --expect-bn-recal no recal synth line
+        ok, res = cmr.check(missing, TASKS3, 1000, expect_synth_prob=0.5)
+        self.assertNotIn("bn_recal_synth", self.details(res))
+
+    def test_cli(self):
+        d = self.run_dir("cli", ["deform"], steps=100, every=25,
+                         train_fn=synth_fn({"deform": 25}, lambda t, s: 0.5))
+        base = [d, "--tasks", "deform", "--steps", "100"]
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(cmr.main(base + ["--min-task-steps", "deform:100"]), 0)
+            self.assertEqual(cmr.main(base + ["--min-task-steps", "deform:101"]), 1)
+            self.assertEqual(cmr.main(base + ["--expect-synth-prob", "0.5"]), 0)
+            self.assertEqual(cmr.main(base + ["--expect-synth-prob", "1"]), 1)
+        self.assertIn("FAIL min_task_steps_deform", out.getvalue())
+        self.assertEqual(cmr.parse_min_task_steps("rigid:20,affine:20,deform:80"),
+                         {"rigid": 20, "affine": 20, "deform": 80})
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            for bad in (["--min-task-steps", "deform80"], ["--min-task-steps", "warp:3"],
+                        ["--min-task-steps", ""], ["--expect-synth-prob", "1.5"],
+                        ["--expect-synth-prob", "-0.1"]):
+                with self.assertRaises(SystemExit):
+                    cmr.main(base + bad)
+        self.assertIn("--min-task-steps must look like", err.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()

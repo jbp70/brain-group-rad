@@ -330,6 +330,86 @@ class TestDeformData(unittest.TestCase):
             dali_loader.DeformPipeline(4, ["a.npy"], ["a_l.npy"], 1, residual_ranges={"shear": -1})
 
 
+class TestSynthData(unittest.TestCase):
+    """Synthetic contrast (synth-contrast design 5.1): linear label output, counts, label inputs
+    and `LinearDataModule.synth_label_files` (no DALI needed)."""
+
+    def test_signature_with_labels(self):
+        vol = (6, 40, 56, 48, 1)
+        shapes, dtypes = dali_loader.linear_output_signature("rigid", 4, 6, labels=True)
+        self.assertEqual(shapes, (vol, (6, 3, 4), (6, 3, 4), vol))
+        self.assertEqual(dtypes, ("float32", "float32", "float32", "uint8"))
+        shapes, dtypes = dali_loader.linear_output_signature("affine", 4, 6, labels=True)
+        self.assertEqual(shapes, (vol, (6, 3, 4), vol))
+        self.assertEqual(dtypes, ("float32", "float32", "uint8"))
+        # Labels before the control extras (G_dali, control_version).
+        shapes, dtypes = dali_loader.linear_output_signature("rigid", 4, 6, control=True, labels=True)
+        self.assertEqual(shapes, (vol, (6, 3, 4), (6, 3, 4), vol, (6, 3, 4), (6,)))
+        self.assertEqual(dtypes, ("float32",) * 3 + ("uint8",) + ("float32",) * 2)
+        shapes, dtypes = dali_loader.linear_output_signature("affine", 4, 6, control=True, labels=True)
+        self.assertEqual(dtypes.index("uint8"), 2)
+        self.assertEqual(len(shapes), 5)
+        # Default unchanged.
+        self.assertEqual(dali_loader.linear_output_signature("rigid", 4, 6, control=True)[1],
+                         ("float32",) * 5)
+
+    def test_counts_with_labels(self):
+        self.assertEqual(dali_loader.base_output_count("rigid", labels=True), 4)
+        self.assertEqual(dali_loader.base_output_count("affine", labels=True), 3)
+        self.assertEqual(dali_loader.base_output_count("rigid"), 3)
+        self.assertEqual(dali_loader.output_count("rigid", labels=True), 4)
+        self.assertEqual(dali_loader.output_count("affine", labels=True), 3)
+        self.assertEqual(dali_loader.output_count("affine"), 2)
+        # Deform unchanged (it always reads labels).
+        self.assertEqual(dali_loader.output_count("deform", labels=True), 2)
+        self.assertEqual(dali_loader.output_count("deform", True, labels=True), 3)
+
+    def test_linear_label_inputs(self):
+        dali_loader.check_linear_label_inputs(["a.npy", "b.npy"], ["a_l.npy", "b_l.npy"])
+        with self.assertRaises(ValueError):
+            dali_loader.check_linear_label_inputs(["a.npy"], ["a_l.npy"], "buffer")
+        with self.assertRaises(ValueError):
+            dali_loader.check_linear_label_inputs(["a.npy", "b.npy"], ["a_l.npy"])
+        # The pipeline runs the check before require_dali.
+        with self.assertRaises(ValueError):
+            dali_loader.LinearPipeline("rigid", 4, ["a.npy"], 1, label_files=["a_l.npy"],
+                                       shuffle_mode="buffer")
+        with self.assertRaises(ValueError):
+            dali_loader.LinearPipeline("affine", 4, ["a.npy", "b.npy"], 1, label_files=["a_l.npy"])
+
+    def test_synth_label_files(self):
+        from tests import runtime_helpers as rh
+        tmp = tempfile.mkdtemp(prefix="synth_dm_")
+        try:
+            root = rh.write_fake_export(tmp, n_train=3, n_val=2, labels=True, fine_labels=True)
+            data = dm.LinearDataModule(root, level=4, batch_size=2, seed=0)
+            self.assertIsNone(data.synth_label_set)
+            self.assertIsNone(data.synth_label_files)          # default: nothing resolved
+            data = dm.LinearDataModule(root, level=4, batch_size=2, seed=0,
+                                       synth_label_set="synthfine")
+            self.assertEqual(len(data.synth_label_files), len(data.files))
+            for img, lab, l18 in zip(data.files, data.synth_label_files, data.label_files):
+                self.assertEqual(os.path.dirname(img), os.path.dirname(lab))
+                self.assertEqual(os.path.basename(lab), "labels_synthfine_4.npy")
+                self.assertEqual(os.path.basename(l18), "labels_train18_4.npy")
+            # A missing set is a startup ValueError naming the case (resolved in __init__).
+            with self.assertRaises(ValueError) as cm:
+                dm.LinearDataModule(root, level=4, batch_size=2, synth_label_set="nosuchset")
+            self.assertIn("LUMIR/train_00", str(cm.exception))
+            # An export without fine labels: also a startup error with the default set name.
+            tmp2 = tempfile.mkdtemp(prefix="synth_dm2_")
+            try:
+                root2 = rh.write_fake_export(tmp2, n_train=3, n_val=2, labels=True)
+                dm.LinearDataModule(root2, level=4, batch_size=2)        # default: fine
+                with self.assertRaises(ValueError):
+                    dm.LinearDataModule(root2, level=4, batch_size=2,
+                                        synth_label_set=P.SYNTH_LABEL_SET_DEFAULT)
+            finally:
+                shutil.rmtree(tmp2, ignore_errors=True)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 class TestDaliGuard(unittest.TestCase):
     @unittest.skipIf(dali_loader.DALI_AVAILABLE, "nvidia.dali is installed")
     def test_pipeline_needs_dali(self):

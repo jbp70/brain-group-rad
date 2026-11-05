@@ -56,6 +56,13 @@ Deformable pipeline (milestone 6; real val cases of level `--level` with `labels
       batches of one real image: KS p >= 1e-3 on per-image mean / std / p1 / p50 / p99 / fraction
       at 0 and 1, all values in [0, 1]; m3 INFO DALI process memory of one LinearPipeline with /
       without augmentation.
+(s) synthetic contrast (synth-contrast design 7.1; not in the default --checks list because it
+      needs the `--synth-label-set` export, default synthfine; run by slurm/verify_synth.sh):
+      s1 LinearPipeline (rigid, shuffle off, aug off) with label_files: images / T_dali / Rt_dali
+      equal the no-label pipeline of the same seed (INFO if not), labels uint8 equal to the npy
+      files and (label > 0) == (unwarped image > 0) on >= 99 % of the voxels; s2 TF render of the
+      unwarped image with T_mm^-1 vs the DALI warp, interior mean |diff| < 1e-3; s3 INFO DALI
+      process-memory delta with / without the label reader.
 Select checks with --checks (e.g. h,i,j,k). All temporary files go to a fresh folder under
 --scratch (never /tmp), removed at the end.
 --level {4,2,1} (default 4; milestone 8, level 1 milestone 9 design 5.4) runs the checks at that
@@ -1045,6 +1052,77 @@ def check_m(files, tmp, args):
     return ok and ok2
 
 
+# ---------------------------------------------------------------------------- (s) synthetic contrast
+def check_s(rows, args):
+    """Synthetic contrast (synth-contrast design 7.1): LinearPipeline with `label_files`.
+    s1: images and T_dali equal the no-label pipeline of the same seed (INFO if not: the label
+    reader is created after every random op, so a difference is unexpected but not a correctness
+    issue); labels uint8 in the template space, (label > 0) == (unwarped image > 0) on >= 99 % of
+    the voxels (shuffle=False, the train18-consistent synthfine files). s2: TF render of the
+    unwarped real image with T_mm^-1 (models.layers.transform_image) vs the DALI-warped image,
+    interior mean |diff| < 1e-3. s3 (INFO): DALI process-memory delta of one pipeline with /
+    without the label reader at this level."""
+    files = dm.manifest_files(rows, LEVEL, "train")[:args.n_real]
+    lab_files = dm.manifest_files(rows, LEVEL, "train", kind="labels", label_set=args.synth_label_set)[:args.n_real]
+    n = len(files)
+    src = np.stack([np.load(os.path.join(args.data, f)) for f in files]).astype(np.float32)
+    lab_np = np.stack([np.load(os.path.join(args.data, f)) for f in lab_files])
+    ok = True
+    s3 = {}
+    outs = {}
+    for name, lf in (("no_labels", None), ("labels", lab_files)):
+        gc.collect()
+        before = gpu_memory().get("smi_process_mb")
+        pipe = dl.LinearPipeline("rigid", LEVEL, files, n, seed=args.seed + 61, file_root=args.data,
+                                 shuffle=False, intensity_aug=P.IntensityAugConfig.off(),
+                                 num_threads=args.num_threads, label_files=lf)
+        outs[name] = run_once(pipe)
+        after = gpu_memory().get("smi_process_mb")
+        s3[name] = {"before_mb": before, "after_mb": after,
+                    "delta_mb": (after - before) if (before is not None and after is not None) else None}
+        del pipe
+        gc.collect()
+    # s1 ------------------------------------------------------------------
+    a, b = outs["no_labels"], outs["labels"]
+    same = {"images": float(np.abs(a[0] - b[0]).max()), "T_dali": float(np.abs(a[1] - b[1]).max()),
+            "Rt_dali": float(np.abs(a[2] - b[2]).max())}
+    identical = all(v == 0.0 for v in same.values())
+    record("s1_streams_unchanged", True if identical else None,
+           "images / T_dali / Rt_dali with labels vs without (same seed): max |diff| %s%s" % (
+               same, "" if identical else " (INFO: streams differ; not a correctness issue)"), **same)
+    lab = b[3]
+    agree = []
+    exact = True
+    for i in range(n):
+        li = lab[i].reshape(SHAPE)
+        exact &= bool(np.array_equal(li, lab_np[i].reshape(SHAPE)))
+        agree.append(float(((li > 0) == (src[i] > 0)).mean()))
+    s1_ok = lab.dtype == np.uint8 and lab.shape == (n,) + tuple(SHAPE) + (1,) and exact and min(agree) >= 0.99
+    ok &= bool(s1_ok)
+    record("s1_label_alignment", s1_ok, "labels %s %s, equal to the npy files %s, (label > 0) == (image > 0) "
+           "min %.4f over %d cases (>= 0.99)" % (lab.dtype, lab.shape, exact, min(agree), n),
+           per_image_agreement=agree)
+    # s2 ------------------------------------------------------------------
+    imgs, t_d = b[0], b[1]
+    t_mm = pp.dali_to_mm(t_d, LEVEL).numpy()
+    t_inv = np.linalg.inv(t_mm.astype(np.float64)).astype(np.float32)
+    render = layers.transform_image(src[..., None], t_inv, SPACING).numpy()
+    inner = np.zeros(SHAPE, bool)
+    inner[2:-2, 2:-2, 2:-2] = True
+    per = []
+    for i in range(n):
+        m = inner & valid_mask(np.linalg.inv(t_mm[i].astype(np.float64)), SHAPE, SPACING)
+        per.append(float(np.abs(render[i, ..., 0] - imgs[i, ..., 0])[m].mean()))
+    s2_ok = max(per) < 1e-3
+    ok &= bool(s2_ok)
+    record("s2_tf_render", s2_ok, "TF render with T_mm^-1 vs DALI warp: interior mean |diff| max %.2e (< 1e-3)"
+           % max(per), per_image_mean_abs=per)
+    # s3 ------------------------------------------------------------------
+    record("s3_dali_memory", None, "one rigid LinearPipeline N %d level %d: process +%s MB with labels, +%s MB "
+           "without" % (n, LEVEL, s3["labels"]["delta_mb"], s3["no_labels"]["delta_mb"]), **s3)
+    return ok
+
+
 # ---------------------------------------------------------------------------- main
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -1069,6 +1147,8 @@ def main():
                     "over 20 synthetic groups per task at 10 iterations, G 30 deg / Rt 20 deg, float64; "
                     ".agents/tasks/milestone-5/measure_bary.py)")
     ap.add_argument("--keep-tmp", action="store_true")
+    ap.add_argument("--synth-label-set", default=P.SYNTH_LABEL_SET_DEFAULT,
+                    help="label set of check (s) (default %(default)s; needs the export-add-labels export)")
     ap.add_argument("--level", type=int, choices=(4, 2, 1), default=4,
                     help="pyramid level of the checks (milestone 8: 2 for the level-2 cascade; "
                          "milestone 9: 1, full resolution)")
@@ -1146,6 +1226,9 @@ def main():
         # (m): TF-side intensity augmentation (--intensity-aug-device tf) vs DALI.
         if "m" in checks:
             guarded("m_tf_intensity_aug", check_m, files, tmp, args)
+        # (s): synthetic contrast, LinearPipeline with the synthfine label reader.
+        if "s" in checks:
+            guarded("s_synth_labels", check_s, rows, args)
     finally:
         if not args.keep_tmp:
             shutil.rmtree(tmp, ignore_errors=True)

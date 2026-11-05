@@ -21,7 +21,7 @@ import tempfile
 import unittest
 
 from tests import tf_setup  # noqa: F401  (log level, TF32 off, GPU memory growth)
-from tests.runtime_helpers import free_memory, narrow_config, synthetic_group
+from tests.runtime_helpers import fine_labels_from_train18, free_memory, narrow_config, synthetic_group
 import numpy as np
 import tensorflow as tf
 
@@ -1122,6 +1122,232 @@ class TestThreeTasks(DeformCase):
                                  ("affine", N, True), ("deform", 2, False), ("deform", 2, True)]))
         self.assertTrue(tr.checkpoint.latest_best.endswith("best-%d" % n_steps))
         self.assertTrue(tr.checkpoint.latest_best_named("deform").endswith("best_deform-%d" % n_steps))
+
+
+# ============================================================ synthetic contrast (synth-contrast)
+RATIO3 = {"rigid": 1.0, "affine": 1.0, "deform": 2.0}
+
+
+def fine_label_group(level, n, seed):
+    """synthfine labels uint8 [n, X, Y, Z, 1] of n label phantoms (classes 1..8 read as train18)."""
+    rng = np.random.default_rng(seed)
+    out = []
+    for _ in range(n):
+        _, lab = fd.synthetic_label_phantom(P.LEVEL_SHAPE[level], rng)
+        out.append(fine_labels_from_train18(lab, rng))
+    return np.stack(out)[..., None]
+
+
+def _seed_with_synth_outcomes(ratio, n_steps, prob, n=N):
+    """(schedule seed, per-step synthesis flags): the first n_steps draws contain every task and
+    every task sees both outcomes. The flags are simulated with each task's own synthesis
+    generator (seed + POSTPROCESS_SEED_OFFSET + SYNTH_SEED_OFFSET, one draw per step), the stream
+    the post-processes consume; the test then checks the trainer's history against them."""
+    from data_loading import synth
+    cfg = P.SynthConfig(prob=prob)
+    for seed in range(500):
+        s = TaskSchedule(ratio, seed)
+        tasks = [s.draw(i) for i in range(n_steps)]
+        if set(tasks) != set(ratio):
+            continue
+        gens = {t: tf.random.Generator.from_seed(seed + POSTPROCESS_SEED_OFFSET[t] + P.SYNTH_SEED_OFFSET)
+                for t in ratio}
+        flags = [bool(synth.draw_synth_params(gens[t], tf.constant(n), cfg)["flag"].numpy())
+                 for t in tasks]
+        if all(len({f for f, t in zip(flags, tasks) if t == task}) == 2 for task in ratio):
+            return seed, flags
+    raise AssertionError("no seed found")
+
+
+class TestSynthTrainer(DeformCase):
+    """Synthetic contrast in the Trainer (synth-contrast design 5.3, 7.1; OD5 / OD6): label inputs,
+    `_pp_call`, one trace per task, synth logging, checkpointed generators, no fine one-hot."""
+
+    def synth_sources(self, ratio):
+        """Fixed sources with the synthfine label input: linear (images, T[, Rt], labels),
+        deform (images, fine labels of the deform group's train18 labels)."""
+        fine = tf.constant(fine_label_group(4, N, 11))
+        src = {t: fd.FixedGroupSource(tuple(g["batch"]) + (fine,)) for t, g in self.groups.items()}
+        lab = self.dgroup["labels"]
+        rng = np.random.default_rng(12)
+        dfine = np.stack([fine_labels_from_train18(lab[i, ..., 0], rng) for i in range(lab.shape[0])])
+        src["deform"] = fd.FixedGroupSource((self.dgroup["batch"][0], tf.constant(dfine[..., None])))
+        return {t: s for t, s in src.items() if t in ratio}
+
+    def records(self, logger):
+        logger.close()
+        with open(logger.metrics_path) as f:
+            return [json.loads(line)["data"] for line in f]
+
+    def test_e2e_p1_and_p0(self):
+        """e2e tiny runs (level 4, rigid:1, affine:1, deform:2, 8 steps): p 1 = every step
+        synthetic and logged as such; p 0 (synth None, as main.py passes) logs no synth key."""
+        n_steps = 8
+        seed = _seed_with_all_tasks(RATIO3, n_steps)
+        for p in (1.0, 0.0):
+            paths = make_run_dir(self.tmp, "e2e%g" % p)
+            logger = RunLogger(paths, backend="jsonl", tensorboard=False, quiet=True)
+            synth = P.SynthConfig(prob=p) if p > 0 else None
+            cfg = config(task_ratio=RATIO3, seed=seed, flip_prob=0.5, synth=synth)
+            sources = self.synth_sources(RATIO3) if p > 0 else None
+            tr = self.make_deform(cfg, sources=sources, logger=logger)
+            self.assertEqual(tr._synth_on, p > 0)
+            tr.fit(n_steps)
+            recs = self.records(logger)
+            self.assertEqual(tr.trace_counts, {"rigid": 1, "affine": 1, "deform": 1}, p)
+            self.assertEqual({h["task"] for h in tr.history}, set(RATIO3))
+            for h in tr.history:
+                self.assertTrue(h["finite"], (p, h["task"]))
+                self.assertTrue(np.isfinite(h["loss"]), (p, h["task"]))
+            final = {t: [h["loss"] for h in tr.history if h["task"] == t][-1] for t in RATIO3}
+            print("\n[synth e2e] p %g: final losses %s; trace counts %s"
+                  % (p, ", ".join("%s %.6g" % (t, final[t]) for t in RATIO3), tr.trace_counts),
+                  file=sys.stderr)
+            keys = set().union(*recs)
+            if p > 0:
+                self.assertTrue(all(h["synth"] == 1.0 for h in tr.history))
+                for t in RATIO3:
+                    got = [r for r in recs if "train_%s/synth_frac" % t in r]
+                    self.assertTrue(got, t)
+                    for r in got:
+                        self.assertEqual(r["train_%s/synth_frac" % t], 1.0)
+                        self.assertTrue(np.isfinite(r["train_%s/loss_synth" % t]), t)
+                self.assertFalse(any(k.endswith("/loss_real") for k in keys))
+            else:
+                self.assertFalse(any("synth" in h for h in tr.history))
+                self.assertFalse(any("synth" in k or k.endswith("/loss_real") for k in keys))
+            free_memory()
+
+    def test_p05_both_outcomes(self):
+        n_steps = 12
+        seed, flags = _seed_with_synth_outcomes(RATIO3, n_steps, 0.5)
+        paths = make_run_dir(self.tmp, "p05")
+        logger = RunLogger(paths, backend="jsonl", tensorboard=False, quiet=True)
+        cfg = config(task_ratio=RATIO3, seed=seed, flip_prob=0.5, log_every=n_steps,
+                     synth=P.SynthConfig(prob=0.5))
+        tr = self.make_deform(cfg, sources=self.synth_sources(RATIO3), logger=logger)
+        tr.fit(n_steps)
+        recs = self.records(logger)
+        self.assertEqual(tr.trace_counts, {"rigid": 1, "affine": 1, "deform": 1})
+        self.assertEqual([bool(h["synth"]) for h in tr.history], flags)    # the drawn flags
+        self.assertTrue(all(h["finite"] for h in tr.history))
+        window = [r for r in recs if "train_rigid/synth_frac" in r]
+        self.assertEqual(len(window), 1)
+        w = window[0]
+        for t in RATIO3:
+            hs = [h for h in tr.history if h["task"] == t]
+            frac = w["train_%s/synth_frac" % t]
+            self.assertAlmostEqual(frac, np.mean([h["synth"] for h in hs]), places=12)
+            self.assertGreater(frac, 0.0)
+            self.assertLess(frac, 1.0)
+            for key, val in (("loss_synth", 1.0), ("loss_real", 0.0)):
+                want = np.mean([h["loss"] for h in hs if h["synth"] == val])
+                self.assertAlmostEqual(w["train_%s/%s" % (t, key)], want, places=6, msg=(t, key))
+
+    def test_p0_identical_to_default(self):
+        """SynthConfig(prob=0) (and synth None) = a trainer built without the field: bit-equal."""
+        with _OpDeterminism():
+            ref, _ = _three_task_run(steps=4)
+            free_memory()
+            got, _ = _three_task_run(steps=4, synth=P.SynthConfig(prob=0.0))
+        self.assertEqual(got, ref)
+
+    def test_checkpoint_round_trip(self):
+        ratio = RATIO3
+        tr = self.make_deform(config(task_ratio=ratio))
+        self.assertFalse(any(k.endswith("_synth") for k in tr.checkpoint_variables()))
+        self.assertTrue(all(pp.synth_generator is None for pp in tr.postprocess.values()))
+        free_memory()
+        seed = _seed_with_all_tasks(ratio, 4)
+        cfg = config(task_ratio=ratio, seed=seed, synth=P.SynthConfig(prob=0.5))
+        paths = make_run_dir(self.tmp, "synthckpt")
+
+        def with_ckpt(t):
+            t.checkpoint = C.RunCheckpoint(paths["ckpt_last"], paths["ckpt_best"], t.model, t.optimizer,
+                                           t.step, extra=t.checkpoint_variables())
+            return t
+
+        tr = with_ckpt(self.make_deform(cfg, sources=self.synth_sources(ratio)))
+        self.assertEqual(sorted(tr.checkpoint_variables()),
+                         sorted(["postprocess_%s" % t for t in ratio]
+                                + ["postprocess_%s_synth" % t for t in ratio]))
+        tr.fit(4)                                     # saves ckpt/last at the end
+        states = {t: pp.synth_generator.state.numpy().copy() for t, pp in tr.postprocess.items()}
+        for t in states:                              # every task ran: its stream advanced
+            start = tf.random.Generator.from_seed(
+                seed + POSTPROCESS_SEED_OFFSET[t] + P.SYNTH_SEED_OFFSET).state.numpy()
+            self.assertFalse(np.array_equal(states[t], start), t)
+        nxt = {t: pp.synth_generator.uniform([5]).numpy() for t, pp in tr.postprocess.items()}
+        free_memory()
+        tr2 = with_ckpt(self.make_deform(cfg, sources=self.synth_sources(ratio)))
+        self.assertTrue(tr2.checkpoint.restore_last())
+        for t, pp in tr2.postprocess.items():
+            np.testing.assert_array_equal(pp.synth_generator.state.numpy(), states[t], t)
+            np.testing.assert_array_equal(pp.synth_generator.uniform([5]).numpy(), nxt[t], t)
+
+    def test_pp_call(self):
+        import types
+
+        class Rec:
+            def __init__(self):
+                self.calls = []
+
+            def __call__(self, *a, **kw):
+                self.calls.append((a, kw))
+                return "out"
+
+        fake = types.SimpleNamespace(postprocess={t: Rec() for t in RATIO3}, _synth_on=True)
+
+        def call(task, inputs, override=None):
+            out = Trainer._pp_call(fake, task, inputs, override)
+            self.assertEqual(out, "out")
+            return fake.postprocess[task].calls[-1]
+
+        self.assertEqual(call("rigid", ["i", "t", "r", "l"]), (("i", "t", "r"), {"labels": "l"}))
+        self.assertEqual(call("rigid", ["i", "t", "r", "l"], True),
+                         (("i", "t", "r"), {"labels": "l", "synth_override": True}))
+        self.assertEqual(call("affine", ["i", "t", "l"]), (("i", "t"), {"labels": "l"}))
+        self.assertEqual(call("affine", ["i", "t", "l"], False),
+                         (("i", "t"), {"labels": "l", "synth_override": False}))
+        self.assertEqual(call("deform", ["i", "l"]), (("i", "l"), {}))
+        self.assertEqual(call("deform", ["i", "l"], True), (("i", "l"), {"synth_override": True}))
+        for task, inputs in (("rigid", ["i", "t", "r"]), ("affine", ["i", "t"])):
+            with self.assertRaises(ValueError):
+                Trainer._pp_call(fake, task, inputs)
+        fake._synth_on = False                        # off: today's call pp(*inputs)
+        self.assertEqual(call("rigid", ["i", "t", "r"]), (("i", "t", "r"), {}))
+        self.assertEqual(call("affine", ["i", "t"]), (("i", "t"), {}))
+        self.assertEqual(call("deform", ["i", "l"]), (("i", "l"), {}))
+        self.assertEqual(call("deform", ["i", "l", "T"]), (("i", "l", "T"), {}))
+
+    def test_signatures_and_no_fine_onehot(self):
+        """Linear signatures gain the uint8 label spec only when on (off = today's float32 specs);
+        the OneHot-depth multiset of the traced train steps is the same with synthesis on and off."""
+        from tests.test_synth import onehot_depths
+        ratio = RATIO3
+        on_src = self.synth_sources(ratio)
+        batches_on = {t: next(s) for t, s in on_src.items()}
+        batches_off = {"rigid": self.groups["rigid"]["batch"], "affine": self.groups["affine"]["batch"],
+                       "deform": self.dgroup["batch"]}
+        depths, sigs = {}, {}
+        for name, synth, batches, src in (("on", P.SynthConfig(prob=0.5), batches_on, on_src),
+                                          ("off", None, batches_off, None)):
+            tr = self.make_deform(config(task_ratio=ratio, synth=synth), sources=src)
+            sigs[name] = {t: tr._steps[t].input_signature for t in ratio}
+            depths[name] = {t: onehot_depths(tr._steps[t], *batches[t]) for t in ratio}
+            free_memory()
+        for t, n in (("rigid", 3), ("affine", 2)):
+            off, on = sigs["off"][t], sigs["on"][t]
+            self.assertEqual(len(off), n, t)
+            self.assertTrue(all(s.dtype == tf.float32 for s in off), t)
+            self.assertEqual(list(on[:n]), list(off), t)
+            self.assertEqual(len(on), n + 1, t)
+            self.assertEqual((on[n].dtype, tuple(on[n].shape)), (tf.uint8, (N,) + P.LEVEL_SHAPE[4] + (1,)), t)
+        self.assertEqual(list(sigs["on"]["deform"]), list(sigs["off"]["deform"]))
+        for t in ratio:
+            self.assertEqual(depths["on"][t], depths["off"][t], t)
+        self.assertGreater(depths["off"]["deform"][19], 0)
+        print("\n[synth onehot] train-step OneHot depths (on == off): %s" % depths["on"], file=sys.stderr)
 
 
 class TestDelayedTaskStart(DeformCase):

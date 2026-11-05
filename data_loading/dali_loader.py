@@ -18,6 +18,11 @@ undo S_i. The emitted matrices are the FORWARD T_i (and Rt_i), not the pull matr
 Outputs (all float32, all on GPU):
     rigid:  images [N, X, Y, Z, 1], T_dali [N, 3, 4], Rt_dali [N, 3, 4]
     affine: images [N, X, Y, Z, 1], T_dali [N, 3, 4]
+With `label_files` (synthetic contrast, synth-contrast design 5.1; default off) a uint8 label
+map [N, X, Y, Z, 1] follows T_dali[, Rt_dali]: (images, T_dali[, Rt_dali], labels_u8[, G_dali,
+control_version]). The labels are read by a second, aligned 'epoch' reader (same permutation and
+seed as the images, see the deformable pipeline below) and are NOT warped: synthesis happens in
+the template space and the post-process renders the synthetic image with T^-1.
 Images are channel-last with the numpy array axis order (x, y, z) (DALI layout "DHWC").
 `data_loading.postprocess` converts the matrices to TF centered-mm 4x4.
 
@@ -81,28 +86,37 @@ def require_dali():
         raise ImportError("nvidia.dali is required for the DALI pipelines (%s)" % _DALI_IMPORT_ERROR)
 
 
-def linear_output_signature(task, level, batch_size, control=False):
+def linear_output_signature(task, level, batch_size, control=False, labels=False):
     """Static output shapes and dtype names of `LinearPipeline` (no DALI needed).
 
+    ``labels=True`` (pipeline with a label reader, synthetic contrast, design 5.1) inserts the
+    uint8 label maps [N, X, Y, Z, 1] after T_dali[, Rt_dali] and before the control extras.
     ``control=True`` (pipeline with a control file) appends G_dali [N, 3, 4] and
     control_version [N]."""
     if task not in P.TASKS:
         raise ValueError("task must be one of {}, got {!r}".format(P.TASKS, task))
     n = int(batch_size)
     shape = P.LEVEL_SHAPE[P.check_level(level)]
-    shapes = [(n,) + tuple(shape) + (1,), (n, 3, 4)]
+    vol = (n,) + tuple(shape) + (1,)
+    shapes = [vol, (n, 3, 4)]
     if task == "rigid":
         shapes.append((n, 3, 4))
+    dtypes = ["float32"] * len(shapes)
+    if labels:
+        shapes.append(vol)
+        dtypes.append("uint8")
     if control:
         shapes += [(n, 3, 4), (n,)]
-    return tuple(shapes), tuple(["float32"] * len(shapes))
+        dtypes += ["float32", "float32"]
+    return tuple(shapes), tuple(dtypes)
 
 
-def base_output_count(task):
-    """Number of outputs without the control extras: 3 (rigid) or 2 (affine)."""
+def base_output_count(task, labels=False):
+    """Number of outputs without the control extras: 3 (rigid) or 2 (affine), +1 with the
+    label reader (``labels=True``, design 5.1)."""
     if task not in P.TASKS:
         raise ValueError("task must be one of {}, got {!r}".format(P.TASKS, task))
-    return 3 if task == "rigid" else 2
+    return (3 if task == "rigid" else 2) + (1 if labels else 0)
 
 
 def deform_output_signature(level, batch_size, residual_affine=False):
@@ -118,14 +132,15 @@ def deform_output_signature(level, batch_size, residual_affine=False):
     return tuple(shapes), tuple(dtypes)
 
 
-def output_count(task, residual_affine=False):
+def output_count(task, residual_affine=False, labels=False):
     """Number of base outputs of a task's pipeline: linear = `base_output_count` (without the
-    control extras); deform = 2 (images, labels) or 3 with the residual affine (+ T_dali)."""
+    control extras; ``labels`` counts the linear label reader); deform = 2 (images, labels) or 3
+    with the residual affine (+ T_dali), ``labels`` ignored (deform always reads labels)."""
     if task == P.DEFORM_TASK:
         return 3 if residual_affine else 2
     if task not in P.TASKS:
         raise ValueError("task must be one of {}, got {!r}".format(P.ALL_TASKS, task))
-    return base_output_count(task)
+    return base_output_count(task, labels=labels)
 
 
 # ---------------------------------------------------------------------------- graph helpers
@@ -469,13 +484,22 @@ class LinearPipeline(Pipeline):
         constant ranges, no extra outputs). When given, the per-image half-widths and G come from
         the file, which must exist before the pipeline runs, and the outputs gain G_dali and
         control_version; the rotation_deg ... shear arguments are then unused.
+      label_files: uint8 label .npy paths aligned with `files` (same cases, same order), or None
+        (default: no label output). When given (synthetic contrast, design 5.1), both lists are
+        permuted with the same `paired_permutation`, shuffle_mode must be 'epoch'
+        (`check_linear_label_inputs`), and the unwarped labels are emitted after T_dali[, Rt_dali].
+    Outputs: (images, T_dali[, Rt_dali][, labels][, G_dali, control_version])
+    (`linear_output_signature`).
     """
 
     def __init__(self, task, level, files, batch_size, seed=0, file_root=None, shuffle=True,
                  rotation_deg=None, translation_mm=None, log_scale=None, shear=None,
                  intensity_aug=None, num_threads=4, device_id=0, prefetch_queue_depth=1,
                  initial_fill=None, pixel_center=P.DALI_PIXEL_CENTER, exec_async=True,
-                 exec_pipelined=True, shuffle_mode="epoch", control_file=None):
+                 exec_pipelined=True, shuffle_mode="epoch", control_file=None, label_files=None):
+        if label_files is not None:
+            label_files = [str(f) for f in label_files]
+            check_linear_label_inputs([str(f) for f in files], label_files, shuffle_mode)
         require_dali()
         if shuffle_mode not in SHUFFLE_MODES:
             raise ValueError("shuffle_mode must be one of {}, got {!r}".format(SHUFFLE_MODES, shuffle_mode))
@@ -494,8 +518,14 @@ class LinearPipeline(Pipeline):
         self.shuffle = bool(shuffle)
         self.shuffle_mode = shuffle_mode
         if self.shuffle:
-            files = [files[i] for i in np.random.RandomState(int(seed)).permutation(len(files))]
+            if label_files is None:
+                files = [files[i] for i in np.random.RandomState(int(seed)).permutation(len(files))]
+            else:
+                perm = paired_permutation(len(files), seed)
+                files = [files[i] for i in perm]
+                label_files = [label_files[i] for i in perm]
         self.files = files
+        self.label_files = label_files
         self.file_root = file_root
         self.reader_seed = int(seed)
         self.initial_fill = (P.auto_initial_fill(len(files), batch_size, self.volume_shape)
@@ -506,7 +536,8 @@ class LinearPipeline(Pipeline):
 
     def output_signature(self):
         return linear_output_signature(self.task, self.level, self.group_size,
-                                       control=self.control_file is not None)
+                                       control=self.control_file is not None,
+                                       labels=self.label_files is not None)
 
     def define_graph(self):
         imgs = read_images(self.files, self.volume_shape, self.file_root, self.shuffle, self.initial_fill,
@@ -523,9 +554,30 @@ class LinearPipeline(Pipeline):
             extra = (g.gpu(), ctl[P.CONTROL_INDEX["version"]].gpu())
         imgs = warp_linear(imgs, t_pull)
         imgs = intensity_augment(imgs, self.intensity_aug, self.volume_shape)
-        if self.task == "rigid":
-            return (imgs, t_fwd.gpu(), rt.gpu()) + extra
-        return (imgs, t_fwd.gpu()) + extra
+        out = (imgs, t_fwd.gpu(), rt.gpu()) if self.task == "rigid" else (imgs, t_fwd.gpu())
+        if self.label_files is not None:
+            # Created after every random op above (explicit seed, same settings as the image
+            # reader in 'epoch' mode), so the image and matrix streams are as without labels.
+            # Not warped: synthesis runs in the template space (design 5.1 / 5.2).
+            labels = _reader_to_gpu(numpy_reader_kwargs(self.label_files, self.file_root,
+                                                        self.shuffle, "epoch",
+                                                        seed=self.reader_seed,
+                                                        name=LABEL_READER_NAME),
+                                    self.volume_shape, types.UINT8)
+            out = out + (labels,)
+        return out + extra
+
+
+def check_linear_label_inputs(files, label_files, shuffle_mode="epoch"):
+    """Pure-Python validation of `LinearPipeline` label inputs (synthetic contrast, design 5.1;
+    runs before `require_dali`): equal lengths and shuffle_mode 'epoch' (as `check_deform_inputs`)."""
+    if shuffle_mode != "epoch":
+        raise ValueError("LinearPipeline with label_files supports shuffle_mode 'epoch' only (two "
+                         "random_shuffle buffers are not guaranteed to stay aligned), got {!r}"
+                         .format(shuffle_mode))
+    if len(files) != len(label_files):
+        raise ValueError("image and label lists differ in length (%d vs %d)"
+                         % (len(files), len(label_files)))
 
 
 def check_deform_inputs(image_files, label_files, shuffle_mode="epoch"):

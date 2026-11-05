@@ -5,6 +5,18 @@
    (`data_loading.tf_intensity_aug`) right after the float32 cast, before the flips, from a
    separate generator ``aug_generator`` (seed + `params.INTENSITY_AUG_SEED_OFFSET`), so the
    flip / pair stream of ``generator`` is the same as without it. None (default) builds no op.
+0b. Synthetic contrast (optional, --synth-prob p > 0; synth-contrast design 5.2): with a
+   `params.SynthConfig` of prob > 0 both classes own a third generator ``synth_generator``
+   (seed + `params.SYNTH_SEED_OFFSET`) and, BEFORE step 0, replace the whole group by a
+   synthetic one with probability p (`data_loading.synth`: one tf.cond on a drawn flag; the draws
+   are consumed every call). Linear: the fine labels (keyword-only ``labels=``, template space,
+   not warped by DALI) are synthesised and rendered with T_mm^-1 (I_i(y) = S_i(T_i^-1 y), the
+   pull relation of step 2), so the targets below are exact for the synthetic images. Deform: the
+   label input holds the fine ids; images are synthesised from them and the labels are mapped to
+   train18 by a 256-entry gather (`synth.fine_to_train18_table`), never a one-hot of the fine
+   ids. ``synth_override`` (keyword-only Python bool) forces the flag (BN recalibration). The
+   batch dict gains ``synth`` (bool scalar). None / prob 0 (default) builds no op and no
+   generator; the call is then exactly the code without synthesis.
 
 Matrix flow for one linear batch (group of N images):
 1. DALI emits forward matrices T_dali (and Rt_dali for rigid): 3x4, DALI axis order, DALI
@@ -43,7 +55,9 @@ import numpy as np
 import tensorflow as tf
 
 from data_loading import params as P
+from data_loading import synth
 from data_loading import tf_intensity_aug as tfa
+from models import layers
 from models import transforms as tfm
 
 
@@ -173,6 +187,23 @@ def _intensity_aug_setup(cfg, seed):
     return cfg, tf.random.Generator.from_seed(int(seed) + P.INTENSITY_AUG_SEED_OFFSET)
 
 
+def _synth_setup(cfg, seed):
+    """(SynthConfig or None, synth generator or None): only prob > 0 builds the generator
+    (synth-contrast design 4.4 / 5.2)."""
+    if cfg is None or float(cfg.prob) == 0.0:
+        return None, None
+    if cfg.device not in P.SYNTH_DEVICES:
+        raise ValueError("synth device must be one of {}, got {!r}".format(P.SYNTH_DEVICES, cfg.device))
+    return cfg, tf.random.Generator.from_seed(int(seed) + P.SYNTH_SEED_OFFSET)
+
+
+def _synth_draw(generator, cfg, n, synth_override):
+    """(params dict, flag bool []): the draws are consumed whatever the flag / override."""
+    prm = synth.draw_synth_params(generator, n, cfg)
+    flag = prm["flag"] if synth_override is None else tf.constant(bool(synth_override))
+    return prm, flag
+
+
 class LinearPostprocess:
     """Post-DALI processing of one rigid/affine batch.
 
@@ -189,9 +220,13 @@ class LinearPostprocess:
       pixel_center: DALI pixel-center convention (`params.DALI_PIXEL_CENTER`).
       intensity_aug: `params.IntensityAugConfig` to run the intensity augmentation in TF (step 0,
         own generator ``aug_generator``), or None (default: no op, ``aug_generator`` None).
+      synth: `params.SynthConfig` with prob > 0 for synthetic-contrast groups (step 0b, own
+        generator ``synth_generator``), or None / prob 0 (default: no op, both attributes None).
 
     Call with the DALI outputs ``(images, T_dali[, Rt_dali])``; the rigid task requires Rt_dali.
-    ``flip_axes`` overrides the random flip state (bool [3]). Returns a dict:
+    ``flip_axes`` overrides the random flip state (bool [3]). Keyword-only: ``labels`` (uint8
+    [N, X, Y, Z(, 1)] fine labels in template space; required with synthesis on, ignored off) and
+    ``synth_override`` (None = drawn flag, Python bool = forced; ignored off). Returns a dict:
       images   float32 [N, X, Y, Z, C] (intensity-augmented if configured, flipped)
       T_render float32 [N, 4, 4] mm, the full T_i (flipped): I_i(y) = I(T_render_i^-1 y)
       T_target float32 [N, 4, 4] mm, Rt_i (rigid) or T_i (affine) (flipped)
@@ -199,11 +234,12 @@ class LinearPostprocess:
       pair_i, pair_j int32 [P] sampled ordered pairs
       P_star   float32 [P, 4, 4] pair targets T_target_j T_target_i^-1
       flip_axes bool [3]
+      synth    bool [] synthetic group (only with synthesis on)
     """
 
     def __init__(self, task, level, flip_prob=0.5, p_pair=0.1, seed=0, target_iters=10,
                  target_dtype=tf.float64, pixel_center=P.DALI_PIXEL_CENTER, min_pairs="1",
-                 intensity_aug=None, max_pairs=0):
+                 intensity_aug=None, max_pairs=0, synth=None):
         if task not in P.TASKS:
             raise ValueError("task must be one of {}, got {!r}".format(P.TASKS, task))
         self.task = task
@@ -217,14 +253,23 @@ class LinearPostprocess:
         self.pixel_center = float(pixel_center)
         self.generator = tf.random.Generator.from_seed(int(seed))
         self.intensity_aug, self.aug_generator = _intensity_aug_setup(intensity_aug, seed)
+        self.synth, self.synth_generator = _synth_setup(synth, seed)
 
-    def __call__(self, images, t_dali, rt_dali=None, flip_axes=None):
+    def __call__(self, images, t_dali, rt_dali=None, flip_axes=None, *, labels=None,
+                 synth_override=None):
         images = tf.convert_to_tensor(images)
         if images.dtype != tf.float32:
             images = tf.cast(images, tf.float32)
+        synth_flag = None
+        if self.synth is not None:           # Python switch: synthesis off builds no op
+            if labels is None:
+                raise ValueError("synthesis on: labels= required")
+            t_mm = dali_to_mm(t_dali, self.level, self.pixel_center)
+            images, synth_flag = self._synthesize(images, labels, t_mm, synth_override)
         if self.intensity_aug is not None:   # Python switch: the default builds no op
             images = tfa.augment_group(images, self.intensity_aug, self.aug_generator)
-        t_mm = dali_to_mm(t_dali, self.level, self.pixel_center)
+        if self.synth is None:               # off: today's op order (t_mm after the aug)
+            t_mm = dali_to_mm(t_dali, self.level, self.pixel_center)
         if self.task == "rigid":
             if rt_dali is None:
                 raise ValueError("the rigid task needs Rt_dali")
@@ -242,13 +287,36 @@ class LinearPostprocess:
         pair_i, pair_j = sample_pairs(self.generator, n, self.p_pair, self.min_pairs,
                                       self.max_pairs)
         p_star = tfm.pair_targets(tgt, pair_i, pair_j)
-        return {"images": images,
-                "T_render": tf.cast(t_mm, tf.float32),
-                "T_target": tf.cast(target_mm, tf.float32),
-                "A_star": tf.cast(a_star, tf.float32),
-                "pair_i": pair_i, "pair_j": pair_j,
-                "P_star": tf.cast(p_star, tf.float32),
-                "flip_axes": flip_axes}
+        out = {"images": images,
+               "T_render": tf.cast(t_mm, tf.float32),
+               "T_target": tf.cast(target_mm, tf.float32),
+               "A_star": tf.cast(a_star, tf.float32),
+               "pair_i": pair_i, "pair_j": pair_j,
+               "P_star": tf.cast(p_star, tf.float32),
+               "flip_axes": flip_axes}
+        if synth_flag is not None:
+            out["synth"] = synth_flag
+        return out
+
+    def _synthesize(self, images, labels, t_mm, synth_override):
+        """Step 0b (linear): (images or the rendered synthetic group, flag). The synthetic
+        group is built from the template-space fine labels and rendered per image with
+        `transform_image(S_i, T_mm_i^-1)` (pull: I_i(y) = S_i(T_i^-1 y), module step 2)."""
+        prm, flag = _synth_draw(self.synth_generator, self.synth, tf.shape(images)[0],
+                                synth_override)
+        spacing = P.LEVEL_SPACING[self.level]
+
+        def render_one(e):
+            inv = tfm.affine_inverse(e[1])[None]
+            return layers.transform_image(e[0][None], inv, spacing, interpolation="linear",
+                                          fill_value=0.0)[0]
+
+        def render(group):
+            return tf.map_fn(render_one, (group, t_mm), parallel_iterations=1,
+                             fn_output_signature=tf.TensorSpec(group.shape[1:], tf.float32))
+
+        out = synth.maybe_synthesize(images, labels, flag, prm, self.synth, self.level, render)
+        return out, flag
 
 
 class DeformPostprocess:
@@ -273,16 +341,20 @@ class DeformPostprocess:
       pixel_center: DALI pixel-center convention.
       intensity_aug: `params.IntensityAugConfig` (TF intensity augmentation of the images only,
         step 0, own generator ``aug_generator``) or None (default: no op).
+      synth: `params.SynthConfig` with prob > 0 (step 0b: the label input holds synthfine ids,
+        images synthesised from them, labels mapped to train18 by a gather; own generator
+        ``synth_generator``) or None / prob 0 (default: no op, both attributes None).
 
-    Call with ``(images, labels[, t_dali])``; ``flip_axes`` overrides the random flip state.
+    Call with ``(images, labels[, t_dali])``; ``flip_axes`` overrides the random flip state;
+    keyword-only ``synth_override`` (None = drawn flag, Python bool = forced; ignored off).
     Returns dict: images float32 [N, X, Y, Z, C], labels int32 [N, X, Y, Z], onehot float32
     [N, X, Y, Z, n_classes], pair_i / pair_j int32 [P], flip_axes bool [3] (+ T_render float32
-    [N, 4, 4] mm with the residual affine).
+    [N, 4, 4] mm with the residual affine; + synth bool [] with synthesis on).
     """
 
     def __init__(self, level, flip_prob=0.5, p_pdice=0.1, seed=0, n_classes=P.N_TRAIN_LABELS,
                  residual_affine=False, pixel_center=P.DALI_PIXEL_CENTER, min_pairs="1",
-                 intensity_aug=None, max_pairs=0):
+                 intensity_aug=None, max_pairs=0, synth=None):
         self.task = P.DEFORM_TASK
         self.level = P.check_level(level)
         self.flip_prob = np.broadcast_to(np.asarray(flip_prob, np.float32), (3,)).copy()
@@ -294,8 +366,9 @@ class DeformPostprocess:
         self.pixel_center = float(pixel_center)
         self.generator = tf.random.Generator.from_seed(int(seed))
         self.intensity_aug, self.aug_generator = _intensity_aug_setup(intensity_aug, seed)
+        self.synth, self.synth_generator = _synth_setup(synth, seed)
 
-    def __call__(self, images, labels, t_dali=None, flip_axes=None):
+    def __call__(self, images, labels, t_dali=None, flip_axes=None, *, synth_override=None):
         if self.residual_affine and t_dali is None:
             raise ValueError("residual_affine=True needs t_dali")
         if not self.residual_affine and t_dali is not None:
@@ -303,6 +376,13 @@ class DeformPostprocess:
         images = tf.convert_to_tensor(images)
         if images.dtype != tf.float32:
             images = tf.cast(images, tf.float32)
+        synth_flag = None
+        if self.synth is not None:           # Python switch: synthesis off builds no op
+            fine = tf.convert_to_tensor(labels)
+            prm, synth_flag = _synth_draw(self.synth_generator, self.synth, tf.shape(images)[0],
+                                          synth_override)
+            images = synth.maybe_synthesize(images, fine, synth_flag, prm, self.synth, self.level)
+            labels = tf.gather(synth.fine_to_train18_table(), tf.cast(fine, tf.int32))
         if self.intensity_aug is not None:   # Python switch: images only, never labels
             images = tfa.augment_group(images, self.intensity_aug, self.aug_generator)
         labels = tf.cast(tf.convert_to_tensor(labels), tf.int32)
@@ -323,6 +403,8 @@ class DeformPostprocess:
                "pair_i": pair_i, "pair_j": pair_j, "flip_axes": flip_axes}
         if self.residual_affine:
             out["T_render"] = tf.cast(mats[0], tf.float32)
+        if synth_flag is not None:
+            out["synth"] = synth_flag
         return out
 
 

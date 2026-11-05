@@ -1,0 +1,8 @@
+{
+  "verdict": "APPROVED",
+  "findings": [
+    {"id": 1, "severity": "NIT", "where": "5.6 --min-task-steps / --expect-synth-prob", "summary": "metrics.jsonl has one record per 25-step log window; define n_task_steps(t) as the sum of train_<t>/window_steps (also the synth_frac weights), not the record count, and add a checker test (4 x 25 steps passes deform:80 at 100, fails at 101)."},
+    {"id": 2, "severity": "NIT", "where": "3.3 arguments, 3.4 array command", "summary": "State the --start/--end rule for export-add-labels: clamp like cli.select_rows (last chunk 3000-3500 of 3423 rows), empty selection = 0-case status file and exit 0, negative or start > end exit 2; add the last-chunk test."}
+  ],
+  "reviewDoc": "d:\\Research\\Brain_Registration_Projects\\brain-group-rad\\.agents\\tasks\\synth-contrast\\review.md"
+}

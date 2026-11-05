@@ -594,6 +594,18 @@ class TrainConfig:
     # {} = today) and the per-task LR ramp length W on the delayed task's steps (0 = no ramp).
     task_start_steps: Dict[str, int] = dataclasses.field(default_factory=dict)
     task_start_ramp_steps: int = 0
+    # Synthetic contrast (synth-contrast design 5.3): a `params.SynthConfig` passed to every
+    # post-process (linear steps then also take the uint8 label input), or None (default: no op,
+    # no generator, today's step signatures).
+    synth: Optional[object] = None
+
+
+def synth_recal_slot(b, p):
+    """BN recalibration (synth-contrast design 5.3): True iff the b-th recalibration batch of a
+    task is synthetic at probability p, i.e. floor((b + 1) p) > floor(b p). Over K slots exactly
+    floor(K p) are synthetic, interleaved, without RNG (Python floats)."""
+    p = float(p)
+    return math.floor((int(b) + 1) * p) > math.floor(int(b) * p)
 
 
 def _peak_gpu_mb():
@@ -742,7 +754,8 @@ class Trainer:
                     self.level, flip_prob=cfg.flip_prob, p_pdice=cfg.p_pdice,
                     seed=cfg.seed + POSTPROCESS_SEED_OFFSET[t], n_classes=cfg.n_classes,
                     residual_affine=cfg.deform_residual_affine, min_pairs=cfg.min_pairs,
-                    intensity_aug=cfg.intensity_aug_tf, max_pairs=int(cfg.max_pairs))
+                    intensity_aug=cfg.intensity_aug_tf, max_pairs=int(cfg.max_pairs),
+                    synth=cfg.synth)
             else:
                 self.postprocess[t] = LinearPostprocess(t, self.level, flip_prob=cfg.flip_prob,
                                                         p_pair=cfg.p_pair,
@@ -750,7 +763,11 @@ class Trainer:
                                                         target_iters=cfg.target_iters,
                                                         min_pairs=cfg.min_pairs,
                                                         intensity_aug=cfg.intensity_aug_tf,
-                                                        max_pairs=int(cfg.max_pairs))
+                                                        max_pairs=int(cfg.max_pairs),
+                                                        synth=cfg.synth)
+        # Synthetic contrast (design 5.3): a Python trace-time switch. The post-processes treat
+        # SynthConfig(prob=0) as off too, so the switch follows them (main.py passes None at p 0).
+        self._synth_on = any(pp.synth is not None for pp in self.postprocess.values())
         self._identity_cache = {}
         self._frozen_cache = {}         # cascade: frozen-stage validation baselines
         self.trace_counts = {t: 0 for t in self.sources}
@@ -776,12 +793,34 @@ class Trainer:
     # ------------------------------------------------------------------ step functions
     def checkpoint_variables(self):
         """Extra trackables for `RunCheckpoint`: the post-processing RNGs (plus the TF intensity
-        augmentation generators ``postprocess_<task>_aug``, only when TF augmentation is on)."""
+        augmentation generators ``postprocess_<task>_aug``, only when TF augmentation is on, and the
+        synthesis generators ``postprocess_<task>_synth``, only when synthesis is on)."""
         out = {"postprocess_%s" % t: pp.generator for t, pp in self.postprocess.items()}
         for t, pp in self.postprocess.items():
             if pp.aug_generator is not None:
                 out["postprocess_%s_aug" % t] = pp.aug_generator
+            if pp.synth_generator is not None:
+                out["postprocess_%s_synth" % t] = pp.synth_generator
         return out
+
+    def _pp_call(self, task, inputs, synth_override=None):
+        """Post-process one split batch (synth-contrast design 5.3); ``inputs`` = `split_batch`
+        order without skip / G / version. The one place that maps the label input: deform
+        ``pp(images, labels[, t_dali])`` (labels = fine ids with synthesis on); linear without
+        synthesis ``pp(*inputs)`` (today's call); linear with synthesis
+        ``pp(images, T[, Rt], labels=labels)``. ``synth_override`` (Python bool, BN
+        recalibration) is passed only when not None."""
+        pp = self.postprocess[task]
+        kw = {} if synth_override is None else {"synth_override": synth_override}
+        if task == DEFORM:
+            return pp(*inputs, **kw)
+        if not self._synth_on:
+            return pp(*inputs)
+        n = 3 if task == "rigid" else 2
+        if len(inputs) <= n:
+            raise ValueError("synthesis on: the %s post-process needs the label input after %d "
+                             "inputs, got %d" % (task, n, len(inputs)))
+        return pp(*inputs[:n], labels=inputs[n], **kw)
 
     def rebuild_steps(self):
         """Re-create every train / validation tf.function (re-trace on next use)."""
@@ -875,7 +914,7 @@ class Trainer:
         residual = bool(cfg.deform_residual_affine)
         shapes, dtypes = dali_loader.deform_output_signature(self.level, self._group_size(task), residual)
         signature = [tf.TensorSpec(s, tf.as_dtype(d)) for s, d in zip(shapes, dtypes)]
-        pp = self.postprocess[task]
+        synth_on = self._synth_on              # trace-time switch (synth-contrast design 5.3)
         amp = bool(cfg.amp)
         lam_p, lam_s, order = float(cfg.lambda_pdice), float(cfg.lambda_smooth), int(cfg.smooth_order)
         ncc_kw = dict(lambda_dice_tmpl=float(cfg.lambda_dice_tmpl), lambda_ncc_tmpl=float(cfg.lambda_ncc_tmpl),
@@ -902,7 +941,8 @@ class Trainer:
 
         def body(images, labels, t_dali=None, skip=None):
             self.trace_counts[task] += 1          # Python side effect: runs only while tracing
-            batch = pp(images, labels, t_dali)    # outside the tape
+            # outside the tape; (images, labels[, t_dali]) as before (t_dali None = default)
+            batch = self._pp_call(task, [images, labels] + ([t_dali] if residual else []))
             x = batch["images"]
             in_finite = tf.reduce_all(tf.math.is_finite(x))
             batch["images"] = tf.where(in_finite, x, tf.zeros_like(x))
@@ -988,6 +1028,8 @@ class Trainer:
             res.update(grad_norm=gnorm, finite=finite, n_vars_updated=tf.constant(len(pairs)))
             if lso_skipped is not None:
                 res["lso_skipped"] = lso_skipped
+            if synth_on:
+                res["synth"] = tf.cast(batch["synth"], tf.float32)
             return res
 
         if cascade is not None:                   # residual affine excluded (Trainer.__init__)
@@ -1000,9 +1042,13 @@ class Trainer:
 
     def _make_train_step(self, task):
         model, opt, cfg = self.model, self.optimizer, self.cfg
-        shapes, _ = dali_loader.linear_output_signature(task, self.level, cfg.group_size)
-        signature = [tf.TensorSpec(s, tf.float32) for s in shapes]
-        pp = self.postprocess[task]
+        synth_on = self._synth_on              # trace-time switch (synth-contrast design 5.3)
+        shapes, dtypes = dali_loader.linear_output_signature(task, self.level, cfg.group_size,
+                                                             labels=synth_on)
+        if synth_on:                           # uint8 label spec after T[, Rt]
+            signature = [tf.TensorSpec(s, tf.as_dtype(d)) for s, d in zip(shapes, dtypes)]
+        else:
+            signature = [tf.TensorSpec(s, tf.float32) for s in shapes]
         amp = bool(cfg.amp)
         lam = float(cfg.lambda_pair)
         loss_scale = float(cfg.loss_scale_mm2)
@@ -1020,9 +1066,11 @@ class Trainer:
         on4, on2 = self._stage_skip_on(task)
         spacing = P.LEVEL_SPACING[self.level]
 
-        def body(images, t_dali, rt_dali=None, skip=None):
+        def body(images, t_dali, rt_dali=None, skip=None, *, labels=None):
             self.trace_counts[task] += 1          # Python side effect: runs only while tracing
-            batch = pp(images, t_dali, rt_dali)   # outside the tape
+            # outside the tape; labels (keyword-only, synthesis on) follow T[, Rt] as in DALI
+            batch = self._pp_call(task, [images, t_dali] + ([rt_dali] if task == "rigid" else [])
+                                  + ([labels] if synth_on else []))
             # Non-finite inputs would make the barycenter's matrix inverse raise instead of
             # returning NaN, so they are zeroed and the step is skipped like any non-finite step.
             x = batch["images"]
@@ -1106,8 +1154,26 @@ class Trainer:
             res.update(grad_norm=gnorm, finite=finite, n_vars_updated=tf.constant(len(pairs)))
             if lso_skipped is not None:
                 res["lso_skipped"] = lso_skipped
+            if synth_on:
+                res["synth"] = tf.cast(batch["synth"], tf.float32)
             return res
 
+        if synth_on:                              # design 5.3: labels after T[, Rt], before skip
+            if cascade is not None:
+                skip_spec = [self._skip_spec()]
+                if task == "rigid":
+                    return tf.function(
+                        lambda images, t_dali, rt_dali, labels, skip: body(images, t_dali, rt_dali, skip, labels=labels),
+                        input_signature=signature + skip_spec)
+                return tf.function(
+                    lambda images, t_dali, labels, skip: body(images, t_dali, None, skip, labels=labels),
+                    input_signature=signature + skip_spec)
+            if task == "rigid":
+                return tf.function(
+                    lambda images, t_dali, rt_dali, labels: body(images, t_dali, rt_dali, labels=labels),
+                    input_signature=signature)
+            return tf.function(lambda images, t_dali, labels: body(images, t_dali, None, labels=labels),
+                               input_signature=signature)
         if cascade is not None:                   # one extra trailing input: skip bool[] (design section 6)
             skip_spec = [self._skip_spec()]
             if task == "rigid":
@@ -1123,8 +1189,10 @@ class Trainer:
     def split_batch(self, task, batch_tuple):
         """(step inputs, control extras): the first 3 (rigid) / 2 (affine) / 2 or 3 (deform, with
         the residual affine) DALI outputs, and the trailing (G_dali, control_version) of a
-        control-file pipeline (empty tuple otherwise)."""
-        k = dali_loader.output_count(task, self.cfg.deform_residual_affine)
+        control-file pipeline (empty tuple otherwise). With synthesis on the linear inputs
+        also hold the uint8 labels after T[, Rt] (DALI order, synth-contrast design 5.1)."""
+        k = dali_loader.output_count(task, self.cfg.deform_residual_affine,
+                                     labels=self._synth_on and task != DEFORM)
         batch_tuple = tuple(batch_tuple)
         return batch_tuple[:k], batch_tuple[k:]
 
@@ -1715,11 +1783,12 @@ class Trainer:
         `models.layers.batch_norm_layers`)."""
         return L.batch_norm_layers(list(parts))
 
-    def _recal_input(self, task, inputs):
+    def _recal_input(self, task, inputs, synth_override=None):
         """Eager input path of one recalibration batch, exactly as the cascade training step:
-        postprocess (flips on), then pool -> frozen (eval) -> pre-warp. Returns (x_in, finite):
+        postprocess (flips on; `_pp_call`, ``synth_override`` forces the synthetic flag with
+        synthesis on), then pool -> frozen (eval) -> pre-warp. Returns (x_in, finite):
         finite False (x_in None) when the post-processed images are not all finite."""
-        batch = self.postprocess[task](*inputs)
+        batch = self._pp_call(task, inputs, synth_override)
         x = batch["images"]
         if not bool(tf.reduce_all(tf.math.is_finite(x)).numpy()):
             return None, False
@@ -1782,7 +1851,10 @@ class Trainer:
            must be [] else RuntimeError; a repeated recalibration that reproduces the current
            statistics exactly would also be flagged), elapsed_s, freeze, gap (``gap_pre/<set>/<metric>`` and
            ``gap_post/...`` = |eval - trainmode| of center_rms_mm / pair_rms_mm resp.
-           template_dice / pair_dice; {} when ``val`` is False).
+           template_dice / pair_dice; {} when ``val`` is False). With synthesis on (synth-contrast
+           design 5.3) the b_t-th slot of task t is synthetic iff `synth_recal_slot(b_t, p)`
+           (forced via ``synth_override``), and the event gains ``synth_batches`` {t: floor(K_t p)}
+           (planned) and ``synth_batches_used`` {t: synthetic slots used for the statistics}.
 
         Only the trainable model's BN statistics change: no trainable variable, optimizer slot,
         ``self.step`` or frozen-stage variable is touched.
@@ -1803,6 +1875,11 @@ class Trainer:
         counts = {id(m): 0 for m in layers}
         used = {t: 0 for t in tasks}
         skipped = {t: 0 for t in tasks}
+        # Synthetic slots (synth-contrast design 5.3): the b_t-th batch of task t is synthetic
+        # iff `synth_recal_slot(b_t, p)`; None (synthesis off) = today's call.
+        synth_p = float(self.cfg.synth.prob) if self._synth_on else None
+        slot = {t: 0 for t in tasks}
+        synth_used = {t: 0 for t in tasks}
         try:
             for b, t in enumerate(plan):
                 if t in self.controls:
@@ -1812,7 +1889,11 @@ class Trainer:
                 except StopIteration:
                     raise RuntimeError("bn recalibration: source %s exhausted" % t)
                 inputs, _ = self.split_batch(t, batch_tuple)
-                x_in, finite = self._recal_input(t, inputs)
+                override = None
+                if synth_p is not None:
+                    override = synth_recal_slot(slot[t], synth_p)
+                    slot[t] += 1
+                x_in, finite = self._recal_input(t, inputs, override)
                 if not finite:
                     skipped[t] += 1
                     print("WARNING bn recalibration: non-finite input images in %s batch %d (slot "
@@ -1825,6 +1906,8 @@ class Trainer:
                 for m in task_layers[t]:
                     counts[id(m)] += 1
                 used[t] += 1
+                if override:
+                    synth_used[t] += 1
         finally:
             for m in layers:
                 m.bn.momentum = orig[id(m)]
@@ -1848,6 +1931,9 @@ class Trainer:
                  "skipped_nonfinite": skipped, "n_layers_updated": len(layers) - len(stale),
                  "layers_without_updates": stale, "elapsed_s": time.perf_counter() - t_start,
                  "freeze": bool(freeze), "gap": gap}
+        if synth_p is not None:                # synthesis on only (design 5.3)
+            event["synth_batches"] = {t: int(math.floor(plan.count(t) * synth_p)) for t in tasks}
+            event["synth_batches_used"] = synth_used
         if self.logger is not None:
             self.logger.log_event(step, event)
         return event
@@ -2050,6 +2136,11 @@ class Trainer:
             self.history.append(rec)
             timing.update({"time/data_ms": rec["data_ms"], "time/compute_ms": rec["compute_ms"]})
             win_steps[task] += 1
+            if "synth" in res:                 # synthesis on (design 5.3): every executed step
+                acc.update({"train_%s/synth_frac" % task: res["synth"]})
+                if res["finite"]:
+                    key = "loss_synth" if res["synth"] > 0.5 else "loss_real"
+                    acc.update({"train_%s/%s" % (task, key): res["loss"]})
             if not res["finite"]:
                 self.nonfinite_total += 1
                 consecutive += 1

@@ -16,7 +16,8 @@ import unittest
 
 from tests import tf_setup  # noqa: F401  (log level, TF32 off, GPU memory growth)
 from tests.runtime_helpers import TINY_ARGS, free_memory, synthetic_group, tiny_config
-from tests.test_trainer import _OpDeterminism
+from tests.test_trainer import _OpDeterminism, fine_label_group
+from tests.runtime_helpers import fine_labels_from_train18
 import numpy as np
 import scipy.linalg
 import tensorflow as tf
@@ -35,7 +36,7 @@ from runtime import metrics as M
 from runtime import optimizers as O
 from runtime.logging import RunLogger, make_run_dir
 from runtime.run import (CASCADE_SKIP_KEY, Trainer, TrainConfig, bn_recal_plan, cascade_skip_draw,
-                         cascade_stage_skip_draw)
+                         cascade_stage_skip_draw, synth_recal_slot)
 from runtime.schedulers import ScheduleConfig
 
 SHAPE2, SHAPE4 = tuple(P.LEVEL_SHAPE[2]), tuple(P.LEVEL_SHAPE[4])
@@ -1066,6 +1067,147 @@ class TestBNRecal(CascadeTrainerCase):
         self.assertEqual(events[0]["data"]["gap"], gap)
 
 
+# ============================================================ synthetic contrast (synth-contrast 5.3, 7.1)
+SYN1 = P.SynthConfig(prob=1.0)
+LIN_N = {"rigid": 3, "affine": 2}                  # inputs before the label input (DALI order)
+
+
+class SynthCascadeCase(CascadeTrainerCase):
+    """Level-2 cascade trainers with the synthfine label input (synthesis on)."""
+
+    def synth_batches(self):
+        """{task: DALI-format tuple with labels}: linear (images, T[, Rt], fine labels), deform
+        (images, fine labels mapping back to the deform group's train18 labels)."""
+        fine = tf.constant(fine_label_group(2, N2, 21))
+        out = {t: tuple(self.batches[t]) + (fine,) for t in LIN_N}
+        lab = self.dgroup["labels"]
+        rng = np.random.default_rng(22)
+        dfine = np.stack([fine_labels_from_train18(lab[i, ..., 0], rng) for i in range(lab.shape[0])])
+        out["deform"] = (self.batches["deform"][0], tf.constant(dfine[..., None]))
+        return out
+
+    @staticmethod
+    def sources(batches, ratio=RATIO3):
+        return {t: fd.FixedGroupSource(b) for t, b in batches.items() if t in ratio}
+
+
+class TestSynthSkip(SynthCascadeCase):
+    """The forced-skip comparison of TestSkip::test_graph_and_forced_skip with synthesis p 1 for
+    both trainers (same seed): exercises the synthesis-on lambdas (labels before skip, `skip`
+    positional, `labels=` keyword)."""
+
+    def test_forced_skip_synth(self):
+        b = self.synth_batches()
+        tr5 = self.make(cascade_config(cascade_skip_prob=0.5, synth=SYN1), sources=self.sources(b))
+        ref = self.make(cascade_config(synth=SYN1), sources=self.sources(b), cascade_on=False)
+        for t, n in (("rigid", 3), ("affine", 2), ("deform", 2)):
+            sig = tr5._steps[t].input_signature
+            want = ([tf.float32] * n + [tf.uint8, tf.bool] if t != "deform"
+                    else [tf.float32, tf.uint8, tf.bool])
+            self.assertEqual([s.dtype for s in sig], want, t)
+            self.assertEqual([s.dtype for s in ref._steps[t].input_signature], want[:-1], t)
+        for t in ("rigid", "affine", "deform"):
+            rs = tr5.train_step(t, b[t], skip=True)
+            rn = ref.train_step(t, b[t])
+            self.assertEqual((rs["synth"], rn["synth"]), (1.0, 1.0), t)
+            np.testing.assert_allclose(rs["loss"], rn["loss"], rtol=1e-4, err_msg=t)
+        for i in range(4):
+            for t in ("rigid", "affine", "deform"):
+                self.assertTrue(tr5.train_step(t, b[t], skip=bool(i % 2))["finite"], (i, t))
+        self.assertEqual(tr5.trace_counts, {"rigid": 1, "affine": 1, "deform": 1})
+        self.assertEqual(ref.trace_counts, {"rigid": 1, "affine": 1, "deform": 1})
+
+
+class TestSynthRecal(SynthCascadeCase):
+    """BN recalibration with synthesis (design 5.3): the synthetic-slot rule, the event counts and
+    the recal input wiring through `Trainer._pp_call`."""
+
+    def test_slot_rule_counts(self):
+        for k in (1, 16, 64):
+            for p in (0.0, 0.25, 0.5, 1.0):
+                slots = [synth_recal_slot(b, p) for b in range(k)]
+                self.assertEqual(sum(slots), int(np.floor(k * p)), (k, p))
+        self.assertEqual([b for b in range(16) if synth_recal_slot(b, 0.25)], [3, 7, 11, 15])
+        self.assertEqual([synth_recal_slot(b, 0.5) for b in range(6)], [False, True] * 3)
+        self.assertTrue(all(synth_recal_slot(b, 1.0) for b in range(64)))
+        self.assertFalse(any(synth_recal_slot(b, 0.0) for b in range(64)))
+
+    def test_recal_p1_all_synthetic_and_wiring(self):
+        b = self.synth_batches()
+        tr = self.make(cascade_config(synth=SYN1), sources=self.sources(b))
+        ref = self.make(cascade_config())            # synthesis off, same seeds, train18 batches
+        seen = []
+        orig = tr._pp_call
+
+        def spy(task, inputs, synth_override=None):
+            out = orig(task, inputs, synth_override)
+            seen.append((task, list(inputs), synth_override, out))
+            return out
+
+        tr._pp_call = spy
+        ev = tr.recalibrate_bn(8, freeze=False, val=False)
+        want = {"rigid": 2, "affine": 2, "deform": 4}
+        self.assertEqual(ev["planned"], want)
+        self.assertEqual(ev["batches"], want)
+        self.assertEqual(ev["synth_batches"], want)
+        self.assertEqual(ev["synth_batches_used"], want)
+        self.assertEqual([s[0] for s in seen], bn_recal_plan(8, RATIO3))
+        self.assertTrue(all(s[2] is True for s in seen))
+        self.assertTrue(all(bool(s[3]["synth"].numpy()) for s in seen))
+        # Same slots through the synthesis-off post-process (same seeds, same call order): every
+        # key but the images is bit-equal (targets, flips, pairs, train18 labels / one-hot), the
+        # images differ (synthetic). Labels landing in rt_dali / flip_axes would break the equality.
+        for task, inputs, _, out in seen:
+            if task == "deform":
+                rb = ref._pp_call(task, [inputs[0], self.batches["deform"][1]])
+            else:
+                rb = ref._pp_call(task, inputs[:LIN_N[task]])
+            self.assertNotIn("synth", rb)
+            self.assertEqual(sorted(k for k in out if k != "synth"), sorted(rb), task)
+            for k in rb:
+                if k != "images":
+                    np.testing.assert_array_equal(out[k].numpy(), rb[k].numpy(), err_msg="%s %s" % (task, k))
+            self.assertGreater(float(tf.reduce_max(tf.abs(out["images"] - rb["images"]))), 1e-3, task)
+        # Forced synth_override=False (generators now at the same state in both trainers): the
+        # batch equals the synthesis-off post-process, also through `_recal_input`.
+        tr._pp_call = orig
+        for task in ("rigid", "affine", "deform"):
+            inputs = list(b[task])
+            off_in = (inputs[:LIN_N[task]] if task != "deform"
+                      else [inputs[0], self.batches["deform"][1]])
+            a = tr._pp_call(task, inputs, synth_override=False)
+            r = ref._pp_call(task, off_in)
+            self.assertFalse(bool(a["synth"].numpy()), task)
+            for k in r:
+                np.testing.assert_array_equal(a[k].numpy(), r[k].numpy(), err_msg="%s %s" % (task, k))
+            xa, fa = tr._recal_input(task, inputs, False)
+            xr, fr = ref._recal_input(task, off_in)
+            self.assertTrue(fa and fr, task)
+            np.testing.assert_allclose(xa.numpy(), xr.numpy(), atol=1e-6, err_msg=task)
+        # Synthesis off: no synth keys in the event.
+        ev0 = ref.recalibrate_bn(3, freeze=False, val=False)
+        self.assertNotIn("synth_batches", ev0)
+        self.assertNotIn("synth_batches_used", ev0)
+
+    def test_recal_p05_counts(self):
+        b = self.synth_batches()
+        tr = self.make(cascade_config(synth=P.SynthConfig(prob=0.5)), sources=self.sources(b))
+        seen = []
+        orig = tr._pp_call
+
+        def spy(task, inputs, synth_override=None):
+            seen.append((task, synth_override))
+            return orig(task, inputs, synth_override)
+
+        tr._pp_call = spy
+        ev = tr.recalibrate_bn(8, freeze=False, val=False)
+        self.assertEqual(ev["synth_batches"], {"rigid": 1, "affine": 1, "deform": 2})
+        self.assertEqual(ev["synth_batches_used"], {"rigid": 1, "affine": 1, "deform": 2})
+        per = {t: [o for s, o in seen if s == t] for t in RATIO3}
+        self.assertEqual(per, {"rigid": [False, True], "affine": [False, True],
+                               "deform": [False, True, False, True]})
+
+
 class TestCascadeAMP(CascadeTrainerCase):
     """T9 step part: cascade deform and affine steps under mixed_float16."""
 
@@ -1773,6 +1915,37 @@ class TestChainTrainer(ChainCase):
         self.assertEqual(trd._frozen_baseline_metrics("deform", vs["deform"], [dgrp], None), base)   # cached
         print("\n[T-V1] level-1 deform frozen template Dice %.4f (4 + 2) / %.4f (4)"
               % (base["val_deform_frozen/template_dice"], base["val_deform_frozen4/template_dice"]), file=sys.stderr)
+
+
+class TestSynthSkipChain(ChainCase):
+    """Level-1 twin of TestSynthSkip (TestChainTrainer::test_skip_and_frozen_unchanged style, rigid
+    executed): with synthesis p 1 in both trainers a forced-skip step equals the level-4-only chain
+    step, and alternating skip values never retrace."""
+
+    def test_forced_skip_synth(self):
+        chain = self.chain()
+        fine = tf.constant(fine_label_group(1, 2, 31))
+        batch = tuple(self.batches1["rigid"]) + (fine,)
+        cfg = dict(task_ratio={"rigid": 1.0}, synth=SYN1)
+
+        def make(c, ch):
+            return Trainer(self.level1_model(getattr(ch, "chain", ch)),
+                           O.make_optimizer("adam", lr=1e-3, amp=True),
+                           {"rigid": fd.FixedGroupSource(batch)}, self.lgroup["S"], c, cascade=ch)
+
+        tr5 = make(chain_config(cascade_skip_prob=0.5, **cfg), chain)
+        ref = make(chain_config(**cfg), _Level4Chain(chain))
+        self.assertEqual([s.dtype for s in tr5._steps["rigid"].input_signature],
+                         [tf.float32] * 3 + [tf.uint8, tf.bool])
+        rs = tr5.train_step("rigid", batch, skip=True)
+        rn = ref.train_step("rigid", batch)
+        print("\n[synth T-C6] rigid forced skip loss %.8g vs level-4-only chain %.8g (synthetic)"
+              % (rs["loss"], rn["loss"]), file=sys.stderr)
+        self.assertEqual((rs["synth"], rn["synth"]), (1.0, 1.0))
+        self.assertTrue(np.isfinite(rs["loss"]))
+        np.testing.assert_allclose(rs["loss"], rn["loss"], rtol=1e-4)
+        self.assertTrue(np.isfinite(tr5.train_step("rigid", batch, skip=False)["loss"]))
+        self.assertEqual(tr5.trace_counts["rigid"], 1)
 
 
 class TestLevel2Unchanged(CascadeTrainerCase):

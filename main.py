@@ -61,6 +61,12 @@ Per-stage skip (retrain-prereqs design 4.5): the ``cascade`` record also holds `
 trained with a level-4 skip for them, `_skip_consistency`; printed as WARNING). A resume refreshes
 these three from the current flags and logs ``cascade_skip_changed_on_resume`` when they differ.
 
+Synthetic contrast (`.agents/tasks/synth-contrast/design.md` 5.3 / 5.4): with --synth-prob > 0
+the data module reads the --synth-label-set labels for every task and config.json gets the
+top-level ``synth`` record (``dataclasses.asdict`` of the `SynthConfig`); default runs (p 0) write
+no ``synth`` record (config.json ``args`` still lists the synth_* defaults). Resume:
+`_check_synth_config` (a missing record = off; off/off OK, any other difference -> SystemExit).
+
 Order: parse args (no TF) -> DALI check (unless overfit mode) -> configure_tf_precision() (TF32
 off, memory growth) -> seeds -> mixed_float16 / XLA flags -> [cascade: fresh/resume decision,
 source check] -> data -> model -> [cascade: frozen stage] -> optimizer -> run dir, logger,
@@ -68,6 +74,7 @@ config.json, checkpoint (resume) -> [cascade: BN recalibration] -> Trainer.fit.
 
 Exit code: 0 on success; in overfit mode 1 if the threshold was not reached.
 """
+import dataclasses
 import json
 import os
 import random
@@ -171,11 +178,14 @@ def _build_dali_data(args, level, tf_mods, start_step=0):
     if A.DEFORM_TASK in args.task_ratio_parsed:
         deform_kw = {"deform_batch_size": args.deform_group_size,
                      "deform_residual_affine": args.deform_residual_affine}
+    # Synthetic contrast (design 5.1): the label set is passed only when on (default call unchanged).
+    synth = A.synth_config_from_args(args)
+    synth_kw = {} if synth is None else {"synth_label_set": args.synth_label_set}
     data = dm.LinearDataModule(args.data, level, args.group_size, seed=args.seed, split="train",
                                rigid_ranges=ranges["rigid"], affine_ranges=ranges["affine"],
                                intensity_aug=aug, num_threads=args.num_threads,
                                prefetch_queue_depth=args.prefetch, shuffle_mode=args.shuffle_mode,
-                               **dict(control_kw, **deform_kw))
+                               **dict(control_kw, **deform_kw, **synth_kw))
     for t, c in controls.items():
         c.writer = data.control_writers[t]
     sources = {t: data.iterator(t) for t in args.task_ratio_parsed}
@@ -202,6 +212,8 @@ def _build_dali_data(args, level, tf_mods, start_step=0):
     desc = "DALI %d train files, %d val images; intensity aug %s" % (len(data.files), n_val, aug_device)
     if aug_device == "tf" and getattr(args, "lowres_method", "nn") == "tent":
         desc += " | low-res tent"
+    if synth is not None:
+        desc += " | synth p %g (%s, %s)" % (synth.prob, synth.label_set, synth.device)
     return sources, val_sets, S, desc, controls
 
 
@@ -385,9 +397,14 @@ def main(argv=None):
     elif args.resume and trainer.checkpoint.latest_last:
         C.check_config_compatible(paths["config"], model_cfg)
         _check_intensity_aug_device(paths["config"], args)
+        _check_synth_config(paths["config"], args)
         opt_changed = _check_optimizer(paths["config"], args)
         resumed = trainer.checkpoint.restore_last()
     config_extra = {"param_counts": dict(counts), "data": data_desc, "init_weights": init_info}
+    # Synthetic contrast (design 5.4): the record only when on (default runs write none).
+    synth_cfg = A.synth_config_from_args(args)
+    if synth_cfg is not None:
+        config_extra["synth"] = dataclasses.asdict(synth_cfg)
     # Retrain-prereqs design 2.2: optimizer record (sgdw / adamw only; always rebuilt from the
     # current flags, so it describes the latest segment of a resumed run).
     opt_rec = _optimizer_record(args, optimizer, model.trainable_variables)
@@ -629,6 +646,29 @@ def _check_intensity_aug_device(config_path, args):
                          "saved %s (TF augmentation %s) in %s; resume with the saved setting or start a "
                          "new --run-name" % (args.intensity_aug_device, "on" if cur_tf else "off", saved_dev,
                                              "on" if saved_tf else "off", config_path))
+
+
+def _check_synth_config(config_path, args):
+    """Resume guard (synth-contrast design 5.4): SystemExit if the synthetic-contrast setting
+    differs from the run's saved config.json ``synth`` record (on adds the postprocess_<task>_synth
+    generators to the checkpoint and the label inputs to the linear steps). A missing record
+    means off (default runs and runs before the option); off/off is OK; any other difference (off
+    vs on, or a different field value) exits naming both."""
+    if not os.path.exists(config_path):
+        return
+    with open(config_path) as f:
+        saved = json.load(f).get("synth")
+    cfg = A.synth_config_from_args(args)
+    # JSON round trip so tuples compare equal to the saved lists.
+    cur = None if cfg is None else json.loads(json.dumps(dataclasses.asdict(cfg)))
+    if saved is None and cur is None:
+        return
+    if saved != cur:
+        raise SystemExit("main.py: the synthetic-contrast setting %s differs from the run's saved "
+                         "config.json synth record %s in %s; resume with the saved --synth-* flags "
+                         "or start a new --run-name"
+                         % ("off" if cur is None else cur, "off" if saved is None else saved,
+                            config_path))
 
 
 def _check_optimizer(config_path, args, logger=None):

@@ -586,6 +586,91 @@ class TestIntensityAugDevice(MainCase):
             M._check_intensity_aug_device(path, off)
 
 
+class TestSynthMain(MainCase):
+    """Synthetic contrast (synth-contrast design 5.1 / 5.4): data-module wiring and description,
+    the resume guard `main._check_synth_config` and config.json of a default run."""
+
+    def build(self, extra):
+        from data_loading import params as P
+        from runtime import args as A
+        seen = {}
+
+        class FakeDM:
+            def __init__(self, *a, **kw):
+                seen.clear()
+                seen.update(kw)
+                self.control_writers = {}
+                self.files, self.template_dir = ["f"], "t"
+
+            def iterator(self, task):
+                return iter(())
+
+        fd = _Stub(load_level_images=lambda *a, **k: (np.zeros((8,) + P.LEVEL_SHAPE[4] + (1,)), []),
+                   build_validation_sets=lambda *a, **k: {})
+        pp = _Stub(brain_S_matrix=lambda *a, **k: np.eye(4))
+        args = A.parse_args(["--data", self.tmp, "--results", self.tmp, "--run-name", "r"] + extra)
+        desc = M._build_dali_data(args, 4, (fd, P, None, pp, _Stub(LinearDataModule=FakeDM)))[3]
+        return dict(seen), desc
+
+    def test_data_module_wiring(self):
+        kw, desc = self.build(["--intensity-aug-device", "tf"])
+        self.assertNotIn("synth_label_set", kw)                 # default call unchanged
+        self.assertNotIn("synth", desc)
+        kw, desc = self.build(["--intensity-aug-device", "tf", "--synth-prob", "0.5"])
+        self.assertEqual(kw["synth_label_set"], "synthfine")
+        self.assertIn("intensity aug tf | synth p 0.5 (synthfine, gpu)", desc)
+        kw, desc = self.build(["--intensity-aug", "false", "--synth-prob", "1",
+                               "--synth-label-set", "other", "--synth-device", "cpu"])
+        self.assertEqual(kw["synth_label_set"], "other")
+        self.assertIn("synth p 1 (other, cpu)", desc)
+
+    def test_resume_guard(self):
+        import dataclasses
+        from runtime import args as A
+        path = os.path.join(self.tmp, "config.json")
+
+        def write(extra):
+            with open(path, "w") as f:
+                json.dump(dict({"args": {"level": 4}}, **extra), f)
+
+        off = A.parse_args(["--data", self.tmp])
+        on = A.parse_args(["--data", self.tmp, "--intensity-aug-device", "tf", "--synth-prob", "0.5"])
+        M._check_synth_config(os.path.join(self.tmp, "missing.json"), on)   # no file: ok
+        write({})                                  # missing record = off
+        M._check_synth_config(path, off)
+        with self.assertRaises(SystemExit) as cm:
+            M._check_synth_config(path, on)
+        self.assertIn("differs from the run's saved config.json synth record off", str(cm.exception))
+        write({"synth": dataclasses.asdict(A.synth_config_from_args(on))})
+        M._check_synth_config(path, on)            # same record (tuples saved as lists): ok
+        with self.assertRaises(SystemExit) as cm:
+            M._check_synth_config(path, off)
+        self.assertIn("setting off differs", str(cm.exception))
+        jit = A.parse_args(["--data", self.tmp, "--intensity-aug-device", "tf", "--synth-prob", "0.5",
+                            "--synth-jitter", "0.1"])
+        with self.assertRaises(SystemExit):        # field difference
+            M._check_synth_config(path, jit)
+        other_p = A.parse_args(["--data", self.tmp, "--intensity-aug-device", "tf", "--synth-prob", "1"])
+        with self.assertRaises(SystemExit):
+            M._check_synth_config(path, other_p)
+
+    def test_default_config_json(self):
+        argv = (["--overfit-one-group", "--overfit-synthetic", "--level", "4", "--group-size", "4",
+                 "--task-ratio", "rigid:1", "--log-every", "1", "--val-every", "0", "--val-png", "false",
+                 "--schedule", "constant", "--warmup-steps", "0", "--overfit-max-steps", "1",
+                 "--results", os.path.join(self.tmp, "results"), "--run-name", "syn0"]
+                + TINY_ARGS + COMMON)
+        rc = M.main(argv)
+        free_memory()
+        self.assertIn(rc, (0, 1))
+        with open(os.path.join(self.run_dir("syn0"), "config.json")) as f:
+            cfg = json.load(f)
+        self.assertNotIn("synth", cfg)
+        self.assertEqual({k: v for k, v in cfg["args"].items() if k.startswith("synth")},
+                         {"synth_prob": 0.0, "synth_jitter": 0.08, "synth_device": "gpu",
+                          "synth_label_set": "synthfine", "synth_hier_dev_cortex": 0.25})
+
+
 class TestOptimizerMain(MainCase):
     """Retrain-prereqs design 2.2 / test 11.1 f: the startup optimizer line and NOTE, the
     config.json ``optimizer`` record (sgdw / adamw only) and the resume guard ``_check_optimizer``."""
