@@ -79,8 +79,8 @@ code. The next level never starts. Each level is wrapped in `=== level k start <
   also rerun.
 - Nothing present: the level starts fresh.
 
-Resubmitting the identical sbatch line therefore continues the chain. Do not `git pull` in the cluster clone
-while a chain runs, because later levels would run the pulled level scripts (each marker records its git rev).
+Resubmitting the identical sbatch line therefore continues the chain. Since v2 the chain runs from a frozen copy
+of the code, so `git pull` in the cluster clone during a chain is safe (section "Frozen code (v2)").
 Expected RTX 8000 wall time from earlier runs: L4 ~14.5-15 h (r4cfgB0 14h35), L2 ~21-25 h (config B smoothness
 sweep ~24.5 h), L1 ~15 h. That totals ~51-55 h of the 72 h limit.
 
@@ -157,3 +157,150 @@ env S4=<S4> S2=<S2> S1=<S1> SYNTH_PROB=0 RUN_NAME_L4=r4_cfgB_final RUN_NAME_L2=r
 
 Logs go to `.../GroupwiseReg/logs/<job-name>-<job>.out/.err`. Resume after a time-out or failure: resubmit the
 identical line.
+
+## Frozen code (v2)
+
+Changed: `slurm/r_cascade.sh` and `tests/test_slurm_scripts.py`. `tests/run_tests_wsl.sh` already runs `bash -n`
+on `slurm/r_cascade.sh`, so it is unchanged. Nothing committed, pushed or submitted.
+
+### Behaviour
+
+The chain no longer runs the code in the clone. It freezes one commit into scratch and runs every level from
+there, following the pattern of `.agents/tasks/m9-level1-nan/m9_nan_probe.sh`. Jay can therefore commit and
+`git pull` in the cluster clone while a 72 h chain runs.
+
+- **Fresh chain.** A chain is fresh when it has no state file and none of its levels has a `cascade_done.json`
+  or a `ckpt/last`. The script records `git -C $REPO rev-parse HEAD`. If
+  `git status --porcelain --untracked-files=no` is non-empty, it exits 2 and lists up to 10 changed files.
+  This check covers the whole tracked tree, the simplest rule the task allowed. `ALLOW_DIRTY=1` freezes HEAD
+  anyway, without the uncommitted changes, and prints `WARNING: ALLOW_DIRTY=1 ...`. The status call runs with
+  `GIT_OPTIONAL_LOCKS=0`, so it does not rewrite the clone's index.
+- **Freeze.** The commit is extracted to `CODE_ROOT=$PROJ/scratch/cascade_code/<RUN_NAME_L4>/<first 12 hex of
+  the sha>` with `git -C $REPO archive <sha> | tar -x -C $CODE_ROOT`, the same command the probe uses. After a
+  successful extract, the script writes the stamp file `$CODE_ROOT/.cascade_extract_ok`, which holds the full
+  sha. A `CODE_ROOT` with a matching stamp is reused. A `CODE_ROOT` without a matching stamp is a partial
+  extract: it is removed and extracted again. The `rm -rf` only runs on paths matching
+  `*/scratch/cascade_code/*/*`.
+- **Levels.** Each level runs as `bash $CODE_ROOT/slurm/r_level{4,2,1}.sh` with `REPO=$CODE_ROOT` in its env.
+  `REPO` is now part of the printed `ENV`/`CMD` lines. The level scripts `cd "$REPO"` and call `main.py` and
+  `tests/gpu/check_mixed_run.py` by relative path, so both come from the frozen copy. `PROJ`, `DATA`,
+  `RESULTS`, `SIF` and `SCRATCH_ROOT` are unchanged, so data, results, logs and the container image stay where
+  they are. The test hooks `L4_SCRIPT`/`L2_SCRIPT`/`L1_SCRIPT`, when set, override the frozen script path.
+  `REPO` is still `$CODE_ROOT` in that case.
+- **State file.** The state file is `$RESULTS/cascade_chains/<RUN_NAME_L4>.json`. I chose a dedicated directory
+  over `$RESULTS/<RUN_NAME_L4>/` because with `START_LEVEL=2`/`1` the level-4 run dir belongs to another run.
+  The file holds one string field per line: `chain_id`, `commit`, `code_root`, `code_mode` (fresh | pin),
+  `clone_head` (at creation), `run_name_l4/l2/l1`, `s4`, `s2`, `s1`, `synth_prob`, `start_level`,
+  `allow_dirty`, `created_date`, `created_job_id`, `last_job_id` and `last_start_date`. It is written atomically
+  (tmp + mv) after the extract and before the first level. On every resume, only `last_job_id` and
+  `last_start_date` change.
+- **Resume.** When the state file exists, the recorded commit and code root are reused, never the clone's new
+  HEAD, and there is no dirty check. If the code root is missing or has no matching stamp (for example, scratch
+  was cleaned), the recorded commit is extracted again from the clone. That needs the commit to exist in the
+  clone; otherwise the script exits 2.
+- **Recipe guard.** On resume, if `S4`/`S2`/`S1`/`SYNTH_PROB`/`RUN_NAME_L4/L2/L1` differ from the recorded
+  strings, the script exits 2 and names each field with its old and new value. `FORCE_RECIPE_CHANGE=1`
+  continues with a WARNING, keeps the old state as `<RUN_NAME_L4>.json.prev-<YYYYmmddTHHMMSS>` and rewrites
+  the state with the new values. The comparison is exact on the strings, so `0.5` and `.5` count as different.
+- **Runs without a state file.** If no state file exists but runs of this chain do (a marker or `ckpt/last`),
+  the commit they ran is unknown, so the script exits 2 and asks for `CODE_COMMIT`. The message points to
+  `git_rev` in the markers and `git_commit` in config.json.
+- **`CODE_COMMIT=<sha or ref>`.** On a fresh chain, this pins the commit. It must resolve in the clone
+  (`rev-parse --verify <x>^{commit}`), and the dirty check is skipped. On resume, it must equal the recorded
+  commit. With `FORCE_RECIPE_CHANGE=1`, the remaining levels switch to the new commit and its own code root.
+- **Markers.** `cascade_done.json` records `git_rev` as the frozen commit and also gains `code_root`.
+- **Dry run.** `BGR_DRY_RUN=1` prints `code: frozen ...`, `code source:` (fresh | pin | resume, plus the state
+  file path), `dirty check:` (clean | DIRTY (files) | skipped (...)) and `extract:` (present | needed: git
+  archive ... | partial copy ...). A dirty clone is reported as `DRY RUN NOTE: a real run would exit 2 ...` and
+  the dry run still exits 0, so the full plan stays visible. The dry run creates nothing and calls neither
+  `git archive` nor a level script. When the copy does not exist yet, it checks the level scripts with
+  `git cat-file -e <sha>:slurm/r_level<k>.sh`.
+- **Start line.** Every run prints `code: frozen <sha> at <CODE_ROOT> (clone HEAD <sha2>)`.
+- **Cleanup.** After the chain finishes, `$PROJ/scratch/cascade_code/<RUN_NAME_L4>/` can be deleted. The
+  markers and the state file keep the sha.
+
+### Caveats
+
+- In the frozen copy, the level scripts' `repo rev` line prints `?`, and config.json's `git_commit` is `null`.
+  This is because `runtime/checkpoint._git_commit` runs `git rev-parse` next to the code, and the copy is not a
+  git checkout. The sha is in `cascade_done.json` and the state file. Nothing reads `git_commit`: I checked
+  `check_mixed_run.py`, `main.py` and `runtime/`.
+- `git archive` writes LFS pointers, not the LFS content. The only LFS-tracked file is
+  `preprocessing/tests/__init__.py`, and training does not use it.
+
+### Env (new)
+
+| Variable | Default | Effect |
+|---|---|---|
+| `CODE_COMMIT` | empty | pin the frozen commit (fresh chain). On resume it must equal the recorded commit unless `FORCE_RECIPE_CHANGE=1` |
+| `ALLOW_DIRTY` | empty | `1` = freeze HEAD of a dirty clone, with a WARNING |
+| `FORCE_RECIPE_CHANGE` | empty | `1` = allow a different S4/S2/S1/SYNTH_PROB/run names (or CODE_COMMIT) on resume |
+| `L4_SCRIPT` / `L2_SCRIPT` / `L1_SCRIPT` | `$CODE_ROOT/slurm/r_level{4,2,1}.sh` | test hook (was `$REPO/...`) |
+
+### Tests
+
+`python -m unittest tests.test_slurm_scripts` in WSL `bgr_preproc38` (`source ~/miniconda3/etc/profile.d/conda.sh`):
+**Ran 62 tests, OK** (26 s). `bash -n slurm/r_cascade.sh`: OK.
+
+`TestCascadeRuns` now builds a temp git repo in `setUp`. It holds committed stub `slurm/r_level{4,2,1}.sh` that
+log `REPO`, `$0` and a `TAG`, plus a `main.py`. The class is skipped without bash or git. The existing tests
+were adapted in two places. `test_dry_run` expects the frozen script paths and `REPO=<code root>`.
+`test_ckpt_without_marker_is_rerun` now first expects exit 2 without a state file, then passes `CODE_COMMIT=HEAD`.
+`test_header` checks the new header text and that the old `git pull` warning is gone. New tests:
+
+- `test_frozen_fresh_chain_runs_from_code_root`: the stubs see `REPO=CODE_ROOT` and run from
+  `CODE_ROOT/slurm/`. The test also checks the stamp, the state-file fields and the markers' `git_rev` /
+  `code_root`. With the hook stubs set, `REPO` is still the code root.
+- `test_resume_ignores_new_clone_commit`: level 2 fails, the test makes a new commit, then resubmits. Levels 2
+  and 1 run the v1 copy, no copy of the new sha is made, and `last_job_id` is updated.
+- `test_dirty_clone`: a modified tracked file gives exit 2 and creates nothing. The dry run reports DIRTY and
+  exits 0. `ALLOW_DIRTY=1` runs with a WARNING, and the uncommitted change is absent from the copy.
+- `test_code_commit_pin`: a bad sha gives exit 2. A short sha of an older commit runs that commit despite a
+  dirty tree.
+- `test_recipe_change_on_resume`: changing S2, SYNTH_PROB, RUN_NAME_L1 or CODE_COMMIT gives exit 2.
+  `FORCE_RECIPE_CHANGE=1` proceeds with the new S2 on the recorded commit and writes one `.prev-` backup.
+- `test_missing_or_partial_code_root_is_reextracted`: the dry run reports `needed` or `partial copy`, then the
+  real run extracts the recorded sha again.
+- `test_frozen_dry_run_creates_nothing`: the dry run prints the commit, code root, `clean` and `needed`, and
+  creates nothing (the temp repo stays clean). After a run plus a new commit, it reports
+  `resume / present / skipped`.
+
+### Local dry run (`BGR_DRY_RUN=1 S4=0.5 S2=0.5 S1=0.5 REPO=<local checkout>`, WSL, PROJ = cluster path)
+
+The clone shows DIRTY only because of this step's uncommitted edits. The per-level ENV/CMD lines are the v1
+lines plus `REPO=<code root>`, with the script paths under the code root. Only the L4 lines are shown here:
+
+```
+cascade | host Jay | job manual | 2026-11-06T00:41:04-05:00
+code: frozen 6445bb27fd65ed7b6ce98f6d6e8a908a26688b6e at /autofs/space/crater_001/users/jn85/BrainRegProjects/GroupwiseReg/scratch/cascade_code/r4_cfgB_synth05/6445bb27fd65 (clone HEAD 6445bb27fd65ed7b6ce98f6d6e8a908a26688b6e)
+code source: fresh (fresh chain: clone HEAD) | chain state /autofs/space/crater_001/users/jn85/BrainRegProjects/GroupwiseReg/results/cascade_chains/r4_cfgB_synth05.json
+dirty check: DIRTY (2 tracked file(s) with uncommitted changes: slurm/r_cascade.sh tests/test_slurm_scripts.py )
+extract: needed: git archive 6445bb27fd65ed7b6ce98f6d6e8a908a26688b6e | tar -x -C /autofs/space/crater_001/users/jn85/BrainRegProjects/GroupwiseReg/scratch/cascade_code/r4_cfgB_synth05/6445bb27fd65
+levels 4 2 1 | S4 0.5 S2 0.5 S1 0.5 | synth p 0.5 | lr 3e-4 wd 1e-1 | group args '--group-config B' | results /autofs/space/crater_001/users/jn85/BrainRegProjects/GroupwiseReg/results
+unset before each level: RUN_NAME STEPS ... MIN_TASK_STEPS
+LEVEL 4: fresh (no ckpt/last in /autofs/space/crater_001/users/jn85/BrainRegProjects/GroupwiseReg/results/r4_cfgB_synth05)
+ENV L4: PROJ=/autofs/.../GroupwiseReg REPO=/autofs/.../GroupwiseReg/scratch/cascade_code/r4_cfgB_synth05/6445bb27fd65 RESULTS=/autofs/.../GroupwiseReg/results RUN_NAME=r4_cfgB_synth05 STEPS=16000 PROJECT_STEPS=16000 LR=3e-4 WD=1e-1 VAL_EVERY=500 WARMUP=1000 DEFORM_START=3000 DEFORM_RAMP=500 CURRICULUM_RAMP=3000 G_START=3000 G_RAMP=3000 VAL_GROUP_SIZE=16 SYNTH_PROB=0.5 GPU_POLL=false EXTRA_ARGS=--group-config B --lambda-smooth 0.5
+CMD L4: ... EXTRA_ARGS='--group-config B --lambda-smooth 0.5' bash /autofs/.../GroupwiseReg/scratch/cascade_code/r4_cfgB_synth05/6445bb27fd65/slurm/r_level4.sh
+LEVEL 2: fresh (...)   [CASCADE_FROM=.../results/r4_cfgB_synth05/ckpt/last, .../6445bb27fd65/slurm/r_level2.sh]
+LEVEL 1: fresh (...)   [CASCADE_FROM=.../results/r2_cfgB_synth05/ckpt/last, TF_MEM_LIMIT_MB=42500, .../slurm/r_level1.sh]
+DRY RUN NOTE: a real run would exit 2 (dirty clone; commit first or set ALLOW_DIRTY=1)
+DRY RUN: nothing created, no level script called
+rc 0
+```
+
+### Submit lines (unchanged)
+
+These are run from the clone after commit, push and `git pull`. Ask Jay first, and keep to at most two active
+jobs.
+
+```
+env S4=<S4> S2=<S2> S1=<S1> sbatch --job-name=bgr-cascade-syn slurm/r_cascade.sh
+env S4=<S4> S2=<S2> S1=<S1> SYNTH_PROB=0 RUN_NAME_L4=r4_cfgB_final RUN_NAME_L2=r2_cfgB_final RUN_NAME_L1=r1_cfgB_final sbatch --job-name=bgr-cascade-real slurm/r_cascade.sh
+```
+
+The commit is frozen when the job STARTS, not when it is submitted. While the job is pending, the clone must
+stay clean, and HEAD will be whatever it is at start. To freeze exactly the commit you submitted from, add
+`CODE_COMMIT=$(git rev-parse HEAD)` to the `env` line; in tcsh, use backticks instead of `$(...)`. A pull in
+the clone after the job has started is harmless. To resume, resubmit the identical line: the recorded commit is reused, and a
+different S or SYNTH_PROB gives exit 2. The SBATCH header is unchanged (rtx8000, 1 GPU, 3 CPUs, 128G, 72 h,
+qtim).

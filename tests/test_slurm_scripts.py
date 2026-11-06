@@ -1312,13 +1312,16 @@ CASCADE_ENV = ("S4", "S2", "S1", "SYNTH_PROB", "RUN_NAME_L4", "RUN_NAME_L2", "RU
                "EXTRA_ARGS_L4", "EXTRA_ARGS_L2", "EXTRA_ARGS_L1", "STEPS_L4", "STEPS_L2", "STEPS_L1", "LR", "WD",
                "VAL_EVERY", "WARMUP_L4", "DEFORM_START_L4", "DEFORM_RAMP_L4", "CURRICULUM_RAMP_L4", "G_START_L4",
                "G_RAMP_L4", "VAL_GROUP_SIZE_L4", "TF_MEM_LIMIT_MB_L1", "GPU_POLL", "START_LEVEL",
-               "CASCADE_FROM_START", "L4_SCRIPT", "L2_SCRIPT", "L1_SCRIPT", "STUB_FAIL_LEVEL", "STUB_BAD_LEVEL")
+               "CASCADE_FROM_START", "L4_SCRIPT", "L2_SCRIPT", "L1_SCRIPT", "STUB_FAIL_LEVEL", "STUB_BAD_LEVEL",
+               "CODE_COMMIT", "ALLOW_DIRTY", "FORCE_RECIPE_CHANGE", "GIT_DIR", "GIT_WORK_TREE")
 # Env of the level scripts that r_cascade.sh passes through unchanged (all others are unset per level).
 CASCADE_PASSTHROUGH = {"PROJ", "REPO", "DATA", "RESULTS", "SIF", "SCRATCH_ROOT", "SLURM_JOB_ID",
                        "SLURM_CPUS_PER_TASK", "CUDA_VISIBLE_DEVICES"}
-# Stub level script: logs what it sees, fails on request, else writes ckpt/last at last-$STEPS.
+GIT = shutil.which("git")
+# Stub level script: logs what it sees (incl. REPO, its own path and a tag), fails on request, else
+# writes ckpt/last at last-$STEPS.
 STUB_LEVEL = r"""#!/bin/bash
-echo "L%(k)s RUN_NAME=$RUN_NAME STEPS=$STEPS PROJECT_STEPS=$PROJECT_STEPS CASCADE_FROM=${CASCADE_FROM-UNSET} N=${N-UNSET} FILTERS=${FILTERS-UNSET} INIT=${INIT-UNSET} SYNTH_PROB=$SYNTH_PROB EXTRA_ARGS=$EXTRA_ARGS" >> "%(log)s"
+echo "L%(k)s RUN_NAME=$RUN_NAME STEPS=$STEPS PROJECT_STEPS=$PROJECT_STEPS CASCADE_FROM=${CASCADE_FROM-UNSET} N=${N-UNSET} FILTERS=${FILTERS-UNSET} INIT=${INIT-UNSET} SYNTH_PROB=$SYNTH_PROB REPO=${REPO-UNSET} SELF=$0 TAG=%(tag)s EXTRA_ARGS=$EXTRA_ARGS" >> "%(log)s"
 if [ "${STUB_FAIL_LEVEL:-}" = "%(k)s" ]; then exit 7; fi
 mkdir -p "$RESULTS/$RUN_NAME/ckpt/last"
 s="$STEPS"
@@ -1348,6 +1351,10 @@ class TestCascadeStatic(unittest.TestCase):
             self.assertIn(k, text, k)
         self.assertNotIn("FILTERS=", text)
         self.assertNotIn("DECODER_WIDTHS=", text)
+        self.assertNotIn("Do not `git pull`", text)
+        for k in ("git archive", "scratch/cascade_code/<RUN_NAME_L4>", "cascade_chains/<RUN_NAME_L4>.json",
+                  "CODE_COMMIT", "ALLOW_DIRTY=1", "FORCE_RECIPE_CHANGE=1", "can be deleted"):
+            self.assertIn(k, text, k)
 
     def test_level_env_coverage(self):
         """Every env variable a level script reads is either unset per level or passed through."""
@@ -1366,28 +1373,62 @@ class TestCascadeStatic(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
 
 
-@unittest.skipIf(BASH is None, "bash not available")
+@unittest.skipIf(BASH is None or GIT is None, "bash or git not available")
 class TestCascadeRuns(unittest.TestCase):
     """cascade-chain: validation, dry run, and stub level scripts (success chain, failing level,
-    rerun skips, ckpt without marker reruns)."""
+    rerun skips, ckpt without marker reruns), plus the frozen-code copy (v2): REPO is a temp git
+    repo whose committed slurm/r_level{4,2,1}.sh are stubs."""
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="cascade_")
         self.log = os.path.join(self.tmp, "levels.log")
         self.results = os.path.join(self.tmp, "results")
+        self.proj = os.path.join(self.tmp, "proj")
+        self.repo = os.path.join(self.tmp, "repo")
         self.stubs = {}
         for k in (4, 2, 1):
             p = os.path.join(self.tmp, "stub_l%d.sh" % k)
             with open(p, "w") as f:
-                f.write(STUB_LEVEL % {"k": k, "log": self.log})
+                f.write(STUB_LEVEL % {"k": k, "log": self.log, "tag": "hook"})
             self.stubs[k] = p
+        os.makedirs(os.path.join(self.repo, "slurm"))
+        self.git("init", "-q")
+        self.sha1 = self.commit_stubs("v1")
         env = {k: v for k, v in os.environ.items() if k not in CASCADE_ENV + RECIPE_ENV}
-        env.update(PROJ=os.path.join(self.tmp, "proj"), REPO=os.path.join(self.tmp, "repo"), RESULTS=self.results,
+        env.update(PROJ=self.proj, REPO=self.repo, RESULTS=self.results,
                    SLURM_JOB_ID="4242", S4="0.5", S2="2", S1="3")
         self.env = env
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def git(self, *args, repo=None):
+        r = subprocess.run([GIT, "-C", repo or self.repo, "-c", "user.name=t", "-c", "user.email=t@example.com",
+                            "-c", "commit.gpgsign=false"] + list(args),
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return r.stdout.strip()
+
+    def write_stubs(self, tag):
+        for k in (4, 2, 1):
+            with open(os.path.join(self.repo, "slurm", "r_level%d.sh" % k), "w") as f:
+                f.write(STUB_LEVEL % {"k": k, "log": self.log, "tag": tag})
+        with open(os.path.join(self.repo, "main.py"), "w") as f:
+            f.write("print('%s')\n" % tag)
+
+    def commit_stubs(self, tag):
+        """Commit stub level scripts that log TAG=<tag>; returns the full sha."""
+        self.write_stubs(tag)
+        self.git("add", "slurm", "main.py")
+        self.git("commit", "-q", "-m", tag)
+        return self.git("rev-parse", "HEAD")
+
+    def code_root(self, sha, chain="r4_cfgB_synth05"):
+        return os.path.join(self.proj, "scratch", "cascade_code", chain, sha[:12])
+
+    def state(self, chain="r4_cfgB_synth05"):
+        import json
+        return json.loads(_read(os.path.join(self.results, "cascade_chains", chain + ".json")))
 
     def run_cascade(self, stubs=True, **extra):
         e = dict(self.env)
@@ -1428,6 +1469,9 @@ class TestCascadeRuns(unittest.TestCase):
         r = self.run_cascade(stubs=False, BGR_DRY_RUN="1", REPO=REPO)       # the real level scripts
         self.assertEqual(r.returncode, 0, r.stderr)
         out = r.stdout
+        head = self.git("rev-parse", "HEAD", repo=REPO)
+        root = self.code_root(head)
+        self.assertIn("code: frozen %s at %s (clone HEAD %s)" % (head, root, head), out)
         self.assertFalse(os.path.exists(self.tmp + "/proj"))
         self.assertFalse(os.path.exists(self.results))       # nothing created
         env = {k: [ln for ln in out.splitlines() if ln.startswith("ENV L%d: " % k)] for k in (4, 2, 1)}
@@ -1443,7 +1487,8 @@ class TestCascadeRuns(unittest.TestCase):
                          "EXTRA_ARGS=--group-config B --lambda-smooth %s " % s):
                 self.assertIn(item, e, (k, item))
             self.assertIn("EXTRA_ARGS='--group-config B --lambda-smooth %s' bash %s"
-                          % (s, os.path.join(REPO, "slurm", "r_level%d.sh" % k)), cmd[k][0])
+                          % (s, os.path.join(root, "slurm", "r_level%d.sh" % k)), cmd[k][0])
+            self.assertIn("REPO=%s " % root, e)
             self.assertNotIn("FILTERS", e)
             self.assertNotIn("DECODER_WIDTHS", e)
         for item in ("WARMUP=1000 ", "DEFORM_START=3000 ", "DEFORM_RAMP=500 ", "CURRICULUM_RAMP=3000 ",
@@ -1542,15 +1587,177 @@ class TestCascadeRuns(unittest.TestCase):
     def test_ckpt_without_marker_is_rerun(self):
         self.write_ckpt("r4_cfgB_synth05", 16000)                # finished but no marker (e.g. checker failed)
         self.write_ckpt("r2_cfgB_synth05", 750)                  # interrupted
+        # runs exist but no chain state: the commit they ran is unknown -> CODE_COMMIT required
         r = self.run_cascade(BGR_DRY_RUN="1")
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertIn("CODE_COMMIT", r.stderr)
+        r = self.run_cascade(BGR_DRY_RUN="1", CODE_COMMIT="HEAD")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("LEVEL 4: resume (ckpt/last at last-16000, no cascade_done.json", r.stdout)
         self.assertIn("LEVEL 2: resume (ckpt/last at last-750", r.stdout)
         self.assertIn("LEVEL 1: fresh", r.stdout)
-        r = self.run_cascade()
+        r = self.run_cascade(CODE_COMMIT="HEAD")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual([c.split()[0] for c in self.calls()], ["L4", "L2", "L1"])
         self.assertEqual(self.marker("r2_cfgB_synth05")["checkpoint"], "last-15000")
+        self.assertEqual(self.state()["code_mode"], "pin")
+
+    # ---- frozen code (v2)
+    def test_frozen_fresh_chain_runs_from_code_root(self):
+        r = self.run_cascade(stubs=False)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        root = self.code_root(self.sha1)
+        self.assertIn("code: frozen %s at %s (clone HEAD %s)" % (self.sha1, root, self.sha1), r.stdout)
+        self.assertIn("dirty check: clean", r.stdout)
+        calls = self.calls()
+        self.assertEqual([c.split()[0] for c in calls], ["L4", "L2", "L1"])
+        for k, c in zip((4, 2, 1), calls):
+            self.assertIn("REPO=%s " % root, c)
+            self.assertIn("SELF=%s " % os.path.join(root, "slurm", "r_level%d.sh" % k), c)
+            self.assertIn("TAG=v1 ", c)
+        self.assertEqual(_read(os.path.join(root, ".cascade_extract_ok")).strip(), self.sha1)
+        self.assertTrue(os.path.isfile(os.path.join(root, "main.py")))
+        st = self.state()
+        for key, val in (("commit", self.sha1), ("code_root", root), ("code_mode", "fresh"), ("s4", "0.5"),
+                         ("s2", "2"), ("s1", "3"), ("synth_prob", "0.5"), ("run_name_l4", "r4_cfgB_synth05"),
+                         ("run_name_l2", "r2_cfgB_synth05"), ("run_name_l1", "r1_cfgB_synth05"),
+                         ("created_job_id", "4242"), ("last_job_id", "4242"), ("start_level", "4")):
+            self.assertEqual(st[key], val, key)
+        for run in ("r4_cfgB_synth05", "r2_cfgB_synth05", "r1_cfgB_synth05"):
+            self.assertEqual(self.marker(run)["git_rev"], self.sha1)
+            self.assertEqual(self.marker(run)["code_root"], root)
+        # hooks override the frozen path, REPO is still the frozen copy
+        shutil.rmtree(self.results)
+        os.remove(self.log)
+        r = self.run_cascade()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        for c in self.calls():
+            self.assertIn("TAG=hook ", c)
+            self.assertIn("REPO=%s " % root, c)
+
+    def test_resume_ignores_new_clone_commit(self):
+        r = self.run_cascade(stubs=False, STUB_FAIL_LEVEL="2")
+        self.assertEqual(r.returncode, 7, r.stdout + r.stderr)
+        sha2 = self.commit_stubs("v2")                            # Jay commits / pulls meanwhile
+        os.remove(self.log)
+        r = self.run_cascade(stubs=False, SLURM_JOB_ID="4343")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        root = self.code_root(self.sha1)
+        self.assertIn("code: frozen %s at %s (clone HEAD %s)" % (self.sha1, root, sha2), r.stdout)
+        self.assertIn("code source: resume", r.stdout)
+        calls = self.calls()
+        self.assertEqual([c.split()[0] for c in calls], ["L2", "L1"])
+        for c in calls:
+            self.assertIn("TAG=v1 ", c)
+            self.assertIn("REPO=%s " % root, c)
+        self.assertFalse(os.path.exists(self.code_root(sha2)))
+        st = self.state()
+        self.assertEqual((st["commit"], st["created_job_id"], st["last_job_id"]), (self.sha1, "4242", "4343"))
+        self.assertEqual(self.marker("r1_cfgB_synth05")["git_rev"], self.sha1)
+
+    def test_dirty_clone(self):
+        with open(os.path.join(self.repo, "slurm", "r_level4.sh"), "a") as f:
+            f.write('echo DIRTY >> "%s"\n' % self.log)
+        r = self.run_cascade(stubs=False)
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertIn("uncommitted changes", r.stderr)
+        self.assertIn("slurm/r_level4.sh", r.stderr)
+        self.assertEqual(self.calls(), [])
+        self.assertFalse(os.path.exists(self.proj))
+        self.assertFalse(os.path.exists(self.results))
+        r = self.run_cascade(stubs=False, BGR_DRY_RUN="1")       # dry run reports it, exit 0
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("dirty check: DIRTY", r.stdout)
+        self.assertIn("a real run would exit 2", r.stdout)
+        r = self.run_cascade(stubs=False, ALLOW_DIRTY="1")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("WARNING: ALLOW_DIRTY=1", r.stderr)
+        calls = self.calls()
+        self.assertEqual([c.split()[0] for c in calls], ["L4", "L2", "L1"])
+        self.assertNotIn("DIRTY", "\n".join(calls))               # the uncommitted change is not frozen
+        self.assertEqual(self.state()["allow_dirty"], "1")
+
+    def test_code_commit_pin(self):
+        sha2 = self.commit_stubs("v2")
+        with open(os.path.join(self.repo, "main.py"), "a") as f:   # dirty tree is irrelevant with a pin
+            f.write("# dirty\n")
+        r = self.run_cascade(stubs=False, CODE_COMMIT="deadbeef")
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertIn("CODE_COMMIT", r.stderr)
+        r = self.run_cascade(stubs=False, CODE_COMMIT=self.sha1[:9])
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        root = self.code_root(self.sha1)
+        self.assertIn("code: frozen %s at %s (clone HEAD %s)" % (self.sha1, root, sha2), r.stdout)
+        self.assertIn("dirty check: skipped (CODE_COMMIT pin", r.stdout)
+        for c in self.calls():
+            self.assertIn("TAG=v1 ", c)
+        self.assertEqual((self.state()["commit"], self.state()["code_mode"]), (self.sha1, "pin"))
+
+    def test_recipe_change_on_resume(self):
+        r = self.run_cascade(stubs=False, STUB_FAIL_LEVEL="2")
+        self.assertEqual(r.returncode, 7, r.stdout + r.stderr)
+        os.remove(self.log)
+        for bad in (dict(S2="5"), dict(SYNTH_PROB="0"), dict(RUN_NAME_L1="r1_other")):
+            r = self.run_cascade(stubs=False, **bad)
+            self.assertEqual(r.returncode, 2, (bad, r.stdout))
+            self.assertIn("FORCE_RECIPE_CHANGE", r.stderr)
+        sha2 = self.commit_stubs("v2")
+        r = self.run_cascade(stubs=False, CODE_COMMIT=sha2)       # commit change needs the force flag too
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertEqual(self.calls(), [])
+        r = self.run_cascade(stubs=False, S2="5", FORCE_RECIPE_CHANGE="1")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("WARNING: FORCE_RECIPE_CHANGE=1", r.stderr)
+        calls = self.calls()
+        self.assertEqual([c.split()[0] for c in calls], ["L2", "L1"])
+        self.assertIn("--lambda-smooth 5", calls[0])
+        self.assertIn("TAG=v1 ", calls[0])                        # still the recorded commit
+        self.assertEqual((self.state()["s2"], self.state()["commit"]), ("5", self.sha1))
+        prev = [f for f in os.listdir(os.path.join(self.results, "cascade_chains")) if ".json.prev-" in f]
+        self.assertEqual(len(prev), 1, prev)
+
+    def test_missing_or_partial_code_root_is_reextracted(self):
+        r = self.run_cascade(stubs=False, STUB_FAIL_LEVEL="2")
+        self.assertEqual(r.returncode, 7, r.stdout + r.stderr)
+        root = self.code_root(self.sha1)
+        self.commit_stubs("v2")
+        shutil.rmtree(root)                                       # scratch cleaned
+        r = self.run_cascade(stubs=False, BGR_DRY_RUN="1")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("extract: needed: git archive %s" % self.sha1, r.stdout)
+        self.assertFalse(os.path.exists(root))
+        os.makedirs(os.path.join(root, "slurm"))                  # partial extract: no stamp
+        r = self.run_cascade(stubs=False, BGR_DRY_RUN="1")
+        self.assertIn("extract: partial copy", r.stdout)
+        os.remove(self.log)
+        r = self.run_cascade(stubs=False)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("extracting %s into %s" % (self.sha1, root), r.stdout)
+        self.assertEqual(_read(os.path.join(root, ".cascade_extract_ok")).strip(), self.sha1)
+        for c in self.calls():
+            self.assertIn("TAG=v1 ", c)
+            self.assertIn("REPO=%s " % root, c)
+
+    def test_frozen_dry_run_creates_nothing(self):
+        r = self.run_cascade(stubs=False, BGR_DRY_RUN="1")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        root = self.code_root(self.sha1)
+        for item in ("code: frozen %s at %s (clone HEAD %s)" % (self.sha1, root, self.sha1),
+                     "code source: fresh (fresh chain: clone HEAD)", "dirty check: clean",
+                     "extract: needed: git archive %s | tar -x -C %s" % (self.sha1, root),
+                     "bash %s" % os.path.join(root, "slurm", "r_level4.sh")):
+            self.assertIn(item, r.stdout, item)
+        self.assertFalse(os.path.exists(self.proj))
+        self.assertFalse(os.path.exists(self.results))
+        self.assertEqual(self.calls(), [])
+        self.assertEqual(self.git("status", "--porcelain"), "")
+        # after a run: the dry run reports the reuse of the existing copy
+        self.assertEqual(self.run_cascade(stubs=False, STUB_FAIL_LEVEL="4").returncode, 7)
+        sha2 = self.commit_stubs("v2")
+        r = self.run_cascade(stubs=False, BGR_DRY_RUN="1")
+        self.assertIn("code: frozen %s at %s (clone HEAD %s)" % (self.sha1, root, sha2), r.stdout)
+        self.assertIn("extract: present", r.stdout)
+        self.assertIn("dirty check: skipped (resume", r.stdout)
 
 
 if __name__ == "__main__":
