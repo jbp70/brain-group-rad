@@ -14,8 +14,9 @@
 # Works from a tcsh login shell (bash shebang); no rc files are sourced.
 #
 #SBATCH --job-name=bgr_synthseg
-# EDIT: GPU partition (suggested: rtx8000; avoid qtim/pubgpu-req Blackwell and L40S nodes with TF 2.10)
-#SBATCH --partition=rtx8000
+# EDIT: GPU partition (rtx6000 = Quadro RTX 6000 24 GB, schedules faster than rtx8000 when the
+# cluster is busy; rtx8000 also works; avoid qtim/pubgpu-req Blackwell and L40S nodes with TF 2.10)
+#SBATCH --partition=rtx6000
 # Martinos MLSC rule: always account qtim (never entre)
 #SBATCH --account=qtim
 # EDIT: uncomment (single #) only if your cluster requires a QOS
@@ -26,9 +27,9 @@
 #SBATCH --gpus=1
 # EDIT
 #SBATCH --time=04:00:00
-# EDIT: rtx8000 fair share is ~128 GB per GPU
+# EDIT: fair share per GPU: rtx6000 ~180 GB, rtx8000 ~128 GB
 #SBATCH --mem=32G
-# EDIT: passed as --threads; rtx8000 fair share is ~3 CPUs per GPU
+# EDIT: passed as --threads; fair share per GPU: rtx6000 4 CPUs, rtx8000 ~3
 #SBATCH --cpus-per-task=3
 # EDIT: 0-(n-chunks - 1); %2 = at most two tasks at once (cluster rule)
 #SBATCH --array=0-0%2
