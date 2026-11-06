@@ -138,6 +138,80 @@ def test_flirt_world_shift_is_composed_once(tmp_path, fake_tools, target_dir, mn
     np.testing.assert_allclose(com(mask) - com(_template_mask()), [2, 0, 0], atol=0.3)
 
 
+def _com_world(m, affine):
+    return (np.asarray(affine, float) @ np.r_[np.argwhere(m > 0).mean(0), 1])[:3]
+
+
+def test_miriad_row_centroid_backend(tmp_path, fake_tools, target_dir, mni_files, capsys):
+    """backend centroid: SynthStrip + N4, no registration tool, translation-only centring."""
+    cfg = write_config(tmp_path / "c.yaml", target_dir, mni_files, registration={"backend": "centroid"},
+                       outputs={"save_mask": True, "save_qc_png": True})
+    row = ds.miriad_row(str(tmp_path / "in"))
+    man = ds.write_rows(str(tmp_path / "m.csv"), [row])
+    out = str(tmp_path / "out")
+    d = _sd(out, row)
+    assert _run(cfg, man, out, "--dry-run") == 0
+    text = capsys.readouterr().out
+    assert "PY register(centroid translation)" in text and "PY resample(centroid translation" in text
+    assert not os.path.exists(out)
+    assert _run(cfg, man, out) == 0
+    assert ds.calls_by_tool(fake_tools.calls()) == {"mri_synthstrip": 1, "N4BiasFieldCorrection": 1}
+    _, mask = _check_outputs(d, saved=True)
+    tmask = _template_mask()
+    # The brain lands on the template brain (same phantom, only shifted), nothing cropped.
+    np.testing.assert_allclose(_com_world(mask, ph.target_affine()), _com_world(tmask, ph.target_affine()),
+                               atol=0.5)
+    assert dice(mask, tmask) > 0.85
+    meta = _meta(d)
+    reg = meta["registration"]
+    assert reg["backend"] == "centroid" and reg["transform"] == "translation"
+    np.testing.assert_allclose(reg["moving_centroid_mm"],
+                               np.asarray(reg["template_centroid_mm"]) + np.asarray(ds.MIRIAD_SHIFT), atol=0.5)
+    w = nifti.read_matrix_txt(os.path.join(d, "affine_to_template_world.txt"))
+    np.testing.assert_allclose(w[:3, :3], np.eye(3))
+    np.testing.assert_allclose(w[:3, 3], -np.asarray(ds.MIRIAD_SHIFT), atol=0.5)
+    assert not os.path.exists(os.path.join(d, "affine_to_template.mat"))
+    assert meta["mask_volume_lost_frac"] == 0.0
+    assert meta["steps"]["resample"]["params"]["mask_volume_lost_frac"] == 0.0
+    assert meta["antialias"] is not None  # 0.9375 mm in-plane < 0.95 mm
+    assert "reorient" not in meta["steps"] and meta["status"] == "completed"
+    # Resume: nothing reruns.
+    n_calls = len(fake_tools.calls())
+    assert _run(cfg, man, out) == 0
+    assert len(fake_tools.calls()) == n_calls
+
+
+def test_centroid_backend_labels_nearest(tmp_path, fake_tools, target_dir, mni_files):
+    cfg = write_config(tmp_path / "c.yaml", target_dir, mni_files, registration={"backend": "centroid"})
+    row = ds.generic_row(str(tmp_path / "in"))
+    man = ds.write_rows(str(tmp_path / "m.csv"), [row])
+    out = str(tmp_path / "out")
+    assert _run(cfg, man, out) == 0
+    d = _sd(out, row)
+    _check_outputs(d, ["manual"])
+    lab = nifti.load_data(os.path.join(d, "labels_manual.nii.gz"), np.int64)[0]
+    assert set(np.unique(lab)) == {0, 2, 4, 41}
+    assert dice(lab > 0, _template_mask()) > 0.85
+
+
+def test_centroid_backend_reports_field_of_view_loss(tmp_path, fake_tools, target_dir, mni_files, caplog):
+    """A brain larger than the target grid: the lost fraction is recorded and warned about."""
+    cfg = write_config(tmp_path / "c.yaml", target_dir, mni_files, registration={"backend": "centroid"})
+    row = ds.miriad_row(str(tmp_path / "in"))
+    # Stretch the stored image 2x in world space (bigger "brain" than the 24 mm wide target grid).
+    data, img = nifti.load_data(row.image_path)
+    aff = img.affine.copy()
+    aff[:3, :3] *= 2.0
+    ph.save(row.image_path, data, aff, np.int16)
+    man = ds.write_rows(str(tmp_path / "m.csv"), [row])
+    out = str(tmp_path / "out")
+    with caplog.at_level("WARNING"):
+        assert _run(cfg, man, out) == 0
+    frac = _meta(_sd(out, row))["mask_volume_lost_frac"]
+    assert 0.01 < frac < 1.0
+    assert "outside the target field of view" in caplog.text
+
+
 def test_ultracortex_row_strip_n4_antialias(tmp_path, fake_tools, config_file):
     row = ds.ultracortex_row(str(tmp_path / "in"))
     man = ds.write_rows(str(tmp_path / "m.csv"), [row])

@@ -88,6 +88,22 @@ def mindboggle_native_row(root: str, subject: str = "HLN-12-1") -> ManifestRow:
                        label_paths=OrderedDict([("dkt31aseg", lab)]))
 
 
+MIRIAD_SHIFT = (2.0, 3.0, -6.0)
+
+
+def miriad_row(root: str, subject: str = "miriad_241_HC_M_06_MR_1", shift=MIRIAD_SHIFT) -> ManifestRow:
+    """MIRIAD-like: raw head, LSP storage, 0.9375 x 0.9375 x 1.5 mm, brain off the world origin by ``shift``."""
+    shape = (40, 36, 32)
+    m = np.array([[-0.9375, 0, 0], [0, 0, -1.5], [0, 0.9375, 0]])  # i -> L, j -> S, k -> P
+    aff = np.eye(4)
+    aff[:3, :3] = m
+    aff[:3, 3] = np.array([1.0, 2.0, -4.0]) - m @ ((np.asarray(shape) - 1) / 2.0)
+    xyz = ph.world_coords(shape, aff) - np.asarray(shift, float).reshape(3, 1, 1, 1)
+    d = os.path.join(root, "miriad", subject)
+    img = ph.save(os.path.join(d, subject + ".nii"), ph.head(xyz), aff, np.int16)
+    return ManifestRow(dataset="miriad", subject=subject, contrast="T1w", image_path=img)
+
+
 def write_rows(path: str, rows: List[ManifestRow]) -> str:
     write_manifest(rows, path)
     return path

@@ -70,6 +70,16 @@ def test_deep_merge_and_validation(tmp_path):
             load_config(str(p))
 
 
+def test_centroid_backend_and_miriad_config(tmp_path):
+    cfg = load_config(os.path.join(os.path.dirname(EXAMPLE), "config_miriad.yaml"))
+    assert cfg["registration"]["backend"] == "centroid" and cfg["registration"]["centroid"]["image_order"] == 1
+    for bad in (2.5, True, 7):
+        p = tmp_path / "c.yaml"
+        p.write_text(yaml.safe_dump({"registration": {"backend": "centroid", "centroid": {"image_order": bad}}}))
+        with pytest.raises(ConfigError):
+            load_config(str(p))
+
+
 def test_paths_and_contrast_templates():
     env = {"FSLDIR": "/opt/fsl"}
     assert expand_path("${FSLDIR}/data/x.nii.gz", env) == "/opt/fsl/data/x.nii.gz"

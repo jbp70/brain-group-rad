@@ -1,0 +1,16 @@
+# MIRIAD (longitudinal T1, AD + controls) on the Martinos cluster, for evaluating
+# rigid/affine groupwise registration on data that is NOT pre-aligned.
+# Omitted keys use the defaults in preprocessing/config.py (Martinos tool paths, p99.5 normalization).
+# Manifest:
+#   build-manifest --dataset generic --root /autofs/space/crater_001/datasets/public/miriad/miriad \
+#       --name miriad --image-glob '*/*/*.nii' --subject-from stem --out <manifests>/miriad.csv
+# Steps: SynthStrip + N4, then NO registration: registration.backend centroid only translates
+# the brain-mask centroid onto the MNI brain-mask centroid of the LUMIR grid (native head
+# orientation and size kept), one world-space resampling onto the LUMIR 1 mm grid.
+# meta.json mask_volume_lost_frac = fraction of the brain mask outside the grid (warning > 0.1 %).
+target_dir: /autofs/space/crater_001/users/jn85/BrainRegProjects/GroupwiseReg/data/target_grid
+
+registration: {backend: centroid}
+
+# Evaluation only: keep image, meta/qc json; delete work/ intermediates.
+outputs: {keep_work: false, save_mask: false, save_qc_png: false}

@@ -7,11 +7,13 @@ Pipeline (manifest-driven; each step resumable):
   validate -> reorient (flirt backend) -> strip (SynthStrip / provided / derived mask)
   -> N4 -> 9-DOF FLIRT (or ANTs) to MNI152 1 mm -> ONE resampling into the target grid
   -> in-mask p99.5 normalization -> SynthSeg (batch) -> QC
+  (registration.backend: centroid replaces the registration by a brain-centroid translation,
+  so the outputs stay unaligned apart from position; see config_miriad.yaml)
 
 Output layout:
   <out_root>/<dataset>/<subject>[_ses-<session>][_<contrast>]/
       image.nii.gz (float32 [0,1]), labels_synthseg.nii.gz (uint16), labels_<name>.nii.gz,
-      affine_to_template.mat, [affine_to_template_world.txt], meta.json, qc.json,
+      affine_to_template.mat (flirt/ants), [affine_to_template_world.txt], meta.json, qc.json,
       synthseg_vols.csv, synthseg_qc.csv, logs/
       optional (config outputs): mask.nii.gz (save_mask), qc.png (save_qc_png; or on demand
       with qc-summary --png), work/ (keep_work; otherwise deleted once the row is done)

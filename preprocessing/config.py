@@ -101,6 +101,11 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "use_masks": False,
             "image_interp": "Linear",
         },
+        # backend "centroid": no registration. Translation only, moving the brain-mask centroid
+        # onto the template brain-mask centroid (keeps the native head orientation and size, and
+        # keeps the brain inside the target field of view). image_order: scipy spline order for the
+        # image (1 = linear, like the in_template_space path); masks/labels use nearest.
+        "centroid": {"image_order": 1},
     },
     "resample": {"antialias": True, "target_spacing_mm": 1.0, "min_spacing_ratio": 0.95},
     "synthseg": {"parc": True, "robust": True, "cpu": False, "threads": 8, "vol": True,
@@ -115,7 +120,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "qc": {"mad_threshold": 4.0},
 }
 
-_BACKENDS = ("flirt", "ants")
+_BACKENDS = ("flirt", "ants", "centroid")
 _REORIENT = ("nibabel", "fslreorient2std", "none")
 _ANTS_TRANSFORMS = ("Affine", "Similarity")
 
@@ -172,6 +177,9 @@ def validate(cfg: Dict[str, Any]) -> None:
     _require(reg["ants"]["transform"] in _ANTS_TRANSFORMS,
              "registration.ants.transform must be one of %s (ANTs has no 9-DOF)" % (_ANTS_TRANSFORMS,))
     _require(isinstance(reg["flirt"]["dof"], int), "registration.flirt.dof must be an int")
+    order = reg["centroid"]["image_order"]
+    _require(isinstance(order, int) and not isinstance(order, bool) and 0 <= order <= 5,
+             "registration.centroid.image_order must be an int in 0..5")
     for key in ("synthstrip", "synthseg"):
         _require(isinstance(cfg[key]["extra_args"], list), "%s.extra_args must be a list" % key)
     _require(isinstance(reg["flirt"]["extra_args"], list), "registration.flirt.extra_args must be a list")

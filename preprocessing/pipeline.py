@@ -6,9 +6,14 @@ Steps (ALL_STEPS, in order; validation always runs):
   strip      provided mask | derive_mask (already stripped) | mri_synthstrip
              (mask.union_labels: SynthStrip mask | labels > 0)
   n4         N4BiasFieldCorrection inside the mask (skipped if bias_corrected)
-  register   9-DOF FLIRT (default) or ANTs Rigid+Affine/Similarity to MNI152 1 mm (skipped if in_template_space)
+  register   9-DOF FLIRT (default) or ANTs Rigid+Affine/Similarity to MNI152 1 mm (skipped if in_template_space);
+             backend "centroid": no registration, only the translation that moves the brain-mask
+             centroid onto the template brain-mask centroid (native orientation/size kept; for
+             evaluating registration methods on unaligned data, e.g. MIRIAD)
   resample   ONE interpolation native -> target grid (anti-alias smoothing for sub-mm inputs first);
-             flirt matrices are composed in world space, ANTs uses template_lumirgrid as reference
+             flirt matrices are composed in world space, ANTs uses template_lumirgrid as reference,
+             centroid resamples in world space with scipy (meta mask_volume_lost_frac = brain mask
+             outside the target field of view)
   normalize  in-mask 99.5th percentile -> [0,1] (numpy), write image/labels (and mask.nii.gz only with
              outputs.save_mask) with the target affine
   synthseg   optional per-row SynthSeg (the batch `synthseg` command is the main path)
@@ -138,6 +143,8 @@ class RowContext:
         if step == "n4":
             return [self.w("n4.nii.gz")]
         if step == "register":
+            if self.backend == "centroid":
+                return [self.o("affine_to_template_world.txt")]
             outs = [self.o("affine_to_template.mat")]
             if self.backend == "flirt":
                 outs.append(self.o("affine_to_template_world.txt"))
@@ -329,7 +336,38 @@ def _reg_template(c: RowContext) -> Dict[str, Optional[str]]:
     return t
 
 
+def _mask_centroid_world(mask: np.ndarray, affine) -> np.ndarray:
+    idx = np.argwhere(mask)
+    if not len(idx):
+        raise PipelineError("empty brain mask")
+    return (np.asarray(affine, float) @ np.r_[idx.mean(0), 1.0])[:3]
+
+
+def _register_centroid(c: RowContext) -> None:
+    """Translation only: brain-mask centroid -> template brain-mask centroid (world, RAS mm)."""
+    mask_path = c.w("native_mask.nii.gz")
+    world_txt = c.o("affine_to_template_world.txt")
+    c.py("register(centroid translation)", [mask_path, c.target.mask_path], [world_txt])
+    if c.dry:
+        return
+    c.need(mask_path)
+    mdata, mimg = nifti.load_data(mask_path, np.uint8)
+    moving_c = _mask_centroid_world(mdata > 0, mimg.affine)
+    target_c = _mask_centroid_world(c.target.mask_data(), c.target.affine)
+    world = np.eye(4)
+    world[:3, 3] = target_c - moving_c
+    nifti.write_matrix_txt(world, world_txt)
+    c.meta["registration"] = {"backend": "centroid", "transform": "translation",
+                              "matrix_format": "world RAS mm (registration input -> template)",
+                              "world_matrix_ras": world.tolist(), "moving_centroid_mm": moving_c.tolist(),
+                              "template_centroid_mm": target_c.tolist(),
+                              "translation_mm": (target_c - moving_c).tolist()}
+
+
 def step_register(c: RowContext) -> None:
+    if c.backend == "centroid":
+        _register_centroid(c)
+        return
     moving = c.reg_input
     c.need(moving)
     t = _reg_template(c)
@@ -391,6 +429,39 @@ def _flirt_apply(c: RowContext, moving: str, out: str, interp: str, name: str, i
                                float_output=is_image), "resample")
 
 
+def _centroid_apply(c: RowContext, jobs: List[Tuple[str, str, str, bool]]) -> None:
+    """World-space resampling with the centroid translation (one interpolation, numpy/scipy).
+
+    Records in meta.json how much of the native brain mask falls outside the target
+    field of view (mask_volume_lost_frac; warns above 0.1 %).
+    """
+    world_txt = c.o("affine_to_template_world.txt")
+    c.py("resample(centroid translation, world space)", [world_txt] + [j[0] for j in jobs], [j[1] for j in jobs])
+    if c.dry:
+        return
+    world = nifti.read_matrix_txt(world_txt)
+    order = int(c.cfg["registration"]["centroid"]["image_order"])
+    tshape, taff = c.target.shape, c.target.affine
+    for src, out, name, is_img in jobs:
+        data, img = nifti.load_data(src, np.float32 if is_img else np.float64)
+        moved_aff = world @ np.asarray(img.affine, float)
+        if is_img:
+            res = nifti.resample_world(data, moved_aff, tshape, taff, order=order)
+        else:
+            res = resample_labels_nearest(data, moved_aff, tshape, taff)
+        if name == "mask":
+            # Native mask voxel centres mapped into target voxel coordinates: fraction outside the grid.
+            idx = np.argwhere(data > 0)
+            t = (np.linalg.inv(taff) @ moved_aff @ np.c_[idx, np.ones(len(idx))].T)[:3]
+            inside = np.all((t > -0.5) & (t < np.asarray(tshape)[:, None] - 0.5), axis=0)
+            frac = float(1.0 - inside.mean()) if len(idx) else 0.0
+            c.meta["mask_volume_lost_frac"] = frac
+            if frac > 1e-3:
+                log.warning("%s: %.2f %% of the brain mask falls outside the target field of view",
+                            c.D, 100 * frac)
+        nifti.save_like(res, taff, out, np.float32, xform_code=4)
+
+
 def step_resample(c: RowContext) -> None:
     r = c.row
     img_out, mask_out = c.w("image_resampled.nii.gz"), c.w("mask_resampled.nii.gz")
@@ -420,7 +491,7 @@ def step_resample(c: RowContext) -> None:
         c.meta["label_voxels_lost_resample"] = lost
         return
     moving = c.reg_input
-    c.need(moving, c.w("native_mask.nii.gz"), c.o("affine_to_template.mat"))
+    c.need(moving, c.w("native_mask.nii.gz"), c.outputs("register")[0])
     rc = c.cfg["resample"]
     image_src = moving
     if rc["antialias"]:
@@ -443,7 +514,9 @@ def step_resample(c: RowContext) -> None:
     jobs = [(image_src, img_out, "image", True), (c.w("native_mask.nii.gz"), mask_out, "mask", False)]
     for name, out in c.resampled_labels().items():
         jobs.append((r.label_paths[name], out, "labels_" + name, False))
-    if c.backend == "flirt":
+    if c.backend == "centroid":
+        _centroid_apply(c, jobs)
+    elif c.backend == "flirt":
         interp_img = c.cfg["registration"]["flirt"]["image_interp"]
         for src, out, name, is_img in jobs:
             _flirt_apply(c, src, out, interp_img if is_img else "nearestneighbour", name, is_img)
@@ -643,7 +716,10 @@ def _step_params(c: RowContext, s: str) -> Dict[str, Any]:
     if s == "normalize":
         return {"normalization": c.meta.get("normalization")}
     if s == "resample":
-        return {"antialias": c.meta.get("antialias"), "grid_state": c.meta.get("grid_state")}
+        p = {"antialias": c.meta.get("antialias"), "grid_state": c.meta.get("grid_state")}
+        if c.backend == "centroid" and not c.row.in_template_space:
+            p["mask_volume_lost_frac"] = c.meta.get("mask_volume_lost_frac")
+        return p
     if s == "register":
         return dict(c.meta.get("registration") or {})
     if s == "strip":
