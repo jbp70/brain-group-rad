@@ -1306,5 +1306,252 @@ class TestEvalSynthScript(unittest.TestCase):
         self.assertTrue(os.path.isdir(os.path.join(self.tmp, "scratch", "88")))
 
 
+CASCADE = os.path.join(REPO, "slurm", "r_cascade.sh")
+LEVEL_SCRIPTS = tuple(os.path.join(REPO, "slurm", "r_level%d.sh" % k) for k in (4, 2, 1))
+CASCADE_ENV = ("S4", "S2", "S1", "SYNTH_PROB", "RUN_NAME_L4", "RUN_NAME_L2", "RUN_NAME_L1", "GROUP_ARGS",
+               "EXTRA_ARGS_L4", "EXTRA_ARGS_L2", "EXTRA_ARGS_L1", "STEPS_L4", "STEPS_L2", "STEPS_L1", "LR", "WD",
+               "VAL_EVERY", "WARMUP_L4", "DEFORM_START_L4", "DEFORM_RAMP_L4", "CURRICULUM_RAMP_L4", "G_START_L4",
+               "G_RAMP_L4", "VAL_GROUP_SIZE_L4", "TF_MEM_LIMIT_MB_L1", "GPU_POLL", "START_LEVEL",
+               "CASCADE_FROM_START", "L4_SCRIPT", "L2_SCRIPT", "L1_SCRIPT", "STUB_FAIL_LEVEL", "STUB_BAD_LEVEL")
+# Env of the level scripts that r_cascade.sh passes through unchanged (all others are unset per level).
+CASCADE_PASSTHROUGH = {"PROJ", "REPO", "DATA", "RESULTS", "SIF", "SCRATCH_ROOT", "SLURM_JOB_ID",
+                       "SLURM_CPUS_PER_TASK", "CUDA_VISIBLE_DEVICES"}
+# Stub level script: logs what it sees, fails on request, else writes ckpt/last at last-$STEPS.
+STUB_LEVEL = r"""#!/bin/bash
+echo "L%(k)s RUN_NAME=$RUN_NAME STEPS=$STEPS PROJECT_STEPS=$PROJECT_STEPS CASCADE_FROM=${CASCADE_FROM-UNSET} N=${N-UNSET} FILTERS=${FILTERS-UNSET} INIT=${INIT-UNSET} SYNTH_PROB=$SYNTH_PROB EXTRA_ARGS=$EXTRA_ARGS" >> "%(log)s"
+if [ "${STUB_FAIL_LEVEL:-}" = "%(k)s" ]; then exit 7; fi
+mkdir -p "$RESULTS/$RUN_NAME/ckpt/last"
+s="$STEPS"
+if [ "${STUB_BAD_LEVEL:-}" = "%(k)s" ]; then s=1; fi
+printf 'model_checkpoint_path: "last-%%s"\nall_model_checkpoint_paths: "last-%%s"\n' "$s" "$s" > "$RESULTS/$RUN_NAME/ckpt/last/checkpoint"
+exit 0
+"""
+
+
+class TestCascadeStatic(unittest.TestCase):
+    """cascade-chain: slurm/r_cascade.sh header and level-env coverage."""
+
+    def test_header(self):
+        text = _read(CASCADE)
+        self.assertNotIn("\r", text)
+        self.assertTrue(all(ord(c) < 128 for c in text))
+        self.assertNotIn("entre", text.lower())
+        for line in ("#SBATCH --job-name=bgr-cascade", "#SBATCH -A qtim", "#SBATCH -p rtx8000",
+                     "#SBATCH --gpus=1", "#SBATCH -N 1", "#SBATCH --ntasks-per-node=1",
+                     "#SBATCH --cpus-per-task=3", "#SBATCH --mem=128G", "#SBATCH --time=72:00:00",
+                     "#SBATCH --output=%s/%%x-%%j.out" % LOGS, "#SBATCH --error=%s/%%x-%%j.err" % LOGS):
+            self.assertIn(line + "\n", text)
+        self.assertEqual(len(re.findall(r"(?m)^#SBATCH ", text)), 11)
+        self.assertIn("set -uo pipefail\n", text)
+        for k in ("DO NOT submit without Jay's approval", "at most two active jobs", "mkdir -p %s" % LOGS,
+                  "env S4=<S4> S2=<S2> S1=<S1> sbatch slurm/r_cascade.sh", "SYNTH_PROB=0", "Resume rule"):
+            self.assertIn(k, text, k)
+        self.assertNotIn("FILTERS=", text)
+        self.assertNotIn("DECODER_WIDTHS=", text)
+
+    def test_level_env_coverage(self):
+        """Every env variable a level script reads is either unset per level or passed through."""
+        m = re.search(r"LEVEL_ENV_KEYS=\(([^)]*)\)", _read(CASCADE))
+        keys = set(m.group(1).split())
+        self.assertFalse(keys & CASCADE_PASSTHROUGH)
+        for path in LEVEL_SCRIPTS:
+            names = set(re.findall(r"\$\{([A-Z_][A-Z0-9_]*):?-", _read(path)))
+            with self.subTest(os.path.basename(path)):
+                self.assertEqual(names - keys - CASCADE_PASSTHROUGH, set())
+
+    @unittest.skipIf(BASH is None, "bash not available")
+    def test_bash_syntax(self):
+        r = subprocess.run([BASH, "-n", CASCADE], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                           universal_newlines=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+
+@unittest.skipIf(BASH is None, "bash not available")
+class TestCascadeRuns(unittest.TestCase):
+    """cascade-chain: validation, dry run, and stub level scripts (success chain, failing level,
+    rerun skips, ckpt without marker reruns)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="cascade_")
+        self.log = os.path.join(self.tmp, "levels.log")
+        self.results = os.path.join(self.tmp, "results")
+        self.stubs = {}
+        for k in (4, 2, 1):
+            p = os.path.join(self.tmp, "stub_l%d.sh" % k)
+            with open(p, "w") as f:
+                f.write(STUB_LEVEL % {"k": k, "log": self.log})
+            self.stubs[k] = p
+        env = {k: v for k, v in os.environ.items() if k not in CASCADE_ENV + RECIPE_ENV}
+        env.update(PROJ=os.path.join(self.tmp, "proj"), REPO=os.path.join(self.tmp, "repo"), RESULTS=self.results,
+                   SLURM_JOB_ID="4242", S4="0.5", S2="2", S1="3")
+        self.env = env
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def run_cascade(self, stubs=True, **extra):
+        e = dict(self.env)
+        if stubs:
+            e.update(L4_SCRIPT=self.stubs[4], L2_SCRIPT=self.stubs[2], L1_SCRIPT=self.stubs[1])
+        for k, v in extra.items():
+            if v is None:
+                e.pop(k, None)
+            else:
+                e[k] = v
+        return subprocess.run([BASH, CASCADE], env=e, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              universal_newlines=True, stdin=subprocess.DEVNULL)
+
+    def calls(self):
+        return _read(self.log).splitlines() if os.path.exists(self.log) else []
+
+    def marker(self, run):
+        import json
+        return json.loads(_read(os.path.join(self.results, run, "cascade_done.json")))
+
+    def write_ckpt(self, run, step):
+        d = os.path.join(self.results, run, "ckpt", "last")
+        os.makedirs(d)
+        with open(os.path.join(d, "checkpoint"), "w") as f:
+            f.write('model_checkpoint_path: "last-%d"\n' % step)
+
+    def test_missing_or_bad_smoothness_exits_2(self):
+        for bad in (dict(S4=None), dict(S2=None), dict(S1=None), dict(S1=""), dict(S2="0"), dict(S4="-1"),
+                    dict(S4="abc"), dict(START_LEVEL="3"), dict(SYNTH_PROB="1.5"),
+                    dict(RUN_NAME_L2="r4_cfgB_synth05")):
+            r = self.run_cascade(BGR_DRY_RUN="1", **bad)
+            self.assertEqual(r.returncode, 2, (bad, r.stdout, r.stderr))
+            self.assertIn("ERROR", r.stderr)
+            self.assertNotIn("LEVEL ", r.stdout)
+        self.assertEqual(self.calls(), [])
+
+    def test_dry_run(self):
+        r = self.run_cascade(stubs=False, BGR_DRY_RUN="1", REPO=REPO)       # the real level scripts
+        self.assertEqual(r.returncode, 0, r.stderr)
+        out = r.stdout
+        self.assertFalse(os.path.exists(self.tmp + "/proj"))
+        self.assertFalse(os.path.exists(self.results))       # nothing created
+        env = {k: [ln for ln in out.splitlines() if ln.startswith("ENV L%d: " % k)] for k in (4, 2, 1)}
+        cmd = {k: [ln for ln in out.splitlines() if ln.startswith("CMD L%d: " % k)] for k in (4, 2, 1)}
+        for k, run, steps, s in ((4, "r4_cfgB_synth05", 16000, "0.5"), (2, "r2_cfgB_synth05", 15000, "2"),
+                                 (1, "r1_cfgB_synth05", 4000, "3")):
+            self.assertEqual(len(env[k]), 1, out)
+            self.assertEqual(len(cmd[k]), 1, out)
+            self.assertIn("LEVEL %d: fresh" % k, out)
+            e = env[k][0] + " "
+            for item in ("RUN_NAME=%s " % run, "STEPS=%d " % steps, "PROJECT_STEPS=%d " % steps, "LR=3e-4 ",
+                         "WD=1e-1 ", "VAL_EVERY=500 ", "SYNTH_PROB=0.5 ", "GPU_POLL=false ",
+                         "EXTRA_ARGS=--group-config B --lambda-smooth %s " % s):
+                self.assertIn(item, e, (k, item))
+            self.assertIn("EXTRA_ARGS='--group-config B --lambda-smooth %s' bash %s"
+                          % (s, os.path.join(REPO, "slurm", "r_level%d.sh" % k)), cmd[k][0])
+            self.assertNotIn("FILTERS", e)
+            self.assertNotIn("DECODER_WIDTHS", e)
+        for item in ("WARMUP=1000 ", "DEFORM_START=3000 ", "DEFORM_RAMP=500 ", "CURRICULUM_RAMP=3000 ",
+                     "G_START=3000 ", "G_RAMP=3000 ", "VAL_GROUP_SIZE=16 "):
+            self.assertIn(item, env[4][0] + " ")
+            self.assertNotIn(item.split("=")[0] + "=", env[2][0])
+        self.assertNotIn("CASCADE_FROM", env[4][0])
+        self.assertIn("CASCADE_FROM=%s/r4_cfgB_synth05/ckpt/last " % self.results, env[2][0])
+        self.assertIn("CASCADE_FROM=%s/r2_cfgB_synth05/ckpt/last " % self.results, env[1][0])
+        self.assertIn("TF_MEM_LIMIT_MB=42500 ", env[1][0])
+        self.assertNotIn("TF_MEM_LIMIT_MB", env[2][0])
+        # real-only chain + user extras
+        r = self.run_cascade(stubs=False, BGR_DRY_RUN="1", REPO=REPO, SYNTH_PROB="0", RUN_NAME_L4="r4_cfgB_final",
+                             RUN_NAME_L2="r2_cfgB_final", RUN_NAME_L1="r1_cfgB_final", EXTRA_ARGS_L1="--lean-losses false")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("CASCADE_FROM=%s/r2_cfgB_final/ckpt/last " % self.results, r.stdout)
+        self.assertIn("SYNTH_PROB=0 ", r.stdout)
+        self.assertIn("EXTRA_ARGS=--group-config B --lambda-smooth 3 --lean-losses false", r.stdout)
+
+    def test_start_level_needs_source(self):
+        for lvl in ("2", "1"):
+            r = self.run_cascade(BGR_DRY_RUN="1", START_LEVEL=lvl)
+            self.assertEqual(r.returncode, 2, r.stdout)
+            self.assertIn("CASCADE_FROM_START", r.stderr)
+            r = self.run_cascade(BGR_DRY_RUN="1", START_LEVEL=lvl, CASCADE_FROM_START=os.path.join(self.tmp, "nope"))
+            self.assertEqual(r.returncode, 2, r.stdout)
+        r = self.run_cascade(BGR_DRY_RUN="1", CASCADE_FROM_START=self.tmp)     # only with START_LEVEL 2 / 1
+        self.assertEqual(r.returncode, 2, r.stdout)
+        r = self.run_cascade(BGR_DRY_RUN="1", START_LEVEL="2", CASCADE_FROM_START=self.tmp)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("LEVEL 4: not run (START_LEVEL 2)", r.stdout)
+        self.assertNotIn("ENV L4:", r.stdout)
+        self.assertIn("CASCADE_FROM=%s " % self.tmp, [ln for ln in r.stdout.splitlines()
+                                                     if ln.startswith("ENV L2: ")][0])
+        self.assertIn("CASCADE_FROM=%s/r2_cfgB_synth05/ckpt/last " % self.results, r.stdout)
+        r = self.run_cascade(START_LEVEL="2", CASCADE_FROM_START=self.tmp)     # real (stub) run
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual([c.split()[0] for c in self.calls()], ["L2", "L1"])
+
+    def test_success_chain_and_rerun_skip(self):
+        r = self.run_cascade(N="999", FILTERS="", INIT="/x", EXTRA_ARGS="--stale")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        calls = self.calls()
+        self.assertEqual([c.split()[0] for c in calls], ["L4", "L2", "L1"])
+        for c in calls:                                          # stale submit env never reaches a level
+            for item in ("N=UNSET", "FILTERS=UNSET", "INIT=UNSET"):
+                self.assertIn(item, c)
+            self.assertNotIn("--stale", c)
+        self.assertIn("CASCADE_FROM=UNSET", calls[0])
+        self.assertIn("CASCADE_FROM=%s/r4_cfgB_synth05/ckpt/last " % self.results, calls[1])
+        self.assertIn("CASCADE_FROM=%s/r2_cfgB_synth05/ckpt/last " % self.results, calls[2])
+        self.assertIn("EXTRA_ARGS=--group-config B --lambda-smooth 2", calls[1])
+        for k, run, steps in ((4, "r4_cfgB_synth05", 16000), (2, "r2_cfgB_synth05", 15000),
+                              (1, "r1_cfgB_synth05", 4000)):
+            m = self.marker(run)
+            self.assertEqual((m["level"], m["steps"], m["checkpoint"], m["job_id"], m["run_name"]),
+                             (k, steps, "last-%d" % steps, "4242", run))
+        dates = [self.marker(r_)["date"] for r_ in ("r4_cfgB_synth05", "r2_cfgB_synth05", "r1_cfgB_synth05")]
+        self.assertEqual(dates, sorted(dates))
+        out = r.stdout
+        self.assertLess(out.index("=== level 4 start"), out.index("=== level 4 end"))
+        self.assertLess(out.index("=== level 4 end"), out.index("=== level 2 start"))
+        self.assertLess(out.index("=== level 2 end"), out.index("=== level 1 start"))
+        self.assertIn("CASCADE DONE", out)
+        # identical resubmission: every level skipped, no level script called
+        os.remove(self.log)
+        r = self.run_cascade()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.calls(), [])
+        for k in (4, 2, 1):
+            self.assertIn("=== level %d skip" % k, r.stdout)
+
+    def test_failing_level_stops_chain(self):
+        r = self.run_cascade(STUB_FAIL_LEVEL="2")
+        self.assertEqual(r.returncode, 7, r.stdout + r.stderr)
+        self.assertEqual([c.split()[0] for c in self.calls()], ["L4", "L2"])
+        self.assertIn("CASCADE FAILED at level 2", r.stderr)
+        self.assertIn("=== level 2 end", r.stdout)
+        self.assertNotIn("=== level 1 start", r.stdout)
+        self.assertTrue(os.path.isfile(os.path.join(self.results, "r4_cfgB_synth05", "cascade_done.json")))
+        self.assertFalse(os.path.exists(os.path.join(self.results, "r2_cfgB_synth05", "cascade_done.json")))
+        self.assertFalse(os.path.exists(os.path.join(self.results, "r1_cfgB_synth05")))
+        # resubmission continues at level 2
+        os.remove(self.log)
+        r = self.run_cascade()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual([c.split()[0] for c in self.calls()], ["L2", "L1"])
+        # exit 0 with a checkpoint short of STEPS is a failure too (exit 3, no marker)
+        shutil.rmtree(self.results)
+        os.remove(self.log)
+        r = self.run_cascade(STUB_BAD_LEVEL="4")
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+        self.assertEqual([c.split()[0] for c in self.calls()], ["L4"])
+        self.assertFalse(os.path.exists(os.path.join(self.results, "r4_cfgB_synth05", "cascade_done.json")))
+
+    def test_ckpt_without_marker_is_rerun(self):
+        self.write_ckpt("r4_cfgB_synth05", 16000)                # finished but no marker (e.g. checker failed)
+        self.write_ckpt("r2_cfgB_synth05", 750)                  # interrupted
+        r = self.run_cascade(BGR_DRY_RUN="1")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("LEVEL 4: resume (ckpt/last at last-16000, no cascade_done.json", r.stdout)
+        self.assertIn("LEVEL 2: resume (ckpt/last at last-750", r.stdout)
+        self.assertIn("LEVEL 1: fresh", r.stdout)
+        r = self.run_cascade()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual([c.split()[0] for c in self.calls()], ["L4", "L2", "L1"])
+        self.assertEqual(self.marker("r2_cfgB_synth05")["checkpoint"], "last-15000")
+
+
 if __name__ == "__main__":
     unittest.main()
