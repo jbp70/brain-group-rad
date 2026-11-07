@@ -18,6 +18,15 @@ atlas_intensity_std.
 
     python -m evaluation.groups write-groups --processed-dir $PROJ/data/processed/miriad --out-dir G
     python -m evaluation.groups aggregate --root R/<method> --method <method> --out R/<method>/_aggregate
+
+compare       side-by-side table of several methods from their <root>/<method>/_aggregate/per_group.csv,
+              over the patients every method has: mean +- std per method, and per method the paired
+              difference to --reference (default identity), two-sided Wilcoxon signed-rank p over
+              patients and the share of patients where it beats the reference. Overall and AD / HC.
+              Writes compare.md and compare.csv in --out.
+
+    python -m evaluation.groups compare --root $PROJ/results/eval_miriad \\
+        --methods identity brainmorph_rigid brainmorph_affine --out $PROJ/results/eval_miriad/_compare
 """
 import argparse
 import csv
@@ -155,6 +164,152 @@ def cmd_aggregate(a) -> int:
     return 0
 
 
+HIGHER_IS_BETTER = ("lncc", "ncc", "dice")
+
+
+def _better(metric: str) -> str:
+    return "higher" if any(k in metric for k in HIGHER_IS_BETTER) else "lower"
+
+
+def _read_per_group(path: str) -> Dict[str, dict]:
+    with open(path, newline="") as f:
+        return {r["group"]: r for r in csv.DictReader(f)}
+
+
+def _num(x) -> Optional[float]:
+    try:
+        v = float(x)
+    except (TypeError, ValueError):
+        return None
+    return v if np.isfinite(v) else None
+
+
+def _wilcoxon(d: np.ndarray) -> Optional[float]:
+    """Two-sided Wilcoxon signed-rank p over paired per-group differences (None if undefined)."""
+    if d.size < 2 or not np.any(d != 0):
+        return None
+    try:
+        from scipy.stats import wilcoxon
+        return float(wilcoxon(d).pvalue)
+    except ValueError:
+        return None
+
+
+def compare_rows(tables: Dict[str, Dict[str, dict]], methods: Sequence[str], reference: Optional[str],
+                 metrics: Sequence[str], groups: Sequence[str], subset: str = "all") -> List[dict]:
+    """One row per (metric, method): mean / std / median over ``groups`` (the patients every method
+    has), plus the paired difference to ``reference`` (mean, Wilcoxon p, fraction of groups where
+    the method is better than the reference)."""
+    rows = []
+    for m in metrics:
+        ref = None
+        if reference:
+            ref = np.array([_num(tables[reference][g].get(m)) for g in groups], dtype=object)
+        for meth in methods:
+            vals = np.array([_num(tables[meth][g].get(m)) for g in groups], dtype=object)
+            ok = np.array([v is not None for v in vals])
+            v = vals[ok].astype(np.float64)
+            row = {"subset": subset, "metric": m, "better": _better(m), "method": meth, "n": int(v.size),
+                   "mean": float(v.mean()) if v.size else None, "std": float(v.std()) if v.size else None,
+                   "median": float(np.median(v)) if v.size else None}
+            if ref is not None and meth != reference:
+                both = ok & np.array([r is not None for r in ref])
+                d = vals[both].astype(np.float64) - ref[both].astype(np.float64)
+                sign = 1.0 if row["better"] == "higher" else -1.0
+                row.update({"diff_vs_ref": float(d.mean()) if d.size else None, "n_paired": int(d.size),
+                            "p_wilcoxon": _wilcoxon(d),
+                            "frac_better": float(np.mean(sign * d > 0)) if d.size else None})
+            rows.append(row)
+    return rows
+
+
+def _fmt(x, nd=4):
+    return "" if x is None else ("%.*f" % (nd, x))
+
+
+def _markdown(rows: List[dict], methods: Sequence[str], reference: Optional[str]) -> str:
+    """Wide table per subset: metric | method mean +- std ... | diff vs reference (p)."""
+    out = []
+    for subset in sorted({r["subset"] for r in rows}, key=lambda s: (s != "all", s)):
+        sub = [r for r in rows if r["subset"] == subset]
+        n = max(r["n"] for r in sub) if sub else 0
+        out.append("### %s (%d patients)\n" % (subset, n))
+        head = ["metric"] + list(methods)
+        others = [m for m in methods if reference and m != reference]
+        head += ["%s - %s (p, frac better)" % (m, reference) for m in others]
+        out.append("| " + " | ".join(head) + " |")
+        out.append("|" + "---|" * len(head))
+        for metric in dict.fromkeys(r["metric"] for r in sub):
+            by = {r["method"]: r for r in sub if r["metric"] == metric}
+            cells = ["%s (%s)" % (metric, by[methods[0]]["better"])]
+            for m in methods:
+                r = by[m]
+                cells.append("%s +- %s" % (_fmt(r["mean"]), _fmt(r["std"])) if r["mean"] is not None else "n/a")
+            for m in others:
+                r = by[m]
+                if r.get("diff_vs_ref") is None:
+                    cells.append("n/a")
+                else:
+                    p = r["p_wilcoxon"]
+                    cells.append("%+.4f (p %s, %.0f %%)" % (r["diff_vs_ref"], "n/a" if p is None else "%.2g" % p,
+                                                            100 * r["frac_better"]))
+            out.append("| " + " | ".join(cells) + " |")
+        out.append("")
+    return "\n".join(out)
+
+
+def cmd_compare(a) -> int:
+    a.reference = a.reference or None
+    tables = {}
+    for m in a.methods:
+        p = os.path.join(a.root, m, "_aggregate", "per_group.csv")
+        if not os.path.isfile(p):
+            print("missing %s (run eval_miriad.sh / aggregate for %s first)" % (p, m), file=sys.stderr)
+            return 2
+        tables[m] = _read_per_group(p)
+    if a.reference and a.reference not in a.methods:
+        print("--reference %s is not one of --methods" % a.reference, file=sys.stderr)
+        return 2
+    common = sorted(set.intersection(*(set(t) for t in tables.values())))
+    for m, t in tables.items():
+        extra = sorted(set(t) - set(common))
+        if extra:
+            print("WARNING: %s has %d patients not in every method (left out): %s"
+                  % (m, len(extra), " ".join(extra[:5]) + (" ..." if len(extra) > 5 else "")), file=sys.stderr)
+    if not common:
+        print("no patients common to all methods", file=sys.stderr)
+        return 2
+    if a.metrics:
+        metrics = a.metrics
+    else:   # aggregate metrics present as a column for every method
+        metrics = [k for k in SUBJECT_METRICS + PAIR_METRICS + GROUP_METRICS
+                   if all(k in tables[m][common[0]] for m in a.methods)]
+    rows = compare_rows(tables, a.methods, a.reference, metrics, common, "all")
+    for dx in ("AD", "HC"):
+        gs = [g for g in common if _diagnosis(g) == dx]
+        if gs:
+            rows += compare_rows(tables, a.methods, a.reference, metrics, gs, dx)
+    os.makedirs(a.out, exist_ok=True)
+    keys = []
+    for r in rows:
+        keys += [k for k in r if k not in keys]
+    with open(os.path.join(a.out, "compare.csv"), "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=keys)
+        w.writeheader()
+        for r in rows:
+            w.writerow(r)
+    md = _markdown(rows, a.methods, a.reference)
+    with open(os.path.join(a.out, "compare.md"), "w") as f:
+        f.write("# Patient-level comparison (%s)\n\nMean +- std over patients (each patient = mean over its "
+                "scans / pairs). Differences are paired per patient vs %s; p = two-sided Wilcoxon "
+                "signed-rank; frac better = share of patients where the method beats the reference "
+                "(direction per metric in parentheses). Centrality is 0 for identity by construction.\n\n%s"
+                % (", ".join(a.methods), a.reference or "(none)", md))
+    print(md)
+    print("wrote %s/compare.{md,csv}" % a.out)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="python -m evaluation.groups", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -174,6 +329,13 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--expected", type=int, default=None, help="warn if the number of groups differs")
     g.add_argument("--all-metrics", action="store_true", help="keep every metric of summary.json")
     g.set_defaults(func=cmd_aggregate)
+    c = sub.add_parser("compare", help="side-by-side table of several methods (paired per patient)")
+    c.add_argument("--root", required=True, help="evaluation root with <method>/_aggregate/per_group.csv")
+    c.add_argument("--methods", nargs="+", required=True)
+    c.add_argument("--reference", default="identity", help="paired differences vs this method ('' = none)")
+    c.add_argument("--metrics", nargs="+", default=None, help="default: the aggregate metrics")
+    c.add_argument("--out", required=True)
+    c.set_defaults(func=cmd_compare)
     return p
 
 

@@ -126,6 +126,48 @@ class TestGroups(unittest.TestCase):
         with open(os.path.join(out, "summary.json")) as f:
             self.assertIn("fold_fwd_pct", json.load(f)["metrics"])
 
+    def test_compare(self):
+        root = os.path.join(self.tmp, "eval")
+        pats = ["miriad_%d_%s_M" % (i, "AD" if i % 2 else "HC") for i in range(10)]
+        rng = np.random.RandomState(0)
+        for meth, gain in (("identity", 0.0), ("bm_rigid", 0.1)):
+            d = os.path.join(root, meth, "_aggregate")
+            os.makedirs(d)
+            plist = pats + (["miriad_99_AD_M"] if meth == "bm_rigid" else [])   # extra patient left out
+            with open(os.path.join(d, "per_group.csv"), "w", newline="") as f:
+                w = csv.writer(f)
+                w.writerow(["group", "diagnosis", "n_subjects", "template_lncc", "pair_dice", "atlas_intensity_std",
+                            "centrality_mean_mm"])
+                for i, p in enumerate(plist):
+                    base = 0.5 + 0.01 * i
+                    w.writerow([p, G._diagnosis(p), 5, base + gain + 0.001 * rng.rand(), base + gain,
+                                0.2 - gain / 2, 0.0 if meth == "identity" else 0.5])
+        out = os.path.join(root, "_compare")
+        with contextlib.redirect_stdout(io.StringIO()) as buf, contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(G.main(["compare", "--root", root, "--methods", "identity", "bm_rigid",
+                                     "--out", out]), 0)
+        self.assertIn("miriad_99_AD_M", err.getvalue())
+        with open(os.path.join(out, "compare.csv")) as f:
+            rows = list(csv.DictReader(f))
+        r = {(x["subset"], x["metric"], x["method"]): x for x in rows}
+        lncc = r[("all", "template_lncc", "bm_rigid")]
+        self.assertEqual(lncc["n"], "10")
+        self.assertAlmostEqual(float(lncc["diff_vs_ref"]), 0.1, places=2)
+        self.assertEqual(float(lncc["frac_better"]), 1.0)
+        self.assertLess(float(lncc["p_wilcoxon"]), 0.01)
+        sharp = r[("all", "atlas_intensity_std", "bm_rigid")]
+        self.assertEqual(sharp["better"], "lower")
+        self.assertEqual(float(sharp["frac_better"]), 1.0)     # lower std = better
+        self.assertEqual(r[("AD", "pair_dice", "identity")]["n"], "5")
+        self.assertNotIn("diff_vs_ref", {k for k, v in r[("all", "pair_dice", "identity")].items() if v})
+        md = _read(os.path.join(out, "compare.md"))
+        for k in ("### all (10 patients)", "### AD (5 patients)", "template_lncc (higher)",
+                  "bm_rigid - identity"):
+            self.assertIn(k, md)
+        self.assertIn("### all", buf.getvalue())
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(G.main(["compare", "--root", root, "--methods", "identity", "nope", "--out", out]), 2)
+
     def test_aggregate_missing(self):
         with contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(G.main(["aggregate", "--root", self.tmp, "--method", "m",
