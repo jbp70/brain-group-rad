@@ -36,6 +36,14 @@ n.) All subjects must share one processed grid; the template space is the networ
 space of that grid, mapped back onto the processed grid. Fits run in the centred network frame
 (n - (extent - 1) / 2), like SynthMorph's.
 
+Patient-level mode (``--groups-dir``, MIRIAD): one groupwise registration per group file of
+``python -m evaluation.groups write-groups`` and per alignment, both models loaded once. Outputs in
+the layout of slurm/eval_miriad.sh: ``<out>/synthmorph_<align>/<group>/fields/`` with only
+matrices.npz, atlas.nii.gz, atlas_seg.nii.gz (``--save-fields dense`` adds the per-scan files),
+``<out>/synthmorph_<align>/groups/`` and ``<out>/_synthmorph_keypoints/<group>/`` (keypoints,
+pair checks, run_info.json = done marker; finished groups are skipped). See
+slurm/synthmorph_miriad.sh.
+
 Run with FreeSurfer's python (TensorFlow 2.13, voxelmorph, neurite, surfa):
     fspython baselines/synthmorph/run_synthmorph_groupwise.py --self-test
     fspython baselines/synthmorph/run_synthmorph_groupwise.py --processed-dir P --out O --aligns rigid affine
@@ -233,9 +241,10 @@ def pair_check(det, x0, x1, log=print):
 
 
 # ------------------------------------------------------------------ pipeline
-def write_outputs(subs, d, shape, affine, fwd_vox, log=print, tag=""):
+def write_outputs(subs, d, shape, affine, fwd_vox, log=print, tag="", dense=True):
     """Dense fields, moved images/labels, atlas, atlas_seg and matrices for 4x4 fwd maps
-    (processed voxel coords, atlas -> subject)."""
+    (processed voxel coords, atlas -> subject). dense=False: only matrices.npz, atlas.nii.gz and
+    atlas_seg.nii.gz (evaluate with ``python -m evaluation run --matrices``)."""
     os.makedirs(d, exist_ok=True)
     spacing = np.sqrt((affine[:3, :3] ** 2).sum(0))
     g = np.indices(shape, dtype=np.float64).reshape(3, -1).T
@@ -250,14 +259,16 @@ def write_outputs(subs, d, shape, affine, fwd_vox, log=print, tag=""):
         moved = F.warp(img, fwd, order=1)
         atlas_sum += moved
         sp = spacing.astype(np.float32)
-        save_nii(fwd * sp, affine, os.path.join(d, s["dir"] + "_fwd.nii.gz"))
-        save_nii(inv * sp, affine, os.path.join(d, s["dir"] + "_inv.nii.gz"))
-        save_nii(moved, affine, os.path.join(d, s["dir"] + "_moved.nii.gz"))
+        if dense:
+            save_nii(fwd * sp, affine, os.path.join(d, s["dir"] + "_fwd.nii.gz"))
+            save_nii(inv * sp, affine, os.path.join(d, s["dir"] + "_inv.nii.gz"))
+            save_nii(moved, affine, os.path.join(d, s["dir"] + "_moved.nii.gz"))
         if s["labels"]:
             lab = np.rint(np.asarray(load_vol(s["labels"])[0], np.float32)).astype(np.int32)
             ml = F.warp(lab, fwd, order=0)
             labs.append(ml)
-            save_nii(ml, affine, os.path.join(d, s["dir"] + "_moved_seg.nii.gz"))
+            if dense:
+                save_nii(ml, affine, os.path.join(d, s["dir"] + "_moved_seg.nii.gz"))
         log("%s %d/%d %s |fwd| mean %.2f mm (%.0f s)" % (tag, i + 1, len(subs), s["dir"],
                                                          float(F.norm_mm(fwd, spacing).mean()), time.time() - t0))
     save_nii((atlas_sum / len(subs)).astype(np.float32), affine, os.path.join(d, "atlas.nii.gz"))
@@ -272,11 +283,19 @@ def write_outputs(subs, d, shape, affine, fwd_vox, log=print, tag=""):
                   "vox = processed-grid voxel coords, world = scanner mm of the grid affine")
 
 
-def run_align(subs, out, align, extent, num_iters, weighted, weights_file=None, log=print, info=None):
-    d = os.path.join(out, align)
+def run_align(subs, out, align, extent, num_iters, weighted, weights_file=None, log=print, info=None,
+              det=None, d=None, kp_path=None, dense=True, do_pair_check=True):
+    """One groupwise registration of ``subs`` with one model. Defaults (Mindboggle mode): outputs
+    in <out>/<align>/ incl. keypoints.npz, pair_check.json and run_info.json. Patient-level mode
+    passes a loaded ``det``, the output folder ``d``, ``kp_path`` for keypoints.npz and
+    dense=False; returns the run_info dict (written to <d>/run_info.json only in the default mode)."""
+    group_mode = d is not None
+    d = d or os.path.join(out, align)
     os.makedirs(d, exist_ok=True)
+    kp_path = kp_path or os.path.join(d, "keypoints.npz")
     t0 = time.time()
-    det = Detector(align, extent, weights_file)
+    det = det or Detector(align, extent, weights_file)
+    extent = det.extent
     img0 = nib.load(subs[0]["image"])
     shape, affine = tuple(int(v) for v in img0.shape[:3]), img0.affine
     n_net, powers, nets = [], [], None
@@ -296,8 +315,9 @@ def run_align(subs, out, align, extent, num_iters, weighted, weights_file=None, 
         n_net.append(n)
         powers.append(p)
         log("%s keypoints %d/%d %s (%.0f s)" % (align, i + 1, len(subs), s["dir"], time.time() - t0))
-    check = pair_check(det, xs01[0], xs01[1], log) if len(xs01) == 2 else None
-    with open(os.path.join(d, "pair_check.json"), "w") as f:
+    check = pair_check(det, xs01[0], xs01[1], log) if (len(xs01) == 2 and do_pair_check) else None
+    pc_path = (kp_path[:-len("keypoints.npz")] + "pair_check.json") if group_mode else os.path.join(d, "pair_check.json")
+    with open(pc_path, "w") as f:
         json.dump(check, f, indent=2)
     if check is not None and not check["pass"]:
         raise SystemExit("pair check FAILED: keypoint extraction does not reproduce the model's own fit")
@@ -310,7 +330,7 @@ def run_align(subs, out, align, extent, num_iters, weighted, weights_file=None, 
     fwd_vox = [net_to_vox @ un @ m @ cen @ vox_to_net for m in fwd_c]  # processed voxel: atlas -> subject
     vox = lambda pts: apply(net_to_vox, pts)  # noqa: E731
     q = group_weights(powers)[0]
-    np.savez(os.path.join(d, "keypoints.npz"), subjects=np.array([s["dir"] for s in subs]),
+    np.savez(kp_path, subjects=np.array([s["dir"] for s in subs]),
              points_net=n_net.astype(np.float32), points_vox=vox(n_net).astype(np.float32),
              points_world_mm=apply(affine, vox(n_net)).astype(np.float32), power=powers, power_norm=q,
              fit_weights=eps if eps is not None else np.full(powers.shape, 1.0 / powers.shape[1]),
@@ -318,15 +338,145 @@ def run_align(subs, out, align, extent, num_iters, weighted, weights_file=None, 
              aligned_vox=vox(aligned + c).astype(np.float32), net_to_vox=net_to_vox, grid_affine=affine,
              extent=extent)
     t_kp = time.time() - t0
-    write_outputs(subs, d, shape, affine, fwd_vox, log, align)
+    write_outputs(subs, d, shape, affine, fwd_vox, log, align, dense=dense)
     meta = dict(info or {})
     meta.update(align=align, model_weights=det.weights, n_subjects=len(subs), num_iters=num_iters,
                 weighted=weighted, extent=extent, num_keypoints=int(n_net.shape[1]), grid=list(shape),
-                keypoints_s=t_kp, total_s=time.time() - t0, pair_check=check,
-                convention="--components xyz --signs +++ --units mm")
-    with open(os.path.join(d, "run_info.json"), "w") as f:
-        json.dump(meta, f, indent=2)
+                keypoints_s=t_kp, total_s=time.time() - t0, pair_check=check, dense_fields=dense,
+                subjects=[s["dir"] for s in subs], convention="--components xyz --signs +++ --units mm")
+    if not group_mode:
+        with open(os.path.join(d, "run_info.json"), "w") as f:
+            json.dump(meta, f, indent=2)
     log("%s done (%.1f min)" % (align, (time.time() - t0) / 60))
+    return meta
+
+
+def list_groups(groups_dir, only=None):
+    names = sorted(f[:-4] for f in os.listdir(groups_dir) if f.endswith(".txt") and not f.startswith("_"))
+    if only:
+        missing = [g for g in only if g not in names]
+        if missing:
+            raise SystemExit("groups not in %s: %s" % (groups_dir, missing))
+        names = [g for g in names if g in only]
+    return names
+
+
+def run_groups(a, detectors=None, log=print, info=None):
+    """Patient-level mode (MIRIAD): one groupwise registration per group file and alignment, models
+    loaded once. Layout of slurm/eval_miriad.sh: <out>/<prefix>_<align>/<group>/fields/
+    (matrices.npz, atlas.nii.gz, atlas_seg.nii.gz; dense files only with --save-fields dense),
+    <out>/<prefix>_<align>/groups/ (copy of the group files) and
+    <out>/_<prefix>_keypoints/<group>/{<align>_keypoints.npz, <align>_pair_check.json, run_info.json}
+    (run_info.json written last = done marker; such a group is skipped). Returns the exit status."""
+    import shutil
+    import traceback
+    groups = list_groups(a.groups_dir, a.groups)
+    if not groups:
+        log("no group files in %s" % a.groups_dir)
+        return 2
+    for al in a.aligns:
+        gd = os.path.join(a.out, "%s_%s" % (a.method_prefix, al), "groups")
+        os.makedirs(gd, exist_ok=True)
+        for f in os.listdir(a.groups_dir):
+            if f.endswith(".txt") or f == "groups.csv":
+                shutil.copyfile(os.path.join(a.groups_dir, f), os.path.join(gd, f))
+    if detectors is None:
+        detectors = {al: Detector(al, a.extent, a.weights_rigid if al == "rigid" else a.weights_affine)
+                     for al in a.aligns}
+    kp_root = os.path.join(a.out, "_%s_keypoints" % a.method_prefix)
+    dense = getattr(a, "save_fields", None) == "dense"
+    failed, n_done, n_skip, t0 = [], 0, 0, time.time()
+    for gi, g in enumerate(groups):
+        kp_dir = os.path.join(kp_root, g)
+        if os.path.isfile(os.path.join(kp_dir, "run_info.json")):
+            n_skip += 1
+            continue
+        try:
+            subs = find_subjects(a.processed_dir, a.label_name, os.path.join(a.groups_dir, g + ".txt"))
+            if len(subs) < 2:
+                raise ValueError("group %s has %d scans" % (g, len(subs)))
+            os.makedirs(kp_dir, exist_ok=True)
+            log("=== group %d/%d %s (%d scans, %.1f min)" % (gi + 1, len(groups), g, len(subs),
+                                                            (time.time() - t0) / 60))
+            metas = {}
+            for al in a.aligns:
+                metas[al] = run_align(
+                    subs, a.out, al, a.extent, a.num_iters, not a.unweighted, log=log, info=info,
+                    det=detectors[al], d=os.path.join(a.out, "%s_%s" % (a.method_prefix, al), g, "fields"),
+                    kp_path=os.path.join(kp_dir, "%s_keypoints.npz" % al), dense=dense,
+                    do_pair_check=getattr(a, "pair_check", True))
+            with open(os.path.join(kp_dir, "run_info.json"), "w") as f:
+                json.dump({"group": g, "aligns": metas}, f, indent=2)
+            n_done += 1
+        except SystemExit:
+            raise
+        except Exception:
+            log("group %s FAILED:\n%s" % (g, traceback.format_exc()))
+            failed.append(g)
+    log("groups: %d done, %d already done, %d failed (of %d)%s" % (
+        n_done, n_skip, len(failed), len(groups), (": " + " ".join(failed)) if failed else ""))
+    return 1 if failed else 0
+
+
+def groups_mode_check(tmp, proc, subjects, maps, kp):
+    """Patient-level mode on synthetic subjects (FakeDetector, numpy only). subjects: folder names
+    under ``proc``; maps[i]: 4x4 base -> subject i voxel map; kp: base keypoints [K, 3].
+    Returns [(name, passed, value)]."""
+    import types
+    gdir, gout = os.path.join(tmp, "groups"), os.path.join(tmp, "groups_out")
+    os.makedirs(gdir, exist_ok=True)
+    half = len(subjects) // 2
+    for g, members in (("PA", subjects[:half]), ("PB", subjects[half:])):
+        with open(os.path.join(gdir, g + ".txt"), "w") as f:
+            f.write("\n".join(members) + "\n")
+    idx = {os.path.join(proc, s, "image.nii.gz"): i for i, s in enumerate(subjects)}
+    kp_of = lambda path: apply(maps[idx[path]], kp)  # noqa: E731
+    dets = {al: FakeDetector(al, kp_of) for al in ("rigid", "affine")}
+    a = types.SimpleNamespace(groups_dir=gdir, groups=None, out=gout, aligns=["rigid", "affine"],
+                              method_prefix="synthmorph", processed_dir=proc, label_name="dkt31aseg",
+                              extent=256, num_iters=5, unweighted=False, save_fields="matrices",
+                              pair_check=False)
+    res = []
+    rc = run_groups(a, detectors=dets, log=lambda *_: None)
+    fd = os.path.join(gout, "synthmorph_affine", "PB", "fields")
+    have = sorted(os.listdir(fd)) if os.path.isdir(fd) else []
+    res.append(("groups mode: rc 0, fields/ = matrices.npz + atlas + atlas_seg",
+                rc == 0 and have == ["atlas.nii.gz", "atlas_seg.nii.gz", "matrices.npz"], have))
+    gd = os.path.join(gout, "synthmorph_rigid", "groups")
+    res.append(("groups mode: group files copied per method", sorted(os.listdir(gd)) == ["PA.txt", "PB.txt"],
+                sorted(os.listdir(gd))))
+    kd = os.path.join(gout, "_synthmorph_keypoints", "PA")
+    res.append(("groups mode: keypoints + run_info per group",
+                sorted(os.listdir(kd)) == ["affine_keypoints.npz", "affine_pair_check.json", "rigid_keypoints.npz",
+                                           "rigid_pair_check.json", "run_info.json"], sorted(os.listdir(kd))))
+    # affine pair 0 -> 1 through the template recovers the true relative map at the keypoints
+    mats = F.load_matrices(os.path.join(gout, "synthmorph_affine", "PA", "fields", "matrices.npz"))
+    m0, m1 = mats[subjects[0]][0], mats[subjects[1]][0]
+    err = np.abs(apply(m1 @ np.linalg.inv(m0), apply(maps[0], kp)) - apply(maps[1], kp)).max()
+    res.append(("groups mode: affine subject 0 -> 1 via template exact [vox]", err < 1e-4, "%.1e" % err))
+    mr = F.load_matrices(os.path.join(gout, "synthmorph_rigid", "PA", "fields", "matrices.npz"))
+    r = mr[subjects[0]][0][:3, :3]
+    res.append(("groups mode: rigid matrices are rotations", abs(np.linalg.det(r) - 1) < 1e-6, "%.6f" % np.linalg.det(r)))
+    mtime = os.path.getmtime(os.path.join(kd, "run_info.json"))
+    rc2 = run_groups(a, detectors=dets, log=lambda *_: None)
+    res.append(("groups mode: rerun skips finished groups",
+                rc2 == 0 and os.path.getmtime(os.path.join(kd, "run_info.json")) == mtime, rc2))
+    return res
+
+
+class FakeDetector:
+    """Stand-in for Detector in tests / the self-test: network space = processed voxel space;
+    keypoints of an image = ``kp_of(path)`` with power 1."""
+
+    def __init__(self, align, kp_of, extent=256):
+        self.align, self.kp_of, self.extent, self.weights = align, kp_of, extent, "fake"
+
+    def to_net(self, path):
+        return path, np.eye(4), np.eye(4)
+
+    def keypoints(self, x):
+        n = self.kp_of(x)
+        return n, np.ones(len(n)), None
 
 
 # ------------------------------------------------------------------ self-test
@@ -440,6 +590,9 @@ def self_test():
     msk = inside(f0) & inside(f2) & (mv[0] > 0.2 * mv[0].max())
     ncc = np.corrcoef(mv[0][msk], mv[1][msk])[0, 1]
     check("moved S0 vs moved S2 NCC", ncc > 0.98, round(float(ncc), 4))
+    # 5. patient-level mode (--groups-dir) with a stand-in detector
+    for name, cond, val in groups_mode_check(tmp, proc, [s["dir"] for s in subs], maps, kp):
+        check(name, cond, val)
     print("self-test files: %s" % out)
     print("SELF-TEST %s" % ("PASSED" if ok else "FAILED"))
     return ok, proc, out
@@ -460,6 +613,14 @@ def main():
     ap.add_argument("--unweighted", action="store_true", help="ordinary LS instead of power-weighted LS")
     ap.add_argument("--weights-rigid", default=None, help="default $FREESURFER_HOME/models/synthmorph.rigid.1.h5")
     ap.add_argument("--weights-affine", default=None, help="default $FREESURFER_HOME/models/synthmorph.affine.2.h5")
+    ap.add_argument("--groups-dir", default=None,
+                    help="patient-level mode (MIRIAD): one groupwise registration per <group>.txt (python -m "
+                         "evaluation.groups write-groups), models loaded once; see run_groups for the layout")
+    ap.add_argument("--groups", nargs="+", default=None, help="with --groups-dir: only these groups")
+    ap.add_argument("--method-prefix", default="synthmorph", help="with --groups-dir (default %(default)s)")
+    ap.add_argument("--save-fields", choices=("dense", "matrices"), default=None,
+                    help="with --groups-dir: matrices (default) keeps matrices.npz + atlas + atlas_seg only; "
+                         "dense also writes per-scan fwd/inv/moved/moved_seg")
     a = ap.parse_args()
 
     import_freesurfer()
@@ -470,6 +631,12 @@ def main():
     for k in ("processed_dir", "out"):
         if not getattr(a, k):
             ap.error("--%s is required" % k.replace("_", "-"))
+    if a.groups_dir:
+        a.save_fields = a.save_fields or "matrices"
+        info = {"processed_dir": os.path.abspath(a.processed_dir), "tensorflow": tf.__version__,
+                "voxelmorph": os.path.dirname(vxm.__file__),
+                "weighting": "ordinary LS" if a.unweighted else "power-weighted LS"}
+        sys.exit(run_groups(a, info=info))
     subs = find_subjects(a.processed_dir, a.label_name, a.subjects_file)
     if a.max_subjects:
         subs = subs[:a.max_subjects]

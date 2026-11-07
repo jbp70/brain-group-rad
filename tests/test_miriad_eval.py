@@ -28,6 +28,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PREDICT = os.path.join(REPO, "slurm", "predict_miriad.sh")
 EVAL = os.path.join(REPO, "slurm", "eval_miriad.sh")
 BM_MIRIAD = os.path.join(REPO, "slurm", "brainmorph_miriad.sh")
+SM_MIRIAD = os.path.join(REPO, "slurm", "synthmorph_miriad.sh")
 LOGS = "/autofs/space/crater_001/users/jn85/BrainRegProjects/GroupwiseReg/logs"
 SIF = "/autofs/space/crater_001/users/jn85/Singularity_Files/tf10_nv.sif"
 BASH = shutil.which("bash")
@@ -39,7 +40,7 @@ SCRIPT_ENV = ("CKPT", "TASK", "NAME", "PROCESSED", "OUT", "PATIENTS", "LABEL_NAM
               "GRID_REF", "LEVELS", "EXTRA", "SCRATCH_ROOT", "METHOD", "PRED", "FWD", "INV", "ATLAS",
               "ATLAS_SEG", "CONV", "IDENTITY", "GROUPS_DIR", "PAIRS", "OVERWRITE", "WORKERS", "PROJ", "REPO",
               "SIF", "SLURM_JOB_ID", "SLURM_CPUS_PER_TASK", "STUB_FAIL", "KEYMORPH_DIR", "WEIGHTS", "ALIGNS",
-              "METHOD_PREFIX", "MATRICES")
+              "METHOD_PREFIX", "MATRICES", "FREESURFER_HOME")
 
 
 def _processed(root):
@@ -179,6 +180,40 @@ def _read(path):
         return f.read()
 
 
+class TestSynthMorphGroups(unittest.TestCase):
+    """baselines/synthmorph groups mode with a stand-in detector (numpy only; the real models run
+    in FreeSurfer's fspython on the cluster)."""
+
+    def test_groups_mode(self):
+        from baselines.synthmorph import run_synthmorph_groupwise as SM
+        tmp = tempfile.mkdtemp(prefix="sm_groups_")
+        try:
+            rng = np.random.RandomState(3)
+            shape = (30, 34, 28)
+            proc = os.path.join(tmp, "processed")
+            x, y, z = np.indices(shape).astype(np.float32)
+            c = (np.asarray(shape) - 1) / 2.0
+            r = np.sqrt(((x - c[0]) / 10) ** 2 + ((y - c[1]) / 12) ** 2 + ((z - c[2]) / 9) ** 2)
+            img = (np.clip(0.5 + 0.3 * np.cos(r * 5), 0.05, None) * (r < 1)).astype(np.float32)
+            lab = np.where(r < 1, np.where(x < c[0], 2, 41), 0).astype(np.int32)
+            names, maps = [], []
+            for i in range(4):
+                m = np.eye(4)
+                m[:3, :3] += rng.uniform(-0.08, 0.08, (3, 3))
+                m[:3, 3] = c - m[:3, :3] @ c + rng.uniform(-2, 2, 3)
+                name = "S%d_T1w" % i
+                os.makedirs(os.path.join(proc, name))
+                nib.save(nib.Nifti1Image(img, np.eye(4)), os.path.join(proc, name, "image.nii.gz"))
+                nib.save(nib.Nifti1Image(lab, np.eye(4)), os.path.join(proc, name, "labels_dkt31aseg.nii.gz"))
+                names.append(name)
+                maps.append(m)
+            kp = rng.uniform(4, np.asarray(shape) - 4, (30, 3))
+            for name, cond, val in SM.groups_mode_check(tmp, proc, names, maps, kp):
+                self.assertTrue(cond, "%s: %s" % (name, val))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 class TestMatrices(unittest.TestCase):
     """evaluation --matrices: fields built from 4x4 voxel matrices == the same fields stored densely."""
 
@@ -278,7 +313,8 @@ class TestStatic(unittest.TestCase):
     def test_headers(self):
         pt_sif = SIF.replace("tf10_nv.sif", "pt_nv.sif")
         for path, part, gpu, sif in ((PREDICT, "rtx6000", True, SIF), (EVAL, "basic", False, SIF),
-                                     (BM_MIRIAD, "rtx8000", True, pt_sif)):
+                                     (BM_MIRIAD, "rtx8000", True, pt_sif),
+                                     (SM_MIRIAD, "rtx8000", True, "$FREESURFER_HOME/bin/fspython")):
             text = _read(path)
             with self.subTest(os.path.basename(path)):
                 self.assertNotIn("\r", text)
@@ -301,7 +337,7 @@ class TestStatic(unittest.TestCase):
 
     @unittest.skipIf(BASH is None, "bash not available")
     def test_bash_syntax(self):
-        for path in (PREDICT, EVAL, BM_MIRIAD):
+        for path in (PREDICT, EVAL, BM_MIRIAD, SM_MIRIAD):
             r = subprocess.run([BASH, "-n", path], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                universal_newlines=True)
             self.assertEqual(r.returncode, 0, r.stderr)
@@ -326,7 +362,7 @@ if a[0] == "predict.py" and a[1] == "run":
         sys.exit(3)
     os.makedirs(out, exist_ok=True)
     open(os.path.join(out, "predict.json"), "w").write("{}")
-elif a[0].endswith("run_brainmorph.py"):
+elif a[0].endswith("run_brainmorph.py") or a[0].endswith("run_synthmorph_groupwise.py"):
     pass
 elif a[0] == "predict.py":
     open(opt("--out"), "w").write("{}")
@@ -488,6 +524,32 @@ class TestStubRuns(unittest.TestCase):
             self.assertIn(k, main)
         self.assertIn("METHOD=brainmorph_affine sbatch slurm/eval_miriad.sh", r.stdout)
         r, calls = self.run_script(BM_MIRIAD, WEIGHTS=os.path.join(self.tmp, "missing.pth"))
+        self.assertEqual(r.returncode, 2)
+        self.assertEqual(calls, [])
+
+    def test_synthmorph_miriad(self):
+        fs = os.path.join(self.tmp, "fs")
+        os.makedirs(os.path.join(fs, "bin"))
+        os.makedirs(os.path.join(fs, "models"))
+        for m in ("synthmorph.rigid.1.h5", "synthmorph.affine.2.h5"):
+            open(os.path.join(fs, "models", m), "w").close()
+        fspy = os.path.join(fs, "bin", "fspython")
+        with open(fspy, "w") as f:   # drop -u, then behave like the stub python
+            f.write('#!/bin/sh\n[ "$1" = "-u" ] && shift\nexec python "$@"\n')
+        os.chmod(fspy, 0o755)
+        r, calls = self.run_script(SM_MIRIAD, FREESURFER_HOME=fs, PATIENTS="miriad_188_AD_M")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        out = os.path.join(self.tmp, "results", "predict_miriad")
+        self.assertEqual(calls[0].split()[:3], ["-m", "evaluation.groups", "write-groups"])
+        self.assertTrue(os.path.isfile(os.path.join(out, "_synthmorph_keypoints", "groups", "miriad_188_AD_M.txt")))
+        self.assertIn("--self-test", calls[1])
+        for k in ("--groups-dir %s/_synthmorph_keypoints/groups" % out, "--aligns rigid affine",
+                  "--groups miriad_188_AD_M", "--label-name synthseg", "--out %s" % out,
+                  "--method-prefix synthmorph", "--num-iters 5"):
+            self.assertIn(k, calls[2])
+        self.assertIn("METHOD=synthmorph_rigid sbatch slurm/eval_miriad.sh", r.stdout)
+        os.remove(os.path.join(fs, "models", "synthmorph.rigid.1.h5"))
+        r, calls = self.run_script(SM_MIRIAD, FREESURFER_HOME=fs)
         self.assertEqual(r.returncode, 2)
         self.assertEqual(calls, [])
 
