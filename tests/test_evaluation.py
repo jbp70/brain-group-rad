@@ -3,6 +3,7 @@
 Run alone: python -m unittest tests.test_evaluation -v
 """
 import contextlib
+import csv
 import io
 import json
 import os
@@ -221,6 +222,20 @@ class EndToEnd(unittest.TestCase):
             self.assertEqual(len(f.read().strip().splitlines()), 13)
         with open(os.path.join(self.tmp, "res_baseline", "labels.txt")) as f:
             self.assertEqual(f.read().split(), ["2", "41", "1002", "2035"])
+        # per_subject_label.csv (TTA plan D6): one row per subject, template Dice per label; the row
+        # mean over finite labels == per_subject.csv template_dice (dice_summary is the NaN-mean)
+        with open(os.path.join(self.tmp, "res_baseline", "per_subject_label.csv")) as f:
+            lab_rows = list(csv.DictReader(f))
+        with open(os.path.join(self.tmp, "res_baseline", "per_subject.csv")) as f:
+            subj_rows = {r["subject"]: r for r in csv.DictReader(f)}
+        self.assertEqual(len(lab_rows), 4)
+        cols = ["template_dice_%s" % lab for lab in ("2", "41", "1002", "2035")]
+        self.assertEqual(list(lab_rows[0].keys()), ["subject"] + cols)
+        self.assertEqual({r["subject"] for r in lab_rows}, set(subj_rows))
+        for r in lab_rows:
+            v = np.array([float(r[c]) for c in cols])
+            self.assertAlmostEqual(float(v[np.isfinite(v)].mean()),
+                                   float(subj_rows[r["subject"]]["template_dice"]), delta=1e-6)
 
     def test_identity_reference_and_wrong_convention(self):
         ident, _ = self._run("res_identity", "--method", "identity", "--identity", "--pairs", "5")

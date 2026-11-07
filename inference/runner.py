@@ -36,6 +36,15 @@ plans run `_linear_sel` / `_deform_sel`: truncated levels are not run (the last 
 are upsampled to level 1, A passes unchanged); a skipped level contributes the identity (A = I,
 U = U_inv = 0) and later stages run on warp(x, 0) / x o I^-1 and compose with it, as the trainer's
 stage skip. u_ckpt / u_inv_ckpt / v / v_raw are None unless the checkpoint's own stage runs.
+
+8-flip TTA (TTA design `.agents/tasks/tta/design.md` 3.4, 3.5, 4, 5): `StreamedRunner(...,
+tta=inference.tta.TTAConfig)` runs every level in ``tta.levels`` once per flip (sequential per
+level: the next level's input is pre-warped with the averaged result). Linear: `_linear_stage`
+(gauge-free residual averaging, `tta.linear_tta_level`); deform: `_deform_stage`
+(`StreamedLevel.deform_tta`). Without TTA at a level (or with `tta.IDENTITY_ONLY`) the unchanged
+calls run. summary['tta'] = None without TTA, else {rows (per image, level, task: the
+`tta.SPREAD_COLUMNS`), gauge {'l<lv>/<task>': [deg, mm]}, nonfinite_flips, timing_s, flips}.
+`UnchunkedRunner` has no TTA.
 """
 import contextlib
 import logging
@@ -48,8 +57,10 @@ from data_loading import params as P
 from inference import levels as LVS
 from inference import loader as LD
 from inference import streaming as ST
+from inference import tta as TTA
 from models import cascade as CS
 from models import diffeo
+from models import transforms as tfm
 
 logger = logging.getLogger(__name__)
 
@@ -205,7 +216,7 @@ class StreamedRunner(_Runner):
 
     mode = "streamed"
 
-    def __init__(self, loaded, store, chunks=None, lean=True, record_fp16=True, plan=None):
+    def __init__(self, loaded, store, chunks=None, lean=True, record_fp16=True, plan=None, tta=None):
         super(StreamedRunner, self).__init__(loaded, plan)
         self.store = store
         self.chunks = dict(DEFAULT_CHUNKS)
@@ -213,6 +224,159 @@ class StreamedRunner(_Runner):
         self.lean = bool(lean)
         self.record_fp16 = bool(record_fp16)
         self._engines = {}
+        self.tta = tta
+        self._tta_reset()
+
+    # ---------------------------------------------------------------- TTA (TTA design 3.4, 3.5, 5)
+    def _tta_at(self, lv):
+        """True iff ``lv`` is a TTA level of this runner."""
+        return self.tta is not None and int(lv) in self.tta.levels
+
+    def _tta_active(self, lv):
+        """TTA at ``lv`` with more than the identity flip (`IDENTITY_ONLY` runs today's code)."""
+        return self._tta_at(lv) and tuple(self.tta.flips) != TTA.IDENTITY_ONLY
+
+    def _tta_reset(self):
+        self._tta_rows = []
+        self._tta_gauge = {}
+        self._tta_nonfinite = {}
+        self._tta_timing = {}
+        self._tta_S = None
+        self._tta_masks = None
+
+    def _tta_summary(self):
+        if self.tta is None:
+            return None
+        return {"rows": list(self._tta_rows), "gauge": dict(self._tta_gauge),
+                "nonfinite_flips": dict(self._tta_nonfinite), "timing_s": dict(self._tta_timing),
+                "flips": [list(f) for f in self.tta.flips]}
+
+    def _second_moments(self, x1):
+        """Per-image S_i = brain_second_moment(x1_i > 0, 1.0) [N, 4, 4] (linear spread), once per run."""
+        if self._tta_S is None:
+            self._tta_S = np.stack([tfm.brain_second_moment(np.asarray(x1[i, ..., 0]) > 0, 1.0)
+                                    for i in range(x1.shape[0])])
+        return self._tta_S
+
+    @staticmethod
+    def _merge_stats(acc, st):
+        """fp16 maxima: max over passes; chunk boundaries of the first pass."""
+        if acc is None:
+            return {k: (dict(v) if isinstance(v, dict) else v) for k, v in st.items()}
+        fp = acc["fp16_max_abs"]
+        for block, rec in st["fp16_max_abs"].items():
+            if block not in fp or rec["max_abs"] > fp[block]["max_abs"]:
+                fp[block] = dict(rec)
+        return acc
+
+    def _linear_stage(self, lv, eng, model, n, input_fn, task, a_prev, x1):
+        """One linear level: today's two lines without TTA at ``lv``; else design 2.3 (8 passes
+        on the flipped level input, unflip, gauge-free residual averaging) plus the spread rows."""
+        if not self._tta_active(lv):
+            a_raw = eng.linear(n, input_fn, task)
+            if a_prev is None:
+                return tf.cast(model.centering(a_raw), tf.float32)
+            return CS.compose_linear(a_raw, a_prev, model.centering)
+        flips = self.tta.flips
+        M_flips, stats, timing = [], None, []
+        for flip in flips:
+            t0 = time.time()
+            a_raw_f = eng.linear(n, lambda i0, i1, flip=flip: TTA.flip_np(input_fn(i0, i1), flip), task)
+            M_flips.append(TTA.unflip_matrices(a_raw_f, flip))
+            stats = self._merge_stats(stats, eng.last_stats)
+            timing.append(time.time() - t0)
+        eng.last_stats = stats
+        res = TTA.linear_tta_level(M_flips, a_prev, model.centering, task, flips)
+        key = "l%d/%s" % (lv, task)
+        self._tta_timing[key] = timing
+        self._tta_nonfinite[key] = list(res["nonfinite"])
+        for f_idx in res["nonfinite"]:
+            logger.warning("level %d %s TTA flip %d %s: non-finite raw parameters / A_f / residual",
+                           lv, task, f_idx, list(flips[f_idx]))
+        A_bar = np.asarray(res["A"], np.float64)
+        nan = float("nan")
+        with np.errstate(invalid="ignore", divide="ignore"):
+            try:
+                sp = TTA.linear_spread(res["A_flips"], A_bar, self._second_moments(x1), res["params"],
+                                       res["p_bar"], task, res["mean_diag"])
+            except (ValueError, np.linalg.LinAlgError) as e:
+                logger.warning("level %d %s TTA spread not computed: %s", lv, task, e)
+                sp = {c: np.full(n, nan) for c in TTA.SPREAD_COLUMNS if c != "spread_p99_mm"}
+            try:
+                gauge = TTA.gauge_size(TTA.gauge_barycenters(M_flips, a_prev, model.config.centering_iters))
+            except (ValueError, np.linalg.LinAlgError, tf.errors.InvalidArgumentError) as e:
+                logger.warning("level %d %s TTA gauge not computed: %s", lv, task, e)
+                gauge = (nan, nan)
+        self._tta_gauge[key] = [float(gauge[0]), float(gauge[1])]
+        for i in range(n):
+            row = {"image": i, "level": int(lv), "task": task}
+            for c in TTA.SPREAD_COLUMNS:
+                row[c] = float(sp[c][i]) if c in sp else None
+            self._tta_rows.append(row)
+            dev, gap = row["readout_dev_deg"], row["rot_gap"]
+            if (dev is not None and dev > 1.0) or (gap is not None and gap < 1e-3):
+                logger.warning("level %d %s TTA image %d: rotation average ambiguous (readout_dev_deg "
+                               "%s, rot_gap %s)", lv, task, i, dev, gap)
+        return res["A"]
+
+    def _deform_stage(self, lv, eng, n, input_fn, prev_fn, sink):
+        """One deform level: `StreamedLevel.deform` without TTA at ``lv``, else `deform_tta` with
+        the level mask, plus the spread rows."""
+        if not self._tta_active(lv):
+            return eng.deform(n, input_fn, prev_fn=prev_fn, sink=sink)
+        res = eng.deform_tta(n, input_fn, self.tta.flips, prev_fn=prev_fn, sink=sink,
+                             mask_fn=self._mask_fn(lv))
+        st = res["stats"]["tta"]
+        key = "l%d/deform" % lv
+        self._tta_timing[key] = list(st["timing_s"])
+        self._tta_nonfinite[key] = list(st["nonfinite_flips"])
+        for i in range(n):
+            row = {"image": i, "level": int(lv), "task": "deform"}
+            for c in TTA.SPREAD_COLUMNS:
+                row[c] = float(st["spread"][c][i]) if c in st["spread"] else None
+            self._tta_rows.append(row)
+        return res
+
+    def _deform_stage_freeing(self, lv, eng, n, input_fn, prev_fn, sink, last_with_src):
+        """`_deform_stage`; at a TTA last level of affine+deform (``last_with_src``) 'src_affine'
+        lives through all flip passes and is freed afterwards, also on errors (design 3.4)."""
+        if not (last_with_src and self._tta_active(lv)):
+            return self._deform_stage(lv, eng, n, input_fn, prev_fn, sink)
+        try:
+            return self._deform_stage(lv, eng, n, input_fn, prev_fn, sink)
+        finally:
+            if SRC_AFFINE in self.store:
+                self.store.free(SRC_AFFINE)
+
+    def _deform_masks(self, n, src, levels):
+        """Level masks of the deform spread (design 3.4) when a deform level is a TTA level:
+        m1 = mean_i 1[src_i > 0] >= 0.5 (one chunked pass over src, chunk l1), pooled to each
+        level and thresholded at 0.5; uint8 [X, Y, Z] per level."""
+        self._tta_masks = None
+        if not any(self._tta_active(lv) for lv in levels):
+            return
+        acc = None
+        for i0, i1 in _bounds(n, self.chunks["l1"]):
+            s = np.sum(np.asarray(src(i0, i1), np.float32) > 0, axis=0, dtype=np.float64)
+            acc = s if acc is None else acc + s
+        m = tf.constant(((acc / float(n)) >= 0.5).astype(np.float32)[None])      # [1, X, Y, Z, 1]
+        masks = {}
+        for lv in sorted(_POOLS):
+            x = m
+            for _ in range(_POOLS[lv]):
+                x = CS.pool_to_coarser(x)
+            masks[lv] = (x.numpy()[0, ..., 0] >= 0.5).astype(np.uint8)
+        self._tta_masks = masks
+
+    def _mask_fn(self, lv):
+        mask = None if self._tta_masks is None else self._tta_masks.get(int(lv))
+        if mask is None:
+            return None
+        m = mask.astype(np.float32)[None, ..., None]
+
+        def mask_fn(i0, i1):
+            return np.broadcast_to(m, (i1 - i0,) + m.shape[1:])
+        return mask_fn
 
     def _engine(self, level):
         eng = self._engines.get(level)
@@ -277,11 +441,7 @@ class StreamedRunner(_Runner):
                 def input_fn(i0, i1, prewarp=prewarp, a_prev=a_prev):
                     return prewarp(x1[i0:i1], a_prev[i0:i1])
             with phases("%s:l%d" % (task, lv)):
-                a_raw = eng.linear(n, input_fn, task)
-                if a_prev is None:
-                    a = tf.cast(model.centering(a_raw), tf.float32)
-                else:
-                    a = CS.compose_linear(a_raw, a_prev, model.centering)
+                a = self._linear_stage(lv, eng, model, n, input_fn, task, a_prev, x1)
             self._record(summary, lv, task, eng)
             a_prev = a
         return a_prev
@@ -297,6 +457,7 @@ class StreamedRunner(_Runner):
     def _deform(self, n, src, A, sink, summary, phases, free_src):
         last = self.levels[-1]
         prev = None                                     # store names of the previous level's fields
+        self._deform_masks(n, src, self.levels)
         for lv in self.levels:
             eng = self._engine(lv)
             is_last = lv == last
@@ -314,7 +475,7 @@ class StreamedRunner(_Runner):
 
                 def prev_fn(i0, i1, up=up, names=prev):
                     return up(self.store.get(names[0], i0, i1), self.store.get(names[1], i0, i1))
-            if is_last and free_src:
+            if is_last and free_src and not self._tta_active(lv):
                 inner = input_fn
 
                 def input_fn(i0, i1, inner=inner):     # free the source after the last P0 chunk
@@ -324,7 +485,8 @@ class StreamedRunner(_Runner):
                     return x
             level_sink = self._level_sink(lv, A, sink) if is_last else None
             with phases("deform:l%d" % lv):
-                res = eng.deform(n, input_fn, prev_fn=prev_fn, sink=level_sink)
+                res = self._deform_stage_freeing(lv, eng, n, input_fn, prev_fn, level_sink,
+                                                 is_last and free_src)
             self._record(summary, lv, "deform", eng)
             if prev is not None:
                 for name in prev:
@@ -353,6 +515,7 @@ class StreamedRunner(_Runner):
         sizes = {"l%d" % lv: self.chunks["l%d" % lv] for lv in self.levels}
         summary = self._new_summary(n, branches, sizes)
         phases = _Phases()
+        self._tta_reset()
         A = None
         if lin is not None:
             A = self._linear(n, x1, lin, summary, phases)
@@ -372,6 +535,7 @@ class StreamedRunner(_Runner):
         summary["A"] = None if A is None else A.numpy()
         summary["timing_s"] = phases.timing
         summary["gpu_peak_mb"] = phases.gpu_peak_mb if phases.gpu else None
+        summary["tta"] = self._tta_summary()
         return summary
 
     # ---------------------------------------------------------------- level selection (predict-levels)
@@ -438,11 +602,7 @@ class StreamedRunner(_Runner):
                 def input_fn(i0, i1, prewarp=prewarp, a_prev=a_prev):
                     return prewarp(x1[i0:i1], a_prev[i0:i1])
             with phases("%s:l%d" % (task, lv)):
-                a_raw = eng.linear(n, input_fn, task)
-                if a_prev is None:
-                    a = tf.cast(model.centering(a_raw), tf.float32)
-                else:
-                    a = CS.compose_linear(a_raw, a_prev, model.centering)
+                a = self._linear_stage(lv, eng, model, n, input_fn, task, a_prev, x1)
             self._record(summary, lv, task, eng)
             a_prev = a
             ran = True
@@ -455,6 +615,7 @@ class StreamedRunner(_Runner):
         plan = self.plan
         last = plan.last
         prev = None
+        self._deform_masks(n, src, plan.run)
         for lv in self.levels:
             kind = plan.kind(lv)
             if kind == "truncated":
@@ -492,7 +653,7 @@ class StreamedRunner(_Runner):
 
                 def prev_fn(i0, i1, up=up, names=names):
                     return up(self.store.get(names[0], i0, i1), self.store.get(names[1], i0, i1))
-            if is_last and free_src:
+            if is_last and free_src and not self._tta_active(lv):
                 inner = input_fn
 
                 def input_fn(i0, i1, inner=inner):     # free the source after the last P0 chunk
@@ -503,7 +664,8 @@ class StreamedRunner(_Runner):
             level_sink = (self._level_sink_sel(lv, A, sink, ckpt_fields=lv == self.level)
                           if is_last else None)
             with phases("deform:l%d" % lv):
-                res = eng.deform(n, input_fn, prev_fn=prev_fn, sink=level_sink)
+                res = self._deform_stage_freeing(lv, eng, n, input_fn, prev_fn, level_sink,
+                                                 is_last and free_src)
             self._record(summary, lv, "deform", eng)
             if prev is not None and prev is not _ZERO:
                 for name in prev[0]:
@@ -531,6 +693,7 @@ class StreamedRunner(_Runner):
         sizes = {"l%d" % lv: self.chunks["l%d" % lv] for lv in self.plan.run}
         summary = self._new_summary_sel(n, branches, sizes)
         phases = _Phases()
+        self._tta_reset()
         A = None
         if lin is not None:
             A = self._linear_sel(n, x1, lin, summary, phases)
@@ -550,6 +713,7 @@ class StreamedRunner(_Runner):
         summary["A"] = None if A is None else A.numpy()
         summary["timing_s"] = phases.timing
         summary["gpu_peak_mb"] = phases.gpu_peak_mb if phases.gpu else None
+        summary["tta"] = self._tta_summary()
         return summary
 
 

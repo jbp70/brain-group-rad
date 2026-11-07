@@ -214,7 +214,7 @@ def _branch_set(branches):
     return branches
 
 
-def estimate_store_gb(level, model_cfg, n, branches, trainable_dtype="float16"):
+def estimate_store_gb(level, model_cfg, n, branches, trainable_dtype="float16", tta_levels=()):
     """Host memory (GB, 1e9 bytes) of a prediction run, design section 6.
 
     Host inputs (n full-resolution images float32, labels 2 B, masks 1 B per voxel) plus the
@@ -222,11 +222,16 @@ def estimate_store_gb(level, model_cfg, n, branches, trainable_dtype="float16"):
     stage at ``level`` in ``trainable_dtype`` 'float16' | 'float32'). Per level and branch:
       deform: largest simultaneous activation stores of the pass schedule (design 4.3) + x_in
         (float32, 1 ch) + v_raw (float32, 3 ch) + the previous level's fields (u, u_inv) + this
-        level's fields when another level follows;
-      rigid / affine: x_in + the two encoder stores alive at once;
+        level's fields when another level follows; at a level in ``tta_levels`` (8-flip TTA,
+        TTA design 6) also the TTA accumulators tta_s1 (12 B) + tta_s2 (4 B) + tta_c0 (12 B)
+        = 28 B per level voxel;
+      rigid / affine: x_in + the two encoder stores alive at once (linear TTA needs no host
+        store);
       affine+deform: the larger of both, plus the affine-resampled full-resolution source
-        (float32) during the deform branch.
+        (float32) during the deform branch (counted once, also at a TTA last level).
+    The default ``tta_levels=()`` gives the estimate without TTA.
     """
+    tta_levels = tuple(int(lv) for lv in tta_levels)
     level = P.check_level(level)
     if trainable_dtype not in _DTYPE_BYTES:
         raise ValueError("trainable_dtype must be one of {}, got {!r}".format(
@@ -252,6 +257,8 @@ def estimate_store_gb(level, model_cfg, n, branches, trainable_dtype="float16"):
                  + 24 * prev_field_vox + (24 * vox if i + 1 < len(levels) else 0))
             if resampled:
                 d += 4 * full_vox
+            if lv in tta_levels:
+                d += 28 * vox
             per_image = max(per_image, d)
         worst = max(worst, per_image)
         prev_field_vox = vox

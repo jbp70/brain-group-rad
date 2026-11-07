@@ -10,8 +10,26 @@ from unittest import mock
 
 import numpy as np
 
+from data_loading import params as P
 from inference import store as S
 from models.config import ModelConfig
+
+# estimate_store_gb(level, ModelConfig(), 101, branches, dtype) of commit 19b8a60 (before the TTA
+# term; printed by running that commit's inference/store.py), TTA design T11.
+HEAD_ESTIMATES_N101 = {
+    (4, "rigid", "float16"): 9.07855872, (4, "rigid", "float32"): 13.2486144,
+    (4, "affine", "float16"): 9.07855872, (4, "affine", "float32"): 13.2486144,
+    (4, "deform", "float16"): 10.85952, (4, "deform", "float32"): 16.68022272,
+    (4, "affine+deform", "float16"): 13.63955712, (4, "affine+deform", "float32"): 19.46025984,
+    (2, "rigid", "float16"): 19.1127552, (2, "rigid", "float32"): 33.0129408,
+    (2, "affine", "float16"): 19.1127552, (2, "affine", "float32"): 33.0129408,
+    (2, "deform", "float16"): 24.58595328, (2, "deform", "float32"): 42.65619456,
+    (2, "affine+deform", "float16"): 27.3659904, (2, "affine+deform", "float32"): 45.43623168,
+    (1, "rigid", "float16"): 33.0129408, (1, "rigid", "float32"): 35.44547328,
+    (1, "affine", "float16"): 33.0129408, (1, "affine", "float32"): 35.44547328,
+    (1, "deform", "float16"): 44.7412224, (1, "deform", "float32"): 54.21072384,
+    (1, "affine+deform", "float16"): 47.52125952, (1, "affine+deform", "float32"): 56.99076096,
+}
 
 
 class _StoreCases(object):
@@ -133,6 +151,60 @@ class TestEstimate(unittest.TestCase):
                         S.estimate_store_gb(1, cfg, 101, "deform"))
         self.assertLess(S.estimate_store_gb(4, cfg, 101, "deform"),
                         S.estimate_store_gb(2, cfg, 101, "deform"))
+
+    def test_unchanged_without_tta(self):
+        """TTA design 6 / T11: the default (no tta_levels) equals the values of the code before
+        the TTA term (commit 19b8a60, N 101, default widths), for every level / branch / dtype."""
+        cfg = ModelConfig()
+        for (lv, b, dt), want in HEAD_ESTIMATES_N101.items():
+            got = S.estimate_store_gb(lv, cfg, 101, b, dt)
+            self.assertEqual(got, want, (lv, b, dt))
+            self.assertEqual(S.estimate_store_gb(lv, cfg, 101, b, dt, tta_levels=()), want, (lv, b, dt))
+
+    def test_tta_term(self):
+        """T11: +28 V bytes per image at a TTA deform level (s1 12 V + s2 4 V + c0 12 V); rigid
+        unaffected; affine+deform keeps one src_affine term."""
+        cfg = ModelConfig()
+        n = 101
+        for level in (4, 2, 1):
+            run_levels = [lv for lv in (4, 2, 1) if lv >= level]
+            term = 28 * int(np.prod(P.LEVEL_SHAPE[level])) * n / 1e9
+            for dt in ("float16", "float32"):
+                for b in ("deform", "affine+deform", "rigid"):
+                    base = S.estimate_store_gb(level, cfg, n, b, dt)
+                    self.assertEqual(S.estimate_store_gb(level, cfg, n, b, dt, tta_levels=()), base)
+                    tta = S.estimate_store_gb(level, cfg, n, b, dt, tta_levels=(level,))
+                    all_tta = S.estimate_store_gb(level, cfg, n, b, dt, tta_levels=tuple(run_levels))
+                    if b == "rigid":
+                        self.assertEqual(tta, base, (level, dt))
+                        self.assertEqual(all_tta, base, (level, dt))
+                    elif level == 1 and dt == "float16":
+                        # the frozen float32 level-2 term is the max without TTA here, so the
+                        # max over levels grows by less than the level-1 term
+                        self.assertGreater(tta - base, 0.0)
+                        self.assertLess(tta - base, term)
+                        self.assertEqual(all_tta, tta, (level, b, dt))
+                    else:
+                        # the run's own (finest) level is the max term: exactly + 28 V n
+                        self.assertAlmostEqual(tta - base, term, places=9, msg=(level, b, dt))
+                        self.assertEqual(all_tta, tta, (level, b, dt))
+                d_plain = (S.estimate_store_gb(level, cfg, n, "affine+deform", dt)
+                           - S.estimate_store_gb(level, cfg, n, "deform", dt))
+                d_tta = (S.estimate_store_gb(level, cfg, n, "affine+deform", dt, tta_levels=(level,))
+                         - S.estimate_store_gb(level, cfg, n, "deform", dt, tta_levels=(level,)))
+                self.assertAlmostEqual(d_tta, d_plain, places=9, msg=(level, dt))
+        # level-1 checkpoint, N 101, default widths, level 1 the max term (float32 trainable
+        # stage): +28 x 6881280 x 101 B = 19.46 GB (design 6)
+        grow = (S.estimate_store_gb(1, cfg, 101, "deform", "float32", tta_levels=(4, 2, 1))
+                - S.estimate_store_gb(1, cfg, 101, "deform", "float32"))
+        self.assertAlmostEqual(grow, 28 * 6881280 * 101 / 1e9, places=9)
+        self.assertAlmostEqual(grow, 19.46, places=2)
+        g16 = (S.estimate_store_gb(1, cfg, 101, "deform", tta_levels=(4, 2, 1))
+               - S.estimate_store_gb(1, cfg, 101, "deform"))
+        print("\n[estimate] level 1 N 101 deform with TTA at all levels: float32 %.2f GB (+%.2f), "
+              "float16 %.2f GB (+%.2f)"
+              % (S.estimate_store_gb(1, cfg, 101, "deform", "float32", tta_levels=(4, 2, 1)), grow,
+                 S.estimate_store_gb(1, cfg, 101, "deform", tta_levels=(4, 2, 1)), g16), file=sys.stderr)
 
     def test_bad_args(self):
         with self.assertRaises(ValueError):

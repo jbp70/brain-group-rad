@@ -22,6 +22,9 @@ M11SRC = os.path.join(REPO, "slurm", "m11_random_sources.sh")
 M11 = os.path.join(REPO, "slurm", "m11_fp32_width_memory.sh")
 PREDICT = os.path.join(REPO, "slurm", "predict_mindboggle.sh")
 EVAL_SYNTH = os.path.join(REPO, "slurm", "eval_synth.sh")
+TTA_MB = os.path.join(REPO, "slurm", "tta_mindboggle.sh")
+TTA_CMP = os.path.join(REPO, "slurm", "compare_tta.sh")
+PREDICT_MULTI = os.path.join(REPO, "slurm", "predict_mindboggle_multi.sh")
 # Env of slurm/m11_random_sources.sh removed from the inherited environment (TestM11Sources).
 M11_SOURCE_ENV = ("SOURCES_DIR", "SOURCE_WIDTHS", "SOURCE_L4_ONLY", "SOURCE_N", "SOURCE_TIMEOUT", "BGR_DRY_RUN",
                   "STUB_FAIL_LEVEL",
@@ -38,7 +41,7 @@ RECIPE_ENV = ("GRAD_BALANCE", "BN_RECAL_BATCHES", "BN_RECAL_FREEZE", "SKIP_PROB"
               "INTENSITY_AUG_DEVICE", "TF_MEM_LIMIT_MB", "PAIR_RECOMPUTE", "VAL_IMAGE_CHUNK", "VAL_PAIR_CHUNK",
               "BN_RECAL_VALIDATE", "FP16_ACT_CLIP", "FP16_ACT_CLIP_SCOPE", "DEFORM_DECODER_DTYPE",
               "BN_EPSILON_OVERRIDE", "L1_SOURCE", "L2_SOURCE", "SRC_RESULTS", "CONFIG_TIMEOUT", "TIME_BUDGET_S",
-              "ONLY", "BGR_DRY_RUN", "FILTERS", "DECODER_WIDTHS")
+              "ONLY", "BGR_DRY_RUN", "FILTERS", "DECODER_WIDTHS", "TTA", "TTA_LEVELS", "SKIP_CHECKS")
 
 
 def _read(path):
@@ -266,7 +269,21 @@ class TestStatic(unittest.TestCase):
                       '--allow-untrained-skip"; fi\n', text)
         for ln in pred:
             self.assertEqual(ln.count(" $LEVEL_FLAGS "), 1, ln)
-        self.assertIn(' --out "$FIELDS" $LEVEL_FLAGS $EXTRA </dev/null', run[0])
+        self.assertIn(' --out "$FIELDS" $LEVEL_FLAGS $TTA_FLAGS $EXTRA </dev/null || exit $?', run[0])
+        self.assertTrue(run[0].endswith('--out "$FIELDS" $LEVEL_FLAGS $TTA_FLAGS $EXTRA </dev/null || exit $?'))
+        # TTA (milestone 10, plan D7): TTA / TTA_LEVELS reach step 2 only; SKIP_CHECKS=1 skips 1a-1c.
+        self.assertIn("TTA=${TTA:-none}\n", text)
+        self.assertIn("TTA_LEVELS=${TTA_LEVELS:-}\n", text)
+        self.assertIn("SKIP_CHECKS=${SKIP_CHECKS:-}\n", text)
+        self.assertIn('TTA_FLAGS="--tta $TTA"\n', text)
+        self.assertIn('if [ -n "$TTA_LEVELS" ]; then TTA_FLAGS="$TTA_FLAGS --tta-levels $TTA_LEVELS"; fi\n', text)
+        self.assertIn('if [ "$SKIP_CHECKS" != "1" ]; then\n', text)
+        self.assertIn('echo "checks 1a-1c skipped (SKIP_CHECKS=1; run in the TTA-none arm of the same job)"\n',
+                      text)
+        for ln in checks:
+            self.assertNotIn("TTA_FLAGS", ln)
+            self.assertNotIn("--tta", ln)
+        self.assertEqual(len([ln for ln in lines if "$TTA_FLAGS" in ln and ln.startswith("singularity ")]), 1)
         ev = [ln for ln in sing if " -m evaluation " in ln]
         self.assertEqual(len(ev), 2)
         self.assertIn("check-convention", ev[0])
@@ -295,7 +312,7 @@ class TestStatic(unittest.TestCase):
 
     @unittest.skipIf(BASH is None, "bash not available")
     def test_bash_syntax(self):
-        for path in SCRIPTS + (M10C, M11, PREDICT, EVAL_SYNTH):
+        for path in SCRIPTS + (M10C, M11, PREDICT, EVAL_SYNTH, TTA_MB, TTA_CMP, PREDICT_MULTI):
             r = subprocess.run([BASH, "-n", path], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                universal_newlines=True)
             self.assertEqual(r.returncode, 0, r.stderr)
@@ -382,6 +399,31 @@ class TestStubRuns(unittest.TestCase):
         for c in (c for c in calls3 if " predict.py " in c):
             self.assertIn(" --levels 4 ", c + " ")
             self.assertNotIn("--allow-untrained-skip", c)
+
+    def test_predict_tta_flags(self):
+        """TTA plan D7: default env -> today's calls plus `--tta none` on step 2 only; TTA=flip8
+        TTA_LEVELS=1 SKIP_CHECKS=1 -> no check-streaming call, `--tta flip8 --tta-levels 1` on step 2."""
+        base = dict(OUT=os.path.join(self.tmp, "out"), EXTRA=None, CHECK_CHUNKS=None, BRANCHES=None,
+                    LEVELS=None, ALLOW_UNTRAINED_SKIP=None)
+        r, calls = self.run_script(PREDICT, **base)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        pred = [c for c in calls if " predict.py " in c]
+        self.assertEqual(len(pred), 4, calls)
+        for c in pred[:3]:
+            self.assertIn("check-streaming", c)
+            self.assertNotIn("--tta", c)
+        self.assertIn(" predict.py run ", pred[3])
+        self.assertTrue(pred[3].endswith(" --out %s --tta none" % os.path.join(self.tmp, "out", "fields")), pred[3])
+        self.assertNotIn("checks 1a-1c skipped", r.stdout)
+        r2, calls2 = self.run_script(PREDICT, TTA="flip8", TTA_LEVELS="1", SKIP_CHECKS="1", **base)
+        self.assertEqual(r2.returncode, 0, r2.stderr)
+        self.assertIn("checks 1a-1c skipped (SKIP_CHECKS=1; run in the TTA-none arm of the same job)", r2.stdout)
+        self.assertFalse([c for c in calls2 if "check-streaming" in c], calls2)
+        pred2 = [c for c in calls2 if " predict.py " in c]
+        self.assertEqual(len(pred2), 1, calls2)
+        self.assertTrue(pred2[0].endswith(" --tta flip8 --tta-levels 1"), pred2[0])
+        self.assertEqual(pred2[0].replace(" --tta flip8 --tta-levels 1", " --tta none"), pred[3])
+        self.assertEqual(len([c for c in calls2 if " -m evaluation " in c]), 2)
 
     def test_train_requires_n(self):
         r, calls = self.run_script(TRAIN, **self.train_env(N=None))
@@ -1304,6 +1346,153 @@ class TestEvalSynthScript(unittest.TestCase):
         self.assertIn("python eval_synth.py --runs r1 r2 --level 1 --out %s" % out, calls[0])
         self.assertIn("1234K", _read(os.path.join(out, "sstat.txt")))
         self.assertTrue(os.path.isdir(os.path.join(self.tmp, "scratch", "88")))
+
+
+TTA_ENV = ("CKPT", "NAME", "PROCESSED", "GRID_REF", "PARTS", "SEED", "TTA_LEVELS", "DRY_RUN", "REPO", "SIF",
+           "SCRATCH_ROOT", "SLURM_JOB_ID", "TMPDIR", "TTA", "SKIP_CHECKS", "A", "B", "OUT", "KIND")
+PROJ_DIR = "/autofs/space/crater_001/users/jn85/BrainRegProjects/GroupwiseReg"
+
+
+class TestTTAScripts(unittest.TestCase):
+    """TTA FEAT-004 (design 9.4, plan D5 / D8): slurm/tta_mindboggle.sh and slurm/compare_tta.sh."""
+
+    def common(self, text):
+        self.assertNotIn("\r", text)
+        self.assertTrue(all(ord(c) < 128 for c in text))
+        self.assertNotIn("entre", text.lower())
+        self.assertIn("DO NOT submit without Jay's approval", text)
+        self.assertIn("set -uo pipefail\n", text)
+        self.assertIn(SIF, text)
+        self.assertFalse([ln for ln in text.splitlines() if ln.lstrip().startswith("sbatch")])
+
+    def test_tta_mindboggle_static(self):
+        text = _read(TTA_MB)
+        self.common(text)
+        sb = ["#SBATCH --job-name=bgr-tta-mb", "#SBATCH -A qtim", "#SBATCH -p rtx8000", "#SBATCH --gpus=1",
+              "#SBATCH -N 1", "#SBATCH --ntasks-per-node=1", "#SBATCH --cpus-per-task=3", "#SBATCH --mem=96G",
+              "#SBATCH --time=10:00:00", "#SBATCH --output=%s/%%x-%%j.out" % LOGS,
+              "#SBATCH --error=%s/%%x-%%j.err" % LOGS]
+        self.assertEqual(re.findall(r"(?m)^#SBATCH .*$", text), sb)
+        self.assertIn("two-active-jobs rule", text)
+        self.assertIn("export TMPDIR=${SCRATCH_ROOT:-/scratch}/${SLURM_JOB_ID:-manual}\n", text)
+        self.assertIn("PARTS=${PARTS:-predict linear compare}\n", text)
+        self.assertIn("SEED=${SEED:-0}\n", text)
+        self.assertIn("TTA_LEVELS=${TTA_LEVELS:-}\n", text)
+        lines = text.splitlines()
+        arms = [ln for ln in lines if 'bash "$REPO/slurm/predict_mindboggle.sh"' in ln]
+        self.assertEqual(len(arms), 2)
+        self.assertIn('NAME="${NAME}_tta_none"', arms[0])
+        self.assertIn(" TTA=none ", arms[0])
+        self.assertIn('NAME="${NAME}_tta_flip8"', arms[1])
+        self.assertIn(" TTA=flip8 ", arms[1])
+        self.assertIn(" SKIP_CHECKS=1 ", arms[1])
+        self.assertIn('TTA_LEVELS="$TTA_LEVELS"', arms[1])
+        self.assertIn("    for task in rigid affine; do\n        for arm in none flip8; do\n", text)
+        lin = [ln for ln in lines if " predict.py linear-eval " in ln and not ln.startswith("#")]
+        self.assertEqual(len(lin), 1)
+        for k in ("singularity exec --nv", '--checkpoint "$CKPT"', '--processed-dir "$PROCESSED"',
+                  '--grid-reference "$GRID_REF"', '--task "$task"', '--seed "$SEED"', '--tta "$arm"',
+                  '--out "$LIN/${NAME}_${task}_tta_${arm}"', "</dev/null"):
+            self.assertIn(k, lin[0], k)
+        cmp_lines = [ln for ln in lines if "scripts/compare_tta.py" in ln and "singularity exec" in ln]
+        self.assertEqual(len(cmp_lines), 2)
+        for ln in cmp_lines:
+            self.assertNotIn("--nv", ln)
+        self.assertIn('--out "$CMP/${NAME}_template" --kind eval', cmp_lines[0])
+        self.assertIn('--out "$CMP/${NAME}_${task}_linear" --kind linear', cmp_lines[1])
+        self.assertIn('CONV=\\"--components xyz --signs +++ --units mm\\" sbatch slurm/eval_mindboggle.sh"', text)
+        self.assertIn("OUT=$CMP/${NAME}_allpairs sbatch slurm/compare_tta.sh", text)
+        self.assertIn('exit "$failed"', text)
+
+    def test_compare_tta_static(self):
+        text = _read(TTA_CMP)
+        self.common(text)
+        sb = ["#SBATCH --job-name=bgr-tta-compare", "#SBATCH -A qtim", "#SBATCH -p basic", "#SBATCH -N 1",
+              "#SBATCH --ntasks-per-node=1", "#SBATCH --cpus-per-task=1", "#SBATCH --mem=4G",
+              "#SBATCH --time=00:15:00", "#SBATCH --output=%s/%%x-%%j.out" % LOGS,
+              "#SBATCH --error=%s/%%x-%%j.err" % LOGS]
+        self.assertEqual(re.findall(r"(?m)^#SBATCH .*$", text), sb)
+        self.assertNotIn("--gpus", text)
+        self.assertIn("KIND=${KIND:-eval}\n", text)
+        self.assertIn("export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1\n", text)
+        self.assertIn('singularity exec -B /autofs -B /scratch "$SIF" bash -c \'cd "$1" && shift && python "$@"\' '
+                      'cmp "$REPO" scripts/compare_tta.py --a "$A" --b "$B" --out "$OUT" --kind "$KIND" </dev/null\n',
+                      text)
+        self.assertIn("KIND=linear sbatch slurm/compare_tta.sh", text)
+        self.assertIn("_allpairs sbatch slurm/compare_tta.sh", text)
+
+    @unittest.skipIf(BASH is None, "bash not available")
+    def test_bash_syntax(self):
+        for path in (PREDICT, TTA_MB, TTA_CMP):
+            r = subprocess.run([BASH, "-n", path], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               universal_newlines=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+
+    def _run(self, path, **extra):
+        env = {k: v for k, v in os.environ.items() if k not in TTA_ENV}
+        env.update(extra)
+        return subprocess.run([BASH, path], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              universal_newlines=True, stdin=subprocess.DEVNULL)
+
+    @unittest.skipIf(BASH is None, "bash not available")
+    def test_tta_mindboggle_dry_run(self):
+        tmp = tempfile.mkdtemp(prefix="tta_dry_")
+        try:
+            r = self._run(TTA_MB, DRY_RUN="1", NAME="x", CKPT="/tmp/x", SCRATCH_ROOT=tmp)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(os.listdir(tmp), [])                    # nothing created
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+        dry = [ln[len("DRY: "):] for ln in r.stdout.splitlines() if ln.startswith("DRY: ")]
+        self.assertEqual(len(dry), 2 + 4 + 3, r.stdout)
+        pred = "%s/results/predict_mindboggle" % PROJ_DIR
+        a, b = dry[0], dry[1]
+        for k in ("env NAME=x_tta_none OUT=%s/x_tta_none TTA=none " % pred, "CKPT=/tmp/x",
+                  "bash %s/brain-group-rad/slurm/predict_mindboggle.sh" % PROJ_DIR):
+            self.assertIn(k, a, k)
+        self.assertNotIn("SKIP_CHECKS=1", a)
+        for k in ("env NAME=x_tta_flip8 OUT=%s/x_tta_flip8 TTA=flip8 " % pred, " SKIP_CHECKS=1 "):
+            self.assertIn(k, b, k)
+        lin = [c for c in dry if " predict.py linear-eval " in c]
+        self.assertEqual(len(lin), 4)
+        got = [(re.search(r"--task (\w+)", c).group(1), re.search(r"--tta (\w+)", c).group(1)) for c in lin]
+        self.assertEqual(got, [("rigid", "none"), ("rigid", "flip8"), ("affine", "none"), ("affine", "flip8")])
+        for c, (task, arm) in zip(lin, got):
+            self.assertIn("--seed 0 ", c)
+            self.assertNotIn("--tta-levels", c)
+            self.assertTrue(c.endswith("--out %s/results/linear_eval_mindboggle/x_%s_tta_%s" % (PROJ_DIR, task, arm)), c)
+        cmp_calls = [c for c in dry if "scripts/compare_tta.py" in c]
+        self.assertEqual(len(cmp_calls), 3)
+        self.assertIn("--a %s/x_tta_none/eval_template --b %s/x_tta_flip8/eval_template" % (pred, pred), cmp_calls[0])
+        self.assertIn("--kind eval", cmp_calls[0])
+        for c, task in zip(cmp_calls[1:], ("rigid", "affine")):
+            self.assertIn("--out %s/results/tta_compare/x_%s_linear --kind linear" % (PROJ_DIR, task), c)
+        printed = [ln.strip() for ln in r.stdout.splitlines() if ln.strip().endswith("sbatch slurm/eval_mindboggle.sh")]
+        self.assertEqual(len(printed), 2)
+        self.assertTrue(printed[0].startswith("METHOD=x_tta_none FWD='%s/x_tta_none/fields/{subject_dir}_fwd.nii.gz'"
+                                              % pred), printed[0])
+        self.assertTrue(printed[1].startswith("METHOD=x_tta_flip8 "), printed[1])
+        self.assertIn("A=%s/results/eval_mindboggle/x_tta_none B=%s/results/eval_mindboggle/x_tta_flip8 "
+                      "OUT=%s/results/tta_compare/x_allpairs sbatch slurm/compare_tta.sh" % (PROJ_DIR, PROJ_DIR, PROJ_DIR),
+                      r.stdout)
+        # TTA_LEVELS reaches the flip8 arm and the flip8 linear-eval runs only; PARTS subset
+        r = self._run(TTA_MB, DRY_RUN="1", NAME="x", CKPT="/tmp/x", TTA_LEVELS="1", PARTS="linear")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        dry = [ln for ln in r.stdout.splitlines() if ln.startswith("DRY: ")]
+        self.assertEqual(len(dry), 4)
+        self.assertEqual([("--tta-levels 1" in c) for c in dry], [False, True, False, True])
+
+    @unittest.skipIf(BASH is None, "bash not available")
+    def test_tta_mindboggle_invalid(self):
+        for bad in (dict(NAME="x"), dict(CKPT="/c"), dict(NAME="a,b", CKPT="/c"), dict(NAME="a:b", CKPT="/c"),
+                    dict(NAME="x", CKPT="/c", PARTS="predict eval")):
+            r = self._run(TTA_MB, DRY_RUN="1", **bad)
+            self.assertEqual(r.returncode, 2, (bad, r.stdout, r.stderr))
+            self.assertIn("ERROR", r.stderr)
+            self.assertNotIn("DRY:", r.stdout)
+        r = self._run(TTA_CMP, A="a", B="b")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("set A, B and OUT", r.stderr)
 
 
 CASCADE = os.path.join(REPO, "slurm", "r_cascade.sh")

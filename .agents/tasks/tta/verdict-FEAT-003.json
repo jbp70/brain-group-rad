@@ -1,0 +1,11 @@
+{
+  "verdict": "APPROVED",
+  "findings": [
+    {
+      "severity": "NIT",
+      "file": "inference/linear_eval.py",
+      "summary": "With --overwrite, stale per_subject.csv / per_pair.csv (when the run ends non-finite, exit 3) or a stale tta_spread.csv (--tta none over an earlier flip8 dir) stay in --out. summary.json 'outputs' lists only the current run's files. Optional: remove the LINEAR_EVAL_OUTPUTS files this run won't write, or have compare_tta check summary.json status/outputs."
+    }
+  ],
+  "reviewDoc": "d:\\Research\\Brain_Registration_Projects\\brain-group-rad\\.agents\\tasks\\tta\\review-FEAT-003.md"
+}

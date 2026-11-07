@@ -1,0 +1,9 @@
+{
+  "verdict": "APPROVED",
+  "findings": [
+    {"severity": "NIT", "file": "scripts/compare_tta.py", "location": "read_table", "issue": "Columns with any unparsable cell are dropped silently (no note in compare outputs). Not reachable with today's writers.", "fix": "Record dropped column names in res['notes']."},
+    {"severity": "NIT", "file": "slurm/tta_mindboggle.sh", "location": "exit status", "issue": "Exit 2 is both 'invalid settings' and '2 failed parts' (documented; log text distinguishes).", "fix": "Optional: use a distinct code for invalid settings."},
+    {"severity": "NIT", "file": "scripts/compare_tta.py", "location": "write_outputs per-label summary", "issue": "'B better' counted as mean_diff > 0; correct only because per-label rows are all Dice.", "fix": "Use direction(metric) if non-Dice per-label metrics are added."}
+  ],
+  "reviewDoc": "d:\\Research\\Brain_Registration_Projects\\brain-group-rad\\.agents\\tasks\\tta\\review-FEAT-004.md"
+}

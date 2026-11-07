@@ -44,7 +44,8 @@ PREDICT_KEYS = (
     "tta", "n_subjects", "subjects", "subject_dirs", "training_group_sizes", "mode", "device",
     "chunks", "grid", "store", "timing_s", "gpu_peak_mb", "nonfinite", "stats", "fp16_max_abs",
     "internal_check", "compress_level", "visible_devices", "convention", "outputs", "input_range",
-    "warnings", "levels")
+    "warnings", "levels", "tta_record")
+TTA_SPREAD_CSV = "tta_spread.csv"
 _SHA_RE = re.compile(r"[0-9a-f]{40}")
 
 
@@ -304,6 +305,131 @@ def _setup_levels(args, rec, level):
     return plan
 
 
+def _read_config_or_none(path):
+    if not path:
+        return (None, None)
+    try:
+        return (path, _read_json(path))
+    except (OSError, ValueError) as e:
+        logger.debug("config %s not readable: %s", path, e)
+        return (path, None)
+
+
+def _peek_flip_chain(checkpoint, level):
+    """`_peek_chain_configs` plus the level-4 config of the chain (TTA design 7.4, plan D10), TF-free:
+    level-2 run -> its ``cascade.source_config``; level-1 run -> the level-2 config's
+    ``cascade.source_config``, else the level-1 config's ``cascade.stages`` level-4
+    ``origin_checkpoint`` (`runtime.checkpoint.source_config_path`). Unreadable -> (path or None,
+    None)."""
+    from runtime import checkpoint as C
+    level = int(level)
+    chain = _peek_chain_configs(checkpoint, level)
+    if level == 4:
+        return chain
+    own = chain[level][1] or {}
+    if level == 2:
+        chain[4] = _read_config_or_none((own.get("cascade") or {}).get("source_config"))
+        return chain
+    cands = []
+    l2 = chain.get(2, (None, None))[1]
+    if isinstance(l2, dict) and (l2.get("cascade") or {}).get("source_config"):
+        cands.append(l2["cascade"]["source_config"])
+    for s in (own.get("cascade") or {}).get("stages") or []:
+        try:
+            is4 = int(s.get("level", -1)) == 4
+        except (TypeError, ValueError):
+            is4 = False
+        if is4 and s.get("origin_checkpoint"):
+            p = C.source_config_path(s["origin_checkpoint"])
+            if p is not None and p not in cands:
+                cands.append(p)
+    found = (cands[0] if cands else None, None)
+    for p in cands:
+        entry = _read_config_or_none(p)
+        if entry[1] is not None:
+            found = entry
+            break
+    chain[4] = found
+    return chain
+
+
+def _setup_tta(args, rec, plan, level):
+    """TTAConfig of ``--tta`` / ``--tta-levels`` (TTA design 7.1, 7.4) or None for 'none'. Fills
+    rec['tta_record'] (also when refusing: mode, levels requested, error); PredictError(2) for a
+    TTA level the plan does not run. Logs the training-flip WARNINGs (warn only)."""
+    from inference import levels as LV
+    from inference import tta as TTA
+    mode = getattr(args, "tta", None) or "none"
+    if mode == "none":
+        return None
+    requested = getattr(args, "tta_levels", None)
+    levels = tuple(int(lv) for lv in (requested if requested is not None else plan.run))
+    bad = [lv for lv in levels if lv not in plan.run]
+    if bad:
+        msg = ("--tta-levels %s: level(s) %s are not run by the level plan (run levels %s)"
+               % (LV.levels_text(levels), ", ".join(str(lv) for lv in bad),
+                  LV.levels_text(plan.run)))
+        rec["tta_record"] = {"mode": mode, "levels": list(levels), "error": msg}
+        raise PredictError(CLI.EXIT_INPUT, msg)
+    cfg = TTA.TTAConfig(mode, levels)
+    probs = TTA.train_flip_probs(_peek_flip_chain(args.checkpoint, level))
+    for w in TTA.flip_prob_warnings(probs, levels):
+        logger.warning("%s", w)
+    d = cfg.to_dict()
+    d.update(linear_averaging=TTA.LINEAR_AVERAGING, svf_accumulation=TTA.SVF_ACCUMULATION,
+             train_flip_prob={str(lv): probs[lv] for lv in sorted(probs, reverse=True)})
+    rec["tta_record"] = d
+    logger.info("TTA %s at levels %s (%d flips)", mode, LV.levels_text(levels), len(cfg.flips))
+    return cfg
+
+
+def _tta_csv_value(v):
+    if v is None:
+        return ""
+    return "%.9g" % float(v)
+
+
+def _write_tta_spread(path, rows, subs):
+    """tta_spread.csv (TTA design 5): subject, subject_dir, level, task, `tta.SPREAD_COLUMNS`; one
+    row per subject x level x task; empty where a column does not apply (plan D4)."""
+    import csv
+    from inference import tta as TTA
+    tmp = path + ".tmp%d" % os.getpid()
+    with open(tmp, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(("subject", "subject_dir", "level", "task") + tuple(TTA.SPREAD_COLUMNS))
+        for r in rows:
+            s = subs[int(r["image"])]
+            w.writerow([s["subject"], s["dir"], int(r["level"]), r["task"]]
+                       + [_tta_csv_value(r.get(c)) for c in TTA.SPREAD_COLUMNS])
+    os.replace(tmp, path)
+
+
+def _tta_finish(rec, summary, args, subs):
+    """After a TTA run: tta_spread.csv, rec['tta_record'] spread / gauge / nonfinite_flips /
+    timing_s, INFO per level and task. Returns the CSV name (or None without TTA rows)."""
+    from inference import tta as TTA
+    tta = summary.get("tta")
+    if not tta or rec.get("tta_record") is None:
+        return None
+    rows = tta["rows"]
+    spread = TTA.summarize_spread(rows)
+    for key, (deg, mm) in tta["gauge"].items():
+        spread.setdefault(key, {}).update(gauge_deg=deg, gauge_mm=mm)
+    rec["tta_record"].update(spread=spread, nonfinite_flips=tta["nonfinite_flips"],
+                             timing_s=tta["timing_s"])
+    for key in sorted(spread):
+        s = spread[key]
+        rms, shift = s.get("spread_rms_mm") or {}, s.get("shift_mm") or {}
+        logger.info("TTA %s: spread_rms_mm mean %s max %s, shift_mm mean %s%s", key, rms.get("mean"),
+                    rms.get("max"), shift.get("mean"),
+                    "" if "gauge_deg" not in s else ", gauge %s deg / %s mm" % (s["gauge_deg"], s["gauge_mm"]))
+    if not rows:
+        return None
+    _write_tta_spread(os.path.join(args.out, TTA_SPREAD_CSV), rows, subs)
+    return TTA_SPREAD_CSV
+
+
 def _read_subjects(args, rec, n_first=None):
     """Subjects (find_subjects order, first ``n_first``), grid check on the first header, then
     images / labels (load_grid_data), finiteness and intensity range. Fills rec grid / subjects."""
@@ -551,6 +677,7 @@ def _run_predict(args, configure_device, rec):
     logger.debug("visible devices: %s", visible)
     peek = _peek_config(args.checkpoint)
     plan = _setup_levels(args, rec, peek[0])
+    tta_cfg = _setup_tta(args, rec, plan, peek[0])
     t = time.time()
     subs, images, labels, shape, aff, spacing = _read_subjects(args, rec)
     timing["read"] = time.time() - t
@@ -567,16 +694,22 @@ def _run_predict(args, configure_device, rec):
                knobs=loaded.knobs, precision=loaded.precision,
                training_group_sizes=loaded.training_group_sizes,
                pipeline=_pipeline(args.branches, loaded.levels, plan))
+    if tta_cfg is not None:
+        rec["pipeline"] += " with 8-flip TTA at levels %s" % ",".join(str(lv) for lv in tta_cfg.levels)
     store = None
     if args.mode == "streamed":
         tdt = "float16" if loaded.precision["trainable"] == "mixed_float16" else "float32"
-        est = SToR.estimate_store_gb(loaded.level, loaded.model_cfg, n, args.branches, tdt)
+        if tta_cfg is not None and RN.branch_tasks(args.branches)[1] is not None:
+            est = SToR.estimate_store_gb(loaded.level, loaded.model_cfg, n, args.branches, tdt,
+                                         tta_levels=tta_cfg.levels)
+        else:
+            est = SToR.estimate_store_gb(loaded.level, loaded.model_cfg, n, args.branches, tdt)
         store_dir = args.store_dir or os.environ.get("TMPDIR") or os.path.join(args.out, "_stream_tmp")
         store = SToR.choose_store(args.store, est, store_dir)
         rec["store"] = {"kind": store.kind, "dir": getattr(store, "directory", None),
                         "estimate_gb": est, "choice": store.choice}
         runner = RN.StreamedRunner(loaded, store, chunks={"l1": args.chunk_l1, "l2": args.chunk_l2,
-                                                          "l4": args.chunk_l4}, plan=plan)
+                                                          "l4": args.chunk_l4}, plan=plan, tta=tta_cfg)
     else:
         rec["store"] = {"kind": "none (unchunked)", "dir": None, "estimate_gb": None}
         runner = RN.UnchunkedRunner(loaded, plan=plan)
@@ -614,6 +747,9 @@ def _run_predict(args, configure_device, rec):
     rec["internal_check"] = {"k": k_check, "gate": {"coord_vox": CN.GATE_COORD_VOX, "moved": CN.GATE_MOVED},
                              "subjects": writer.checks, "passed": passed}
     outputs = list(writer.outputs)
+    tta_csv = _tta_finish(rec, summary, args, subs)
+    if tta_csv is not None:
+        outputs.append(tta_csv)
     if total_nf == 0:
         t = time.time()
         with CN.compress_level(args.compress_level):
@@ -624,6 +760,9 @@ def _run_predict(args, configure_device, rec):
     if total_nf:
         rec["status"] = "nonfinite"
         rec["message"] = "%d non-finite output values; atlas files not written" % total_nf
+        bad_flips = {k: v for k, v in ((summary.get("tta") or {}).get("nonfinite_flips") or {}).items() if v}
+        if bad_flips:
+            rec["message"] += "; TTA flips with non-finite values (level/task: flip indices): %s" % bad_flips
         logger.error("%s: %s", rec["message"], {k: v for k, v in writer.nonfinite.items() if sum(v.values())})
         return CLI.EXIT_NONFINITE
     if passed is False:

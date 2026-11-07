@@ -1,0 +1,10 @@
+{
+  "verdict": "APPROVED",
+  "findings": [
+    {"id": 1, "severity": "NIT", "title": "T9 relies on enable_op_determinism without a fallback rule", "fix": "Step 0: run the pre-change fixture twice and require equal hashes; if determinism raises, use TF_CUDNN_DETERMINISTIC/TF_DETERMINISTIC_OPS; if still nondeterministic, compare pre/post-refactor deform() in one process with max |diff| == 0."},
+    {"id": 2, "severity": "NIT", "title": "9.4 lacks exact sbatch lines for compare_tta.py (template and linear-eval)", "fix": "Give full sbatch -A qtim -p basic ... --wrap singularity exec ... lines for both comparisons and state compare_tta.py flags for both CSV layouts."},
+    {"id": 3, "severity": "NIT", "title": "spread_max_mm means max (linear) but p99 (deform)", "fix": "Use spread_p99_mm for deform rows, empty for linear."}
+  ],
+  "previousFindings": {"1": "Closed", "2": "Closed", "3": "Closed", "4": "Closed", "5": "Closed", "6": "Closed", "7": "Closed", "8": "Closed", "9": "Closed", "10": "Closed"},
+  "reviewDoc": "d:\\Research\\Brain_Registration_Projects\\brain-group-rad\\.agents\\tasks\\tta\\review.md"
+}

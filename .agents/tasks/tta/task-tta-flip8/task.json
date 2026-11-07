@@ -1,0 +1,7 @@
+{
+  "task_id": "task-tta-flip8",
+  "task_description": "Implement the approved 8-flip test-time augmentation (milestone 10, design .agents/tasks/tta/design.md v2 incl. 12.1, review NITs 1-3): inference/tta.py library, gauge-free linear averaging and SVF averaging in the streamed predict path (predict.py run --tta flip8, --tta-levels), predict.py linear-eval, scripts/compare_tta.py, SLURM wrappers for Mindboggle, tests. Default --tta none bit-identical.",
+  "status": "pending",
+  "feature_order": ["FEAT-001", "FEAT-002", "FEAT-003", "FEAT-004"],
+  "blocked_reason": null
+}

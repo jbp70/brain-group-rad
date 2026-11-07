@@ -3,6 +3,13 @@
     python predict.py run --checkpoint <run>/ckpt/best_deform --processed-dir <processed> --out <dir>
         [--branches rigid|affine|deform|affine+deform] [--mode streamed|unchunked] [--device gpu|cpu] ...
     python predict.py check-streaming --checkpoint ... --processed-dir ... --out check.json [--n-subjects 4]
+    python predict.py linear-eval --checkpoint ... --processed-dir ... --task rigid|affine --out <dir>
+        [--seed 0] [--tta none|flip8] [--tta-levels LEVELS] ...
+
+`run` (and `linear-eval`) accept --tta none|flip8 (8-flip test-time augmentation, TTA design
+.agents/tasks/tta/design.md). `linear-eval` renders the subjects with seeded synthetic rigid /
+affine misalignments and writes per_subject.csv, per_pair.csv, summary.json (+ tta_spread.csv with
+flip8) into --out (TTA design 7.3).
 
 `run` writes per subject <subject_dir>_fwd.nii.gz / _inv.nii.gz (mm, evaluator convention
 --components xyz --signs +++ --units mm) and _moved.nii.gz, plus atlas.nii.gz, atlas_seg.nii.gz and
@@ -22,6 +29,9 @@ def main(argv=None):
     from inference import predict as PR
     if args.command == "run":
         return PR.run_predict(args, configure_device=True)
+    if args.command == "linear-eval":
+        from inference import linear_eval as LE
+        return LE.run_linear_eval(args, configure_device=True)
     return PR.run_check_streaming(args, configure_device=True)
 
 

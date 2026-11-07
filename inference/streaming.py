@@ -33,10 +33,16 @@ The stem output is never stored (recomputed from x_in in P1, P2, P10, P11); the 
 never stored. Linear tasks run P0-P6 (only the latest encoder store kept; x_in freed after P2),
 gather the bottleneck [N, 5, 7, 6, C] and call ``model.linear_decoder`` once on all N.
 
+8-flip TTA of the deform task (`deform_tta`, TTA design `.agents/tasks/tta/design.md` 3.2, 3.3):
+P0-P11 (`_v_raw_passes`) once per flip on the flipped group, unflipped raw SVFs accumulated in
+float32 host stores ('tta_s1', 'tta_s2', 'tta_c0'), then the unchanged P12 on the average and a
+flip-spread pass. `deform` itself is unchanged (P0-P11 moved verbatim into `_v_raw_passes`).
+
 One tf.function per pass (it traces once per chunk length: at most two, the full chunk and the
 remainder). Only ``block='single'`` models are supported (design 2.3).
 """
 import logging
+import time
 
 import numpy as np
 import tensorflow as tf
@@ -397,6 +403,42 @@ class StreamedLevel(object):
             return decoder(bottleneck, task=task, training=False)[0]
         return self._fn(("linear", task), body)
 
+    def _f_tta_acc(self, flip, first):
+        """One flip's accumulation chunk (TTA design 3.3): r = unflip(v_raw), c = r - m_f (the
+        flip's centered field), s1 (+)= r, s2 (+)= |c - c0|^2 (summed over components). The first
+        flip returns c0 = c and s2 = 0: the squares are taken about the first flip's centered field
+        (a shifted one-pass variance; same sigma^2 as about 0, without the float32 cancellation of
+        s2 / F - |c_bar|^2 when the spread is small against |v|). 'finite': all v_raw finite."""
+        from inference import tta as TTA
+        flip = tuple(bool(b) for b in flip)
+
+        def body(v_raw, m_f, s1=None, s2=None, c0=None):
+            r = TTA.unflip_field(v_raw, flip)
+            c = r - m_f
+            out = {"finite": tf.reduce_all(tf.math.is_finite(v_raw))}
+            if first:
+                out.update(s1=tf.identity(r), s2=tf.zeros_like(c[..., :1]), c0=c)
+            else:
+                q = tf.reduce_sum(tf.square(c - c0), axis=-1, keepdims=True)
+                out.update(s1=s1 + r, s2=s2 + q)
+            return out
+        return self._fn(("tta_acc", flip, bool(first)), body)
+
+    def _f_tta_spread(self, n_flips):
+        """Per-image masked sums of the flip spread (TTA design 5, deform rows): c_bar = s1 / F -
+        m_bar, d = c_bar - c0, sigma^2 = max(0, s2 / F - |d|^2) (= mean_f |c_f - c_bar|^2), shift^2
+        = |d|^2; plus the sigma map."""
+        nf = float(n_flips)
+
+        def body(s1, s2, c0, mean_v, mask):
+            d = s1 / nf - mean_v - c0
+            d2 = tf.reduce_sum(tf.square(d), axis=-1, keepdims=True)
+            sigma2 = tf.maximum(s2 / nf - d2, 0.0)
+            axes = [1, 2, 3, 4]
+            return {"m": tf.reduce_sum(mask, axes), "s": tf.reduce_sum(mask * sigma2, axes),
+                    "d": tf.reduce_sum(mask * d2, axes), "sigma": tf.sqrt(sigma2)[..., 0]}
+        return self._fn(("tta_spread", int(n_flips)), body)
+
     # ------------------------------------------------------------------ passes
     def _p0(self, n, bounds, stats, input_fn):
         stem = self._enc["stem"]
@@ -462,24 +504,10 @@ class StreamedLevel(object):
             prev = name
         return mean
 
-    # ------------------------------------------------------------------ public
-    def deform(self, n, input_fn, prev_fn=None, sink=None):
-        """Deform task on a group of ``n`` images (passes P0-P12).
-
-        input_fn(i0, i1) -> float32 [k, X, Y, Z, 1] model input of images [i0, i1) (the caller's
-        pooling / pre-warp). prev_fn(i0, i1) -> (U, U_inv) previous-level fields at this level
-        (voxels) for the cascade composition, or None. sink(i0, i1, dict(u, u_inv, v, v_raw))
-        receives the GPU tensors per chunk (nothing stored); without a sink 'u' / 'u_inv' are
-        stored (float32) and their store names returned.
-
-        Returns {'u': name | None, 'u_inv': name | None, 'stats': {task, n, chunk, chunks{pass:
-        boundaries}, fp16_max_abs{block: {max_abs, ratio}}, max_abs_v}}.
-        """
-        if self._dec is None:
-            raise ValueError("task 'deform' needs ModelConfig(deform_decoder=True)")
-        n = int(n)
-        k, bounds = self._bounds(n, DEFORM_TASK)
-        stats = self._new_stats(DEFORM_TASK, n, k)
+    def _v_raw_passes(self, n, bounds, stats, input_fn):
+        """Passes P0-P11 of the deform task: stores '<prefix>v_raw' (float32 [n, X, Y, Z, 3]),
+        frees every other intermediate (d2, x_in last) and returns the float32 group sum of v_raw
+        [1, X, Y, Z, 3]. The overridable unit of the deform stubs in the TTA tests (plan D11)."""
         dec = self._dec
         mean_x = self._p0(n, bounds, stats, input_fn)
         mean = self._encoder(n, bounds, stats, mean_x, deform=True)
@@ -522,7 +550,28 @@ class StreamedLevel(object):
                 self._note(stats, "d1", out["max"])
         stats["chunks"]["P11"] = list(bounds)
         self._free("d2", "x_in")
-        mean_v = acc.s / float(n)
+        return acc.s
+
+    # ------------------------------------------------------------------ public
+    def deform(self, n, input_fn, prev_fn=None, sink=None):
+        """Deform task on a group of ``n`` images (passes P0-P12).
+
+        input_fn(i0, i1) -> float32 [k, X, Y, Z, 1] model input of images [i0, i1) (the caller's
+        pooling / pre-warp). prev_fn(i0, i1) -> (U, U_inv) previous-level fields at this level
+        (voxels) for the cascade composition, or None. sink(i0, i1, dict(u, u_inv, v, v_raw))
+        receives the GPU tensors per chunk (nothing stored); without a sink 'u' / 'u_inv' are
+        stored (float32) and their store names returned.
+
+        Returns {'u': name | None, 'u_inv': name | None, 'stats': {task, n, chunk, chunks{pass:
+        boundaries}, fp16_max_abs{block: {max_abs, ratio}}, max_abs_v}}.
+        """
+        if self._dec is None:
+            raise ValueError("task 'deform' needs ModelConfig(deform_decoder=True)")
+        n = int(n)
+        k, bounds = self._bounds(n, DEFORM_TASK)
+        stats = self._new_stats(DEFORM_TASK, n, k)
+        sum_v = self._v_raw_passes(n, bounds, stats, input_fn)
+        mean_v = sum_v / float(n)
         # P12: centre, integrate, compose; store or sink
         f = self._f_p12(prev_fn is not None)
         max_v = 0.0
@@ -543,6 +592,115 @@ class StreamedLevel(object):
         stats["chunks"]["P12"] = list(bounds)
         self._free("v_raw")
         stats["max_abs_v"] = max_v
+        self.last_stats = self._finish_stats(stats)
+        names = (None, None) if sink is not None else (self.prefix + "u", self.prefix + "u_inv")
+        return {"u": names[0], "u_inv": names[1], "stats": self.last_stats}
+
+    def deform_tta(self, n, input_fn, flips, prev_fn=None, sink=None, mask_fn=None):
+        """Deform task with flip TTA (TTA design 3.2, 3.3): P0-P11 once per flip in ``flips``
+        (order kept; the first flip is the reference of ``shift_mm``, the identity in
+        `inference.tta.FLIPS_8`) on ``flip_np(input_fn(i0, i1), flip)`` (``input_fn`` is called once
+        per flip and chunk, so it must not free its source), raw SVFs unflipped and summed in float32
+        host stores (prefix + 'tta_s1' = sum r, 'tta_s2' = sum |c_f - c0|^2, 'tta_c0' = the first
+        flip's centered field c0; c_f = r_f - m_f), then the unchanged P12 on v_raw =
+        s1 / F with the mean m_bar = (1/F) sum_f unflip(group mean of flip f), and a spread pass over
+        the level mask ``mask_fn(i0, i1)`` -> [k, X, Y, Z, 1] (None: every voxel).
+
+        Same arguments (plus ``flips``, ``mask_fn``) and return value as `deform`; the stats add
+        'tta' = {flips, nonfinite_flips, timing_s (per flip), spread {spread_rms_mm, spread_p99_mm,
+        shift_mm: [n] floats}}. fp16 maxima are the max over flips; chunk boundaries are those of
+        the first flip."""
+        from inference import tta as TTA
+        if self._dec is None:
+            raise ValueError("task 'deform' needs ModelConfig(deform_decoder=True)")
+        flips = tuple(tuple(bool(b) for b in f) for f in flips)
+        if not flips:
+            raise ValueError("deform_tta needs at least one flip")
+        n = int(n)
+        k, bounds = self._bounds(n, DEFORM_TASK)
+        stats = self._new_stats(DEFORM_TASK, n, k)
+        nf = float(len(flips))
+        sm = None
+        nonfinite, timing = [], []
+        for f_idx, flip in enumerate(flips):
+            t0 = time.time()
+            stats_f = self._new_stats(DEFORM_TASK, n, k)
+
+            def input_fn_f(i0, i1, flip=flip):
+                return TTA.flip_np(input_fn(i0, i1), flip)
+            sum_f = self._v_raw_passes(n, bounds, stats_f, input_fn_f)
+            m_f = TTA.unflip_field(sum_f / float(n), flip)
+            sm = m_f if sm is None else sm + m_f
+            first = f_idx == 0
+            f = self._f_tta_acc(flip, first)
+            finite = True
+            for i0, i1 in bounds:
+                v_raw = self._get("v_raw", i0, i1)
+                if first:
+                    out = f(v_raw, m_f)
+                else:
+                    out = f(v_raw, m_f, self._get("tta_s1", i0, i1), self._get("tta_s2", i0, i1),
+                            self._get("tta_c0", i0, i1))
+                self._put("tta_s1", n, i0, out["s1"])
+                self._put("tta_s2", n, i0, out["s2"])
+                if first:
+                    self._put("tta_c0", n, i0, out["c0"])
+                finite = bool(out["finite"]) and finite
+            self._free("v_raw")
+            if not finite:
+                nonfinite.append(f_idx)
+                logger.warning("level %d deform TTA flip %d %s: non-finite v_raw", self.level,
+                               f_idx, list(flip))
+            for name, m in stats_f["fp16_max_abs"].items():
+                self._note(stats, name, m)
+            if first:
+                stats["chunks"].update(stats_f["chunks"])
+            timing.append(time.time() - t0)
+        mean_v = sm / nf
+        # P12 on the average: centre, integrate, compose; store or sink (as `deform`)
+        f = self._f_p12(prev_fn is not None)
+        max_v = 0.0
+        for i0, i1 in bounds:
+            v_raw = tf.constant(self._get("tta_s1", i0, i1)) / nf
+            if prev_fn is not None:
+                u_prev, u_inv_prev = prev_fn(i0, i1)
+                out = f(v_raw, mean_v, u_prev, u_inv_prev)
+            else:
+                out = f(v_raw, mean_v)
+            max_v = max(max_v, float(out["max_v"]))
+            if sink is None:
+                self._put("u", n, i0, out["u"])
+                self._put("u_inv", n, i0, out["u_inv"])
+            else:
+                sink(i0, i1, {"u": out["u"], "u_inv": out["u_inv"], "v": out["v"],
+                              "v_raw": out["v_raw"]})
+        stats["chunks"]["P12"] = list(bounds)
+        # flip spread (design 5, deform rows), mm = level voxels x spacing
+        spacing = float(P.LEVEL_SPACING[self.level])
+        shape = tuple(self.model.input_shape_level)
+        f = self._f_tta_spread(len(flips))
+        spread = {"spread_rms_mm": [], "spread_p99_mm": [], "shift_mm": []}
+        for i0, i1 in bounds:
+            if mask_fn is None:
+                mask = np.ones((i1 - i0,) + shape + (1,), np.float32)
+            else:
+                mask = np.asarray(mask_fn(i0, i1), np.float32)
+            out = f(self._get("tta_s1", i0, i1), self._get("tta_s2", i0, i1),
+                    self._get("tta_c0", i0, i1), mean_v, mask)
+            m, s, d, sigma = (out[key].numpy() for key in ("m", "s", "d", "sigma"))
+            for j in range(i1 - i0):
+                if m[j] > 0:
+                    sel = sigma[j][mask[j, ..., 0] > 0]
+                    spread["spread_rms_mm"].append(float(np.sqrt(s[j] / m[j])) * spacing)
+                    spread["shift_mm"].append(float(np.sqrt(d[j] / m[j])) * spacing)
+                    spread["spread_p99_mm"].append(float(np.percentile(sel, 99)) * spacing)
+                else:
+                    for key in spread:
+                        spread[key].append(float("nan"))
+        self._free("tta_s1", "tta_s2", "tta_c0")
+        stats["max_abs_v"] = max_v
+        stats["tta"] = {"flips": [list(fl) for fl in flips], "nonfinite_flips": nonfinite,
+                        "timing_s": timing, "spread": spread}
         self.last_stats = self._finish_stats(stats)
         names = (None, None) if sink is not None else (self.prefix + "u", self.prefix + "u_inv")
         return {"u": names[0], "u_inv": names[1], "stats": self.last_stats}

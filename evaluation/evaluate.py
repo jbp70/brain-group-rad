@@ -33,7 +33,8 @@ and the atlas segmentation to the majority vote, as for any method without them.
 ``--matrices M.npz``: linear methods store 4x4 voxel matrices only (subjects, fwd_vox[, inv_vox];
 see fields.load_matrices); the dense fields are built from them in memory.
 
-Outputs in --out: per_subject.csv, per_pair.csv, per_label.csv, summary.json (mean/std/median/
+Outputs in --out: per_subject.csv, per_pair.csv, per_label.csv, per_subject_label.csv (template
+Dice per subject and label: subject, template_dice_<label>, ...), summary.json (mean/std/median/
 min/max per metric + group metrics + inputs and convention), labels.txt.
 
     python -m evaluation check-convention --processed-dir P --fwd 'F/{subject}_fwd.nii.gz' \\
@@ -432,6 +433,11 @@ def cmd_run(a) -> int:
             r[kind + "_dice"] = float(vv.mean()) if vv.size else float("nan")
         plabel.append(r)
     _write_csv(os.path.join(a.out, "per_label.csv"), plabel)
+    # per-subject per-label template Dice (TTA design 9.3: per-label paired tests in compare_tta.py)
+    _write_csv(os.path.join(a.out, "per_subject_label.csv"),
+               [dict([("subject", subs[i]["subject"])]
+                     + [("template_dice_%d" % lab, float(per_label[("template", i)][li]))
+                        for li, lab in enumerate(lab_list)]) for i in range(n)])
     summary = {"method": a.method, "n_subjects": n, "n_pairs": len(prow), "n_labels": len(lab_list),
                "identity": a.identity,
                "convention": None if (a.identity or a.matrices) else conv.as_dict(),
