@@ -17,6 +17,7 @@ Conventions (binding; design 2 / 4.6 / 4.7 of `.agents/tasks/network-design/desi
 | Deform | (U, U_inv, V) = `diffeo.upsample_displacement` of the frozen (u, u_inv, v) (level-2 voxels); pre-warp x_i = warp(I_i, U_i) (`prewarp_deform`); composed (u, u_inv) = `diffeo.compose_cascade(U, U_inv, u_res, u_inv_res)`. |
 | Skip | `skip_linear` / `skip_fields` (bool scalar tensor): a skipped stage passes its input on (A_prev = I, U = U_inv = 0). Their `tf.where` ops live under the name scope ``cascade_skip`` (tests check that p_skip = 0 graphs contain none). Per-stage skip at level 1 (retrain-prereqs design 4.4): `FrozenChain.linear_skip` / `deform_skip` (skip4: level 4 = identity, level 2 still runs; skip2: level 2 dropped; both: identity). |
 | Float32 | Every `FrozenStage` model is constructed AND built inside `_float32_policy()` (Keras layers capture the dtype policy in ``__init__``), with ``gradient_checkpointing='none'``, so the frozen outputs never depend on --amp. The trainable model's --deform-decoder-dtype (policy / float16 / float32 / float32_fine) and fp16 knobs never apply to frozen stages: they are always float32, decoder included (fp32-decoder-width D2; the m9 NaN probe ran them float32 too). |
+| Integration grid | Immutable ``integration_grid`` of `FrozenStage` / `FrozenChain` (`INTEGRATION_GRIDS`; every factory takes it, default 'native'; a chain's value is its stage4's). 'native' = the formulas above, verbatim (each frozen SVF integrated on its own level's grid, the fields upsampled). 'current' (training flag --frozen-integration-grid current, fine-grid-integration plan D3): the frozen SVFs (`FrozenStage.svf`, `FrozenChain.svfs`) are upsampled to the grid of the level the fields are used at and integrated + composed there (`integrate_frozen_at` -> `diffeo.exp_compose_upsampled`, per image): FrozenStage U, U_inv = exp at level 2 of up(v4); FrozenChain pre-warps model2's input with exp at level 2 of up(v4) and returns exp at level 1 of up(up(v4)) composed with exp at level 1 of up(v2) (U4 / U4_inv = the first factor alone). V / V4 are the upsampled SVFs in both modes; linear paths never change. |
 | Inference only | `FrozenStage.linear` / `.deform` always call the model with ``training=False`` (BN moving statistics = the level-4 values, never recalibrated) and wrap the outputs in `tf.stop_gradient`; callers run them outside the GradientTape and never give the frozen variables to the optimizer. |
 """
 import tensorflow as tf
@@ -32,6 +33,36 @@ PREV_LEVEL = {2: 4, 1: 2}                 # trainable level -> previous (frozen)
 FROZEN_LEVEL = 4                          # level of `FrozenStage` (and of the chain's first stage)
 CHAIN_LEVEL = 2                           # level of the chain's second frozen stage (= PREV_LEVEL[1])
 SKIP_SCOPE = "cascade_skip"
+INTEGRATION_GRIDS = ("native", "current")   # frozen-stage integration grid (fine-grid-integration D1)
+
+
+def _check_grid(value):
+    """`value` if it is one of `INTEGRATION_GRIDS`, else ValueError."""
+    if value not in INTEGRATION_GRIDS:
+        raise ValueError("integration_grid must be one of %s, got %r" % (INTEGRATION_GRIDS, value))
+    return value
+
+
+def integrate_frozen_at(svfs, level, steps, return_first=False):
+    """Frozen SVFs integrated and composed on the grid of `level` (fine-grid-integration D3).
+
+    ``svfs``: list of (level_k, v_k), coarse first, v_k in level_k voxels (level_k >= `level`, a
+    power-of-two multiple); each is upsampled log2(level_k / level) times. Returns
+    `diffeo.exp_compose_upsampled` (u, u_inv) [+ (u_0, u_0_inv) with ``return_first``]. An empty
+    list is not supported (ValueError): callers handle "nothing to compose"."""
+    level = int(level)
+    vs, ups = [], []
+    for lv, v in svfs:
+        lv = int(lv)
+        ratio = lv // level if level > 0 else 0
+        if lv < level or ratio * level != lv or ratio & (ratio - 1):
+            raise ValueError("integrate_frozen_at: an SVF of level %d cannot be integrated at level %d"
+                             % (lv, level))
+        vs.append(v)
+        ups.append(ratio.bit_length() - 1)
+    if not vs:
+        raise ValueError("integrate_frozen_at needs at least one SVF")
+    return diffeo.exp_compose_upsampled(vs, ups, steps, return_first=return_first)
 
 
 def pool_to_coarser(images):
@@ -60,15 +91,22 @@ class FrozenStage:
     * `from_checkpoint(prefix, cfg)`: a fresh run's level-4 source (strict model restore);
     * `from_model(model)`: a float32 copy of another model's weights (tests, memory script);
     * `from_config(cfg)`: random init, restored afterwards by `RunCheckpoint` (resume).
+    Every factory takes ``integration_grid`` ('native' default | 'current', module docstring).
     """
 
     n_stages = 1                           # Trainer dispatch (milestone 9 phase 2, design 2.1)
 
-    def __init__(self, model):
+    def __init__(self, model, integration_grid="native"):
         if model.level != FROZEN_LEVEL:
             raise ValueError("the frozen stage is a level-%d model, got level %d" % (FROZEN_LEVEL, model.level))
+        self._integration_grid = _check_grid(integration_grid)
         self.model = model
         self.level = FROZEN_LEVEL
+
+    @property
+    def integration_grid(self):
+        """'native' | 'current' (immutable; set by the constructor / factory)."""
+        return self._integration_grid
 
     @property
     def source_model(self):
@@ -85,27 +123,30 @@ class FrozenStage:
         return {"frozen_stage": self.model}
 
     @classmethod
-    def from_checkpoint(cls, prefix, cfg):
+    def from_checkpoint(cls, prefix, cfg, integration_grid="native"):
         """Level-4 model of `cfg`, restored from the checkpoint `prefix` (model variables only:
         `runtime.checkpoint._strict_restore`, every model variable must be in the checkpoint)."""
         from runtime import checkpoint as C        # local import: models/ stays runtime-free at import
+        _check_grid(integration_grid)
         model = _build_frozen_model(cfg)
         C._strict_restore(model, prefix)
-        return cls(model)
+        return cls(model, integration_grid)
 
     @classmethod
-    def from_model(cls, model):
+    def from_model(cls, model, integration_grid="native"):
         """Fresh float32 level-4 model of ``model.config`` with ``model``'s weights copied
         (`copy_weights_from`; `model` may be any level and may have been built under another
         policy: it is never wrapped)."""
+        _check_grid(integration_grid)
         frozen = _build_frozen_model(model.config)
         frozen.copy_weights_from(model)
-        return cls(frozen)
+        return cls(frozen, integration_grid)
 
     @classmethod
-    def from_config(cls, cfg):
+    def from_config(cls, cfg, integration_grid="native"):
         """Randomly initialised level-4 model of `cfg` (its weights come from the run checkpoint)."""
-        return cls(_build_frozen_model(cfg))
+        _check_grid(integration_grid)
+        return cls(_build_frozen_model(cfg), integration_grid)
 
     @property
     def fingerprint(self):
@@ -117,12 +158,22 @@ class FrozenStage:
         out = self.model(pool_to_coarser(images_fine), task=task, training=False)
         return tf.stop_gradient(tf.cast(out["A"], tf.float32))
 
+    def svf(self, images_fine):
+        """The frozen (centred) level-4 SVF v4 [N, X4, Y4, Z4, 3] (level-4 voxels) of the pooled
+        images, no gradient (any integration grid)."""
+        out = self.model(pool_to_coarser(images_fine), task=DEFORM_TASK, training=False)
+        return tf.stop_gradient(out["v"])
+
     def deform(self, images_fine):
         """dict U, U_inv, V: the frozen u, u_inv, v upsampled to the fine level (level-2 voxels),
-        no gradient."""
+        no gradient. 'current' grid: U, U_inv = exp(+-up(v4)) integrated at level 2."""
         out = self.model(pool_to_coarser(images_fine), task=DEFORM_TASK, training=False)
         up = diffeo.upsample_displacement
-        return {k: tf.stop_gradient(up(out[s])) for k, s in (("U", "u"), ("U_inv", "u_inv"), ("V", "v"))}
+        if self._integration_grid == "native":
+            return {k: tf.stop_gradient(up(out[s])) for k, s in (("U", "u"), ("U_inv", "u_inv"), ("V", "v"))}
+        v = out["v"]
+        U, U_inv = integrate_frozen_at([(FROZEN_LEVEL, v)], CHAIN_LEVEL, self.model.config.integration_steps)
+        return {"U": tf.stop_gradient(U), "U_inv": tf.stop_gradient(U_inv), "V": tf.stop_gradient(up(v))}
 
 
 def _config_without_seed(cfg):
@@ -145,13 +196,14 @@ class FrozenChain:
     ``level`` = 2 (PREV_LEVEL[1]); ``n_stages`` = 2. Factories: `from_checkpoint` (fresh level-1
     run, ONE milestone-8 level-2 cascade checkpoint: keys ``model`` + ``frozen_stage``),
     `from_config` (resume; restored by `RunCheckpoint` under the keys of `checkpoint_extra`),
-    `from_models` (tests / tools: float32 copies).
+    `from_models` (tests / tools: float32 copies). ``integration_grid`` (every factory, default
+    'native') = the stage4's value (module docstring 'Integration grid').
     """
 
     level = CHAIN_LEVEL
     n_stages = 2
 
-    def __init__(self, stage4, model2):
+    def __init__(self, stage4, model2, integration_grid=None):
         if getattr(stage4, "level", None) != FROZEN_LEVEL or not hasattr(stage4, "model"):
             raise ValueError("FrozenChain: stage4 must be a level-%d FrozenStage" % FROZEN_LEVEL)
         if model2.level != CHAIN_LEVEL:
@@ -161,16 +213,27 @@ class FrozenChain:
         if c4 != c2:
             diff = sorted(k for k in set(c4) | set(c2) if c4.get(k) != c2.get(k))
             raise ValueError("FrozenChain: the level-4 and level-2 model configs differ in %s" % diff)
+        grid4 = _check_grid(getattr(stage4, "integration_grid", "native"))
+        if integration_grid is not None and _check_grid(integration_grid) != grid4:
+            raise ValueError("FrozenChain: integration_grid %r differs from the stage4's %r"
+                             % (integration_grid, grid4))
+        self._integration_grid = grid4
         self.stage4 = stage4
         self.model2 = model2
 
+    @property
+    def integration_grid(self):
+        """'native' | 'current' (immutable; = the stage4's value)."""
+        return self._integration_grid
+
     @classmethod
-    def from_checkpoint(cls, prefix, cfg, expected_fingerprint4):
+    def from_checkpoint(cls, prefix, cfg, expected_fingerprint4, integration_grid="native"):
         """Chain of `cfg` restored from a milestone-8 level-2 cascade checkpoint `prefix`
         (``model`` = level 2, ``frozen_stage`` = level 4; optimizer, step, RNGs not read). The
         restored level-4 weights must match `expected_fingerprint4` (the source config.json
         ``cascade.fingerprint``). Every failure leaves as ValueError (design 2.2)."""
         from runtime import checkpoint as C        # local import: models/ stays runtime-free at import
+        _check_grid(integration_grid)
         model4 = _build_frozen_model(cfg, level=FROZEN_LEVEL)
         model2 = _build_frozen_model(cfg, level=CHAIN_LEVEL)
         try:
@@ -183,24 +246,26 @@ class FrozenChain:
         if not C.fingerprints_match(expected_fingerprint4, fp4):
             raise ValueError("FrozenChain.from_checkpoint(%s): the frozen level-4 weights %s do not match the "
                              "source config.json cascade.fingerprint %s" % (prefix, fp4, expected_fingerprint4))
-        return cls(FrozenStage(model4), model2)
+        return cls(FrozenStage(model4, integration_grid), model2, integration_grid)
 
     @classmethod
-    def from_config(cls, cfg):
+    def from_config(cls, cfg, integration_grid="native"):
         """Randomly initialised chain of `cfg` (its weights come from the run checkpoint)."""
-        return cls(FrozenStage(_build_frozen_model(cfg, level=FROZEN_LEVEL)),
-                   _build_frozen_model(cfg, level=CHAIN_LEVEL))
+        _check_grid(integration_grid)
+        return cls(FrozenStage(_build_frozen_model(cfg, level=FROZEN_LEVEL), integration_grid),
+                   _build_frozen_model(cfg, level=CHAIN_LEVEL), integration_grid)
 
     @classmethod
-    def from_models(cls, model4, model2):
+    def from_models(cls, model4, model2, integration_grid="native"):
         """Fresh float32 models with the weights of `model4` (level 4) and `model2` (level 2)
         copied (`copy_weights_from`; the inputs are never wrapped)."""
         if model2.level != CHAIN_LEVEL:
             raise ValueError("FrozenChain.from_models: model2 must be a level-%d model, got level %d"
                              % (CHAIN_LEVEL, model2.level))
+        _check_grid(integration_grid)
         m2 = _build_frozen_model(model2.config, level=CHAIN_LEVEL)
         m2.copy_weights_from(model2)
-        return cls(FrozenStage.from_model(model4), m2)
+        return cls(FrozenStage.from_model(model4, integration_grid), m2, integration_grid)
 
     @property
     def models(self):
@@ -251,12 +316,54 @@ class FrozenChain:
         return {"U": tf.stop_gradient(up(u2)), "U_inv": tf.stop_gradient(up(u2i)),
                 "V": tf.stop_gradient(up(out["v"]))}, p4
 
+    @property
+    def _steps(self):
+        return self.stage4.model.config.integration_steps
+
+    def svfs(self, images_l1, skip4=None):
+        """{4: v4', 2: v2}: the frozen SVFs (level-4 / level-2 voxels), no gradient. v4' = v4, or
+        zeros when ``skip4`` (bool scalar tensor; None = not built) is true; v2 = model2 on x2 =
+        pool(x1) pre-warped with the level-4 field the level-2 run saw in training: 'current' =
+        exp at level 2 of up(v4'), 'native' = stage4's upsampled u4 (zeros when skipped, as
+        `deform_skip`). Valid in both modes."""
+        x2 = pool_to_coarser(images_l1)
+        if self._integration_grid == "current":
+            v4 = self.stage4.svf(x2)
+            if skip4 is not None:
+                v4 = skip_fields(skip4, [v4])[0]
+            U4 = integrate_frozen_at([(FROZEN_LEVEL, v4)], CHAIN_LEVEL, self._steps)[0]
+        else:
+            out4 = self.stage4.model(pool_to_coarser(x2), task=DEFORM_TASK, training=False)
+            v4, U4 = out4["v"], diffeo.upsample_displacement(out4["u"])
+            if skip4 is not None:
+                v4, U4 = skip_fields(skip4, [v4, U4])
+        out = self.model2(prewarp_deform(x2, U4), task=DEFORM_TASK, training=False)
+        return {FROZEN_LEVEL: tf.stop_gradient(v4), CHAIN_LEVEL: tf.stop_gradient(out["v"])}
+
+    def _deform_current(self, images_l1, return_first=False):
+        v = self.svfs(images_l1)
+        res = integrate_frozen_at([(FROZEN_LEVEL, v[FROZEN_LEVEL]), (CHAIN_LEVEL, v[CHAIN_LEVEL])], 1,
+                                  self._steps, return_first=return_first)
+        up = diffeo.upsample_displacement
+        out = {"U": tf.stop_gradient(res[0]), "U_inv": tf.stop_gradient(res[1]),
+               "V": tf.stop_gradient(up(v[CHAIN_LEVEL]))}
+        if return_first:
+            out.update({"U4": tf.stop_gradient(res[2]), "U4_inv": tf.stop_gradient(res[3]),
+                        "V4": tf.stop_gradient(up(up(v[FROZEN_LEVEL])))})
+        return out
+
     def deform(self, images_l1):
-        """dict U, U_inv, V (level-1 voxels): composed level-4 + level-2 fields, upsampled, no gradient."""
+        """dict U, U_inv, V (level-1 voxels): composed level-4 + level-2 fields, upsampled, no gradient.
+        'current' grid: both SVFs integrated and composed at level 1."""
+        if self._integration_grid == "current":
+            return self._deform_current(images_l1)
         return self._deform(images_l1)[0]
 
     def deform_stages(self, images_l1):
-        """`deform` plus U4, U4_inv, V4: the level-4 stage alone, upsampled to level 1."""
+        """`deform` plus U4, U4_inv, V4: the level-4 stage alone, upsampled to level 1 ('current'
+        grid: U4, U4_inv = exp at level 1 of up(up(v4)))."""
+        if self._integration_grid == "current":
+            return self._deform_current(images_l1, return_first=True)
         res, p4 = self._deform(images_l1)
         up = diffeo.upsample_displacement
         res = dict(res)
@@ -280,7 +387,16 @@ class FrozenChain:
     def deform_skip(self, images_l1, skip4=None, skip2=None):
         """dict U, U_inv (level-1 voxels) with per-stage skips (retrain-prereqs design 4.1 / 4.4).
         skip4: u4 = u4_inv = 0 and the level-2 stage runs on x2 warped by the zero field; skip2:
-        U = up(U4); both: U = U_inv = 0. No gradient."""
+        U = up(U4); both: U = U_inv = 0. No gradient. 'current' grid: v4 / v2 replaced by zeros
+        when skipped (`svfs`), then integrated and composed at level 1 (exp(0) = 0, so a skipped
+        stage is the identity)."""
+        if self._integration_grid == "current":
+            v = self.svfs(images_l1, skip4=skip4)
+            v2 = v[CHAIN_LEVEL]
+            if skip2 is not None:
+                v2 = skip_fields(skip2, [v2])[0]
+            U, Ui = integrate_frozen_at([(FROZEN_LEVEL, v[FROZEN_LEVEL]), (CHAIN_LEVEL, v2)], 1, self._steps)
+            return {"U": tf.stop_gradient(U), "U_inv": tf.stop_gradient(Ui)}
         x2 = pool_to_coarser(images_l1)
         p4 = self.stage4.deform(x2)                       # level-4 fields upsampled to level 2
         U4, U4i = p4["U"], p4["U_inv"]

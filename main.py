@@ -61,6 +61,16 @@ Per-stage skip (retrain-prereqs design 4.5): the ``cascade`` record also holds `
 trained with a level-4 skip for them, `_skip_consistency`; printed as WARNING). A resume refreshes
 these three from the current flags and logs ``cascade_skip_changed_on_resume`` when they differ.
 
+Frozen integration grid (`.agents/tasks/fine-grid-integration/plan.md` D2-D4):
+--frozen-integration-grid native | current (unset = inherit) selects where the frozen stages'
+SVFs are integrated ('current' = on the grid of the level being trained; `models.cascade`
+'Integration grid'). Resolved right after the fresh / resume decision by
+`A.resolve_frozen_integration_grid`: fresh level 2 = the flag or 'native'; fresh level 1 = the
+level-2 source's ``cascade.frozen_integration_grid`` (missing = native; an explicit different value
+-> SystemExit "main.py: --cascade-from ..."); resume = the saved value (an explicit different value
+-> RuntimeError). The resolved value goes to every frozen factory, to config.json ``args`` and to
+``cascade.frozen_integration_grid`` (fresh records and the resumed record).
+
 Synthetic contrast (`.agents/tasks/synth-contrast/design.md` 5.3 / 5.4): with --synth-prob > 0
 the data module reads the --synth-label-set labels for every task and config.json gets the
 top-level ``synth`` record (``dataclasses.asdict`` of the `SynthConfig`); default runs (p 0) write
@@ -261,7 +271,7 @@ def main(argv=None):
                          "checkpoint and --resume is on; use a new --run-name (or --resume false)"
                          % os.path.join(args.results, args.run_name))
     cascade_on = args.cascade_from is not None
-    cascade_resume, cascade_src, saved_cfg = False, None, None
+    cascade_resume, cascade_src, saved_cfg, frozen_grid = False, None, None, None
     if cascade_on:
         # NIT 4: fresh vs resume is decided ONCE, before any model is built. A fresh run reads
         # and checks the level-4 source; a resume never reads it (design section 9).
@@ -272,9 +282,27 @@ def main(argv=None):
             if args.level == 1 and not saved_cfg["cascade"].get("stages"):
                 raise RuntimeError("resume of a level-1 cascade run without config.json cascade.stages: %s"
                                    % os.path.join(run_root, "config.json"))
+            try:
+                frozen_grid = A.resolve_frozen_integration_grid(args.frozen_integration_grid,
+                                                                saved_cascade=saved_cfg["cascade"])
+            except ValueError as e:
+                raise RuntimeError("resume of cascade run %s: %s (%s)"
+                                   % (run_root, e, os.path.join(run_root, "config.json")))
         else:
             cascade_src = _load_cascade_source(C, args.cascade_from, A.model_config_from_args(args),
                                                level=args.level)
+            try:
+                if args.level == 1:
+                    frozen_grid = A.resolve_frozen_integration_grid(
+                        args.frozen_integration_grid, source_level=2,
+                        source_cascade=cascade_src[2].get("upstream_cascade"))
+                else:
+                    frozen_grid = A.resolve_frozen_integration_grid(args.frozen_integration_grid,
+                                                                    source_level=4)
+            except ValueError as e:
+                raise SystemExit("main.py: --cascade-from %s: %s" % (args.cascade_from, e))
+        # fine-grid-integration D4: config.json args record the resolved value on cascade runs.
+        args.frozen_integration_grid = frozen_grid
     if args.overfit_one_group:
         sources, val_sets, S, data_desc = _build_overfit_data(args, level, tf_mods)
     else:
@@ -310,13 +338,16 @@ def main(argv=None):
         if cascade_resume:
             # Random init; the run checkpoint (key frozen_stage, or frozen_stage_4 / frozen_stage_2
             # for a chain) restores it below.
-            frozen = FrozenChain.from_config(model_cfg) if chain else FrozenStage.from_config(model_cfg)
+            frozen = (FrozenChain.from_config(model_cfg, integration_grid=frozen_grid) if chain
+                      else FrozenStage.from_config(model_cfg, integration_grid=frozen_grid))
             cascade_rec, skip_changed = _refresh_skip_record(saved_cfg["cascade"], args)
+            cascade_rec["frozen_integration_grid"] = frozen_grid
         elif chain:
             prefix, src_cfg, src_info = cascade_src
             upstream = src_info["upstream_cascade"]
             try:
-                frozen = FrozenChain.from_checkpoint(prefix, src_cfg, upstream["fingerprint"])
+                frozen = FrozenChain.from_checkpoint(prefix, src_cfg, upstream["fingerprint"],
+                                                     integration_grid=frozen_grid)
             except ValueError as e:
                 raise SystemExit("main.py: --cascade-from %s: %s" % (args.cascade_from, e))
             model.copy_weights_from(frozen.source_model)
@@ -341,7 +372,8 @@ def main(argv=None):
                                 "origin_step": upstream.get("source_step")},
                                {"level": 2, "checkpoint_key": "model", "fingerprint": fps[2],
                                 "origin_checkpoint": src_info["checkpoint"],
-                                "origin_step": int(src_info["source_step"])}]}
+                                "origin_step": int(src_info["source_step"])}],
+                           "frozen_integration_grid": frozen_grid}
             # Retrain-prereqs design 4.5: skip mode / probabilities + the level-1 consistency check.
             cascade_rec.update(_skip_record(args))
             skip_warn = _skip_consistency(upstream, getattr(args, "cascade_skip_stage_parsed", None))
@@ -350,7 +382,7 @@ def main(argv=None):
                 print(line)
         else:
             prefix, src_cfg, src_info = cascade_src
-            frozen = FrozenStage.from_checkpoint(prefix, src_cfg)
+            frozen = FrozenStage.from_checkpoint(prefix, src_cfg, integration_grid=frozen_grid)
             model.copy_weights_from(frozen.model)
             init_info = C.cascade_init_record(model, src_info)
             s_rel = None
@@ -362,7 +394,8 @@ def main(argv=None):
             cascade_rec = {"source_checkpoint": src_info["checkpoint"], "source_config": src_info["source_config"],
                            "source_level": int(src_info["source_level"]),
                            "source_step": int(src_info["source_step"]), "fingerprint": frozen.fingerprint,
-                           "S_rel_diff_vs_level4": s_rel, "skip_prob": float(args.cascade_skip_prob)}
+                           "S_rel_diff_vs_level4": s_rel, "skip_prob": float(args.cascade_skip_prob),
+                           "frozen_integration_grid": frozen_grid}
             cascade_rec.update(_skip_record(args))          # retrain-prereqs design 4.5
             cascade_rec["skip_consistency_warnings"] = []    # level-4 source: nothing to check
     optimizer = O.make_optimizer(args.optimizer, lr=args.lr, weight_decay=args.weight_decay,
@@ -879,7 +912,8 @@ def _cascade_lines(rec, resumed, saved_cfg):
     lines = ["cascade: frozen level-%d stage from %s (step %d; source config %s)" % (
         rec["source_level"], rec["source_checkpoint"], rec["source_step"], rec["source_config"]),
         "  fingerprint: %d vars, abs sum %.10g, sq sum %.10g; S rel diff vs level 4: %s; skip prob %g" % (
-            fp["n_vars"], fp["abs_sum"], fp["sq_sum"], rec["S_rel_diff_vs_level4"], rec["skip_prob"])]
+            fp["n_vars"], fp["abs_sum"], fp["sq_sum"], rec["S_rel_diff_vs_level4"], rec["skip_prob"]),
+        "  frozen integration grid: %s" % rec.get("frozen_integration_grid", "native")]
     for st in rec.get("stages") or []:            # level-1 chain: one line per frozen stage
         sfp = st.get("fingerprint") or {}
         lines.append("  stage level %s (checkpoint key %s): %s vars, abs sum %.10g; origin %s (step %s)" % (

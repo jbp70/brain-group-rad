@@ -37,6 +37,8 @@ Pattern from the rigid project's ``runtime/args.py`` (argparse + ``str2bool``). 
   --val-pair-chunk 16. With these defaults every run is unchanged (level-4 runs bit-identical).
   --cascade-from is valid with --level 2 (level-4 source) or --level 1 (level-2 cascade source,
   milestone 9 phase 2 design §4.1).
+  --frozen-integration-grid None (= inherit; `.agents/tasks/fine-grid-integration/plan.md` D4,
+  `resolve_frozen_integration_grid`): 'native' (today) | 'current' (needs --cascade-from).
 * memory knobs (milestone 9, `.agents/tasks/milestone-9/design-m9-phase1.md` §3): --lean-sampler
   false, --lean-losses false, --split-group-conv false, --gradient-checkpointing none ('full'
   added). None is a ModelConfig field; with the defaults levels 4 and 2 are bit-identical.
@@ -114,6 +116,8 @@ MEAN_PAIR_METRIC = "val/mean_pair_rms_mm"
 # Deformable best-checkpoint key (same value as runtime.run.DEFORM_BEST_METRIC).
 DEFORM_BEST_METRIC = "val_deform/pair_dice_loss"
 ALL_TASKS = ("rigid", "affine", "deform")
+# Frozen-stage integration grids (same values as models.cascade.INTEGRATION_GRIDS; args stays TF-free).
+FROZEN_INTEGRATION_GRIDS = ("native", "current")
 _MC = ModelConfig()
 
 
@@ -211,6 +215,38 @@ def parse_task_loss_weights(text):
             raise ValueError("task loss weight must be finite and > 0, got {!r}".format(part))
         out[name] = weight
     return out
+
+
+def resolve_frozen_integration_grid(requested, source_level=None, source_cascade=None, saved_cascade=None):
+    """The chain rule of --frozen-integration-grid (fine-grid-integration plan D4) -> 'native' |
+    'current'. TF-free; ValueError naming both values on a conflict (main.py adds the path).
+
+    * resume (`saved_cascade` = the run's saved config.json ``cascade`` record, not None): the
+      saved ``frozen_integration_grid`` (missing = 'native'); `requested` None inherits it, a
+      different explicit value is an error;
+    * fresh level-1 run (`source_level` 2): the level-2 source's value =
+      ``source_cascade.get('frozen_integration_grid', 'native')`` (`source_cascade` = its
+      ``cascade`` record); None inherits it, a different explicit value is an error;
+    * fresh level-2 run (`source_level` 4) or anything else: `requested`, or 'native'."""
+    if requested is not None and requested not in FROZEN_INTEGRATION_GRIDS:
+        raise ValueError("--frozen-integration-grid must be one of %s, got %r"
+                         % (FROZEN_INTEGRATION_GRIDS, requested))
+    if saved_cascade is not None:
+        saved = saved_cascade.get("frozen_integration_grid", "native")
+        if requested is not None and requested != saved:
+            raise ValueError("--frozen-integration-grid %s differs from the run's saved "
+                             "cascade.frozen_integration_grid %s; resume without the flag (or with "
+                             "%s) or start a new --run-name" % (requested, saved, saved))
+        return saved
+    if source_level == 2:
+        src = (source_cascade or {}).get("frozen_integration_grid", "native")
+        if requested is not None and requested != src:
+            raise ValueError("--frozen-integration-grid %s: the frozen level-2 stage was trained with "
+                             "--frozen-integration-grid %s (its config.json "
+                             "cascade.frozen_integration_grid); a level-1 run must use the same grid "
+                             "(omit the flag to inherit it)" % (requested, src))
+        return src
+    return requested or "native"
 
 
 def parse_skip_spec(text, flag, levels):
@@ -558,6 +594,16 @@ def build_parser():
     g.add_argument("--cascade-skip-deform", default=None, metavar="SPEC",
                    help="per-stage skip of the frozen stages for the deform task (same format and "
                    "rules as --cascade-skip-linear), e.g. '4:0.15,2:0.15'. Default: off")
+    g.add_argument("--frozen-integration-grid", default=None, choices=list(FROZEN_INTEGRATION_GRIDS),
+                   help="grid the frozen stages' SVFs are integrated on (fine-grid-integration): "
+                   "'native' = each on its own level's grid, fields upsampled (today's behaviour); "
+                   "'current' = upsampled to the grid of the level being trained and integrated + "
+                   "composed there. 'current' needs --cascade-from. Default (unset) = inherit: a "
+                   "fresh level-2 run uses 'native'; a fresh level-1 run uses the value its level-2 "
+                   "source was trained with (an explicit different value is an error: the frozen "
+                   "level-2 stage would see inputs it never saw); a resume keeps the saved value "
+                   "(an explicit different value is an error). config.json records the resolved "
+                   "value (args and cascade.frozen_integration_grid)")
     g.add_argument("--bn-recal-batches", type=int, default=0,
                    help="BN recalibration of the trainable level-2 (or level-1) stage at the start of a fresh "
                    "cascade run: this many forward-only training batches (split over the tasks "
@@ -739,6 +785,8 @@ def parse_args(argv=None):
                          "copies the source weights into the level-2 model itself)")
         if args.deform_residual_affine:
             parser.error("--cascade-from needs --deform-residual-affine false")
+    if args.frozen_integration_grid == "current" and not cascade:
+        parser.error("--frozen-integration-grid current needs --cascade-from")
     p_skip = args.cascade_skip_prob
     if not (math.isfinite(p_skip) and 0.0 <= p_skip < 1.0):
         parser.error("--cascade-skip-prob must be finite and in [0, 1), got %r" % p_skip)

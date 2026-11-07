@@ -180,7 +180,9 @@ def build_trainer(run_dir, ns, raw_cfg, data_root):
         frozen = None
         if cascade:
             from models.cascade import FrozenChain, FrozenStage
-            frozen = FrozenChain.from_config(model_cfg) if level == 1 else FrozenStage.from_config(model_cfg)
+            grid = (cascade or {}).get("frozen_integration_grid", "native")   # fine-grid-integration D4
+            frozen = (FrozenChain.from_config(model_cfg, integration_grid=grid) if level == 1
+                      else FrozenStage.from_config(model_cfg, integration_grid=grid))
         optimizer = O.make_optimizer(ns.optimizer, lr=ns.lr, weight_decay=ns.weight_decay,
                                      momentum=ns.momentum, dampening=ns.dampening,
                                      nesterov=ns.nesterov, decoupled=ns.decoupled,

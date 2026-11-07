@@ -12,6 +12,7 @@ Conventions (binding):
 | SVF | v_i in level voxels, central space. Centering: v_i <- v_i - mean_j v_j at every voxel (group axis 0, N dynamic). Exp: scaling and squaring, T steps (default 7): u <- v / 2^T, then T times u <- compose(u, u); T = 0 returns v. Inverse: exp(-v), never a numerical inversion. |
 | Pairwise | image j coords -> image i coords: phi_i o phi_j^-1 = ``compose(u_i, u_inv_j)``; onehot_i in j's space = ``warp(onehot_i, compose(u_i, u_inv_j))``. |
 | Cascade | phi^(k) = phi^(k-1) o exp(v^(k)) -> ``compose(up(u_prev), u_k)``; inverse exp(-v^(k)) o phi^(k-1)^-1 -> ``compose(u_inv_k, up(u_inv_prev))``, up = `upsample_displacement`. |
+| Fine-grid frozen integration | `exp_compose_upsampled(vs, ups, steps)`: each SVF v_k (coarse first) is upsampled ``ups[k]`` times (`upsample_displacement`) to one common grid, integrated there (`exp_and_inverse`) and folded in cascade order (u <- compose(u, u_k), u_inv <- compose(u_inv_k, u_inv)), one image at a time (`tf.map_fn`, parallel_iterations 1; fine-grid-integration plan D3 / D6). |
 | Trilinear x2 | Coarse voxel q at fine 2q + 0.5 (half-pixel, edge replicate); `upsample_displacement(u) = 2 * upsample_trilinear2x(u)`. |
 | Jacobian | det(I + grad u), central differences, interior voxels only: [N, X-2, Y-2, Z-2]. Folding fraction = mean(J <= 0). |
 | Dtypes | Fields and integration in float32 (float64 kept); float16 inputs are cast to float32; never float16 grids. |
@@ -167,6 +168,58 @@ def compose_cascade(u_prev_up, u_inv_prev_up, u_new, u_inv_new, lean=False):
     `upsample_displacement`. Returns (u, u_inv).
     """
     return compose(u_prev_up, u_new, lean=lean), compose(u_inv_new, u_inv_prev_up, lean=lean)
+
+
+def exp_compose_upsampled(vs, ups, steps=7, lean=False, return_first=False):
+    """Integrate several SVFs on one common (fine) grid and compose them in cascade order.
+
+    ``vs``: list of float32 [N, X_k, Y_k, Z_k, 3] SVFs, coarse first, each in the voxels of its
+    own level; ``ups``: list of non-negative ints, the `upsample_displacement` count that brings
+    v_k to the common grid (all upsampled static spatial shapes must be equal). Per image
+    (`tf.map_fn`, parallel_iterations 1, so only one image's fine fields are live at a time):
+    v_k upsampled, (u_k, u_k_inv) = `exp_and_inverse`, then u = compose(u, u_k) and
+    u_inv = compose(u_k_inv, u_inv) (= `compose_cascade` order: phi_0 o phi_1 o ...).
+
+    Returns (u, u_inv), or (u, u_inv, u_0, u_0_inv) with ``return_first`` (u_0 = the first SVF
+    alone on the common grid). ValueError for empty / unequal-length lists, negative counts or
+    upsampled shapes that differ.
+    """
+    vs = [tf.cast(tf.convert_to_tensor(v), tf.float32) for v in vs]
+    ups = [int(k) for k in ups]
+    if not vs or len(vs) != len(ups):
+        raise ValueError("exp_compose_upsampled needs len(vs) == len(ups) >= 1, got %d and %d"
+                         % (len(vs), len(ups)))
+    shapes = []
+    for v, k in zip(vs, ups):
+        spatial = v.shape[1:4].as_list()
+        if v.shape.rank != 5 or v.shape[-1] != 3 or any(d is None for d in spatial):
+            raise ValueError("every SVF must be [N, X, Y, Z, 3] with static spatial dims, got %s" % (v.shape,))
+        if k < 0:
+            raise ValueError("upsample counts must be >= 0, got %d" % k)
+        shapes.append(tuple(int(d) * 2 ** k for d in spatial))
+    if any(s != shapes[0] for s in shapes):
+        raise ValueError("exp_compose_upsampled: the upsampled spatial shapes differ: %s" % (shapes,))
+    spec = tf.TensorSpec(list(shapes[0]) + [3], tf.float32)
+    n_out = 4 if return_first else 2
+
+    def one_image(elems):
+        acc = acc_inv = first = None
+        for v_i, k in zip(elems, ups):
+            v = v_i[None]
+            for _ in range(k):
+                v = upsample_displacement(v)
+            u, ui = exp_and_inverse(v, steps, lean=lean)
+            if acc is None:
+                acc, acc_inv = u, ui
+                first = (u, ui)
+            else:
+                acc, acc_inv = compose(acc, u, lean=lean), compose(ui, acc_inv, lean=lean)
+        out = (acc[0], acc_inv[0])
+        if return_first:
+            out = out + (first[0][0], first[1][0])
+        return out
+
+    return tf.map_fn(one_image, tuple(vs), fn_output_signature=(spec,) * n_out, parallel_iterations=1)
 
 
 def to_mm(u, spacing):
