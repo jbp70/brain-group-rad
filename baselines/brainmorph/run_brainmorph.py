@@ -32,6 +32,13 @@ p = 2 * idx / (256 - 1) - 1 (linspace(-1, 1) convention). So processed-grid voxe
 x = (p + 1) * 255 / 2 - pad_lo exactly. (BrainMorph's own warping calls grid_sample with
 align_corners=False on these align_corners=True coordinates, a ~0.4 % zoom; we do not copy that.)
 
+Patient-level mode (``--groups-dir``, MIRIAD): one groupwise registration per group file written by
+``python -m evaluation.groups write-groups``, network loaded once, outputs in the layout of
+slurm/eval_miriad.sh: ``<out>/brainmorph_<align>/<group>/fields/`` (same files as above) and
+``<out>/brainmorph_<align>/groups/`` (copy of the group files); keypoints and run_info.json per
+group in ``<out>/_brainmorph_keypoints/<group>/`` (run_info.json is written last; a group that has
+it is skipped on rerun). See slurm/brainmorph_miriad.sh.
+
 Environment: pt_nv.sif (PyTorch) + a clone of https://github.com/alanqrwang/keymorph passed with
 --keymorph-dir; no pip installs (torchio / h5py are only imported by keymorph modules we do not
 use and are stubbed when missing). Weights: foundation-numkey512-numlevels6.pth.tar = variant L,
@@ -308,10 +315,12 @@ def save_nii(arr, affine, path):
 
 # ------------------------------------------------------------------ pipeline
 def run(subs, out, aligns, geom, keypoint_fn, device, num_iters=5, chunk=131072, log=print,
-        info=None, weighted=False):
+        info=None, weighted=False, align_dir=None):
     """subs: list of {'dir','image','labels'}; keypoint_fn(i, padded [D,H,W] float32) ->
     (points [1, K, 3] normalised 'ij' keypoints, power [1, K] or None), torch on device.
-    weighted: optional power weighting of the groupwise fits (see group_weights)."""
+    weighted: optional power weighting of the groupwise fits (see group_weights).
+    align_dir(align) -> output folder of that alignment (default <out>/<align>); keypoints.npz and
+    run_info.json (written last) always go to ``out``."""
     os.makedirs(out, exist_ok=True)
     n = len(subs)
     t0 = time.time()
@@ -348,7 +357,7 @@ def run(subs, out, aligns, geom, keypoint_fn, device, num_iters=5, chunk=131072,
     timings = {"keypoints_s": t_kp}
     for align in aligns:
         ta = time.time()
-        d = os.path.join(out, align)
+        d = align_dir(align) if align_dir else os.path.join(out, align)
         os.makedirs(d, exist_ok=True)
         mean, aligned = groupwise(points, align, num_iters, power if weighted else None)
         mean_np = mean.double().cpu().numpy()
@@ -395,9 +404,12 @@ def run(subs, out, aligns, geom, keypoint_fn, device, num_iters=5, chunk=131072,
     np.savez(os.path.join(out, "keypoints.npz"), **kp)
     meta = dict(info or {})
     meta.update(n_subjects=n, aligns=list(aligns), num_iters=num_iters, grid=list(geom.shape),
-                weighted=weighted,
+                weighted=weighted, subjects=[s["dir"] for s in subs],
+                align_dirs={al: (align_dir(al) if align_dir else os.path.join(out, al)) for al in aligns},
                 pad_lo=geom.pad_lo.tolist(), pad_to=geom.pad_to, timings=timings,
                 convention="--components xyz --signs +++ --units mm")
+    if str(device).startswith("cuda") and torch.cuda.is_available():
+        meta["gpu_peak_allocated_gb"] = torch.cuda.max_memory_allocated() / 2.0 ** 30
     with open(os.path.join(out, "run_info.json"), "w") as f:
         json.dump(meta, f, indent=2)
     return kp
@@ -536,6 +548,52 @@ def self_test(device="cpu"):
         m = blob > 0.2 * blob.max()
         ncc = np.corrcoef(mv[0][m], mv[2][m])[0, 1]
         check("%s: moved S0 vs moved S2 NCC" % align, ncc > 0.98, round(float(ncc), 4))
+    # 4. patient-level mode (--groups-dir, MIRIAD layout): two groups of two subjects
+    gdir, gout = os.path.join(tmp, "groups"), os.path.join(tmp, "groups_out")
+    os.makedirs(gdir)
+    for g, members in (("PA", ["S0_T1w", "S1_T1w"]), ("PB", ["S2_T1w", "S3_T1w"])):
+        with open(os.path.join(gdir, g + ".txt"), "w") as f:
+            f.write("\n".join(members) + "\n")
+    with open(os.path.join(gdir, "groups.csv"), "w") as f:
+        f.write("group,n_scans,written\nPA,2,1\nPB,2,1\n")
+    order = [0, 1, 2, 3]
+    calls = []
+
+    def kp_group(i, padded):
+        k = order[len(calls) % 4]
+        calls.append(k)
+        return kp_fn(k, padded)
+
+    ga = types.SimpleNamespace(groups_dir=gdir, groups=None, out=gout, aligns=["rigid", "affine"],
+                               method_prefix="brainmorph", processed_dir=proc, label_name="dkt31aseg",
+                               pad_to=P, device=device, num_iters=5, tps_chunk=8192, weighted=False,
+                               weights=None, num_keypoints=40, variant="L")
+    rc = run_groups(ga, kp_fn=kp_group, log=lambda *_: None)
+    fd = os.path.join(gout, "brainmorph_affine", "PB", "fields")
+    want = {"S2_T1w_fwd.nii.gz", "S2_T1w_inv.nii.gz", "S3_T1w_fwd.nii.gz", "atlas.nii.gz", "atlas_seg.nii.gz",
+            "matrices.npz"}
+    have = set(os.listdir(fd)) if os.path.isdir(fd) else set()
+    check("groups mode: rc 0 and <out>/brainmorph_<align>/<group>/fields layout", rc == 0 and want <= have,
+          sorted(want - have))
+    check("groups mode: groups folder copied per method",
+          sorted(os.listdir(os.path.join(gout, "brainmorph_rigid", "groups"))) == ["PA.txt", "PB.txt", "groups.csv"],
+          os.listdir(os.path.join(gout, "brainmorph_rigid", "groups")))
+    with open(os.path.join(gout, "_brainmorph_keypoints", "PA", "run_info.json")) as f:
+        ri = json.load(f)
+    check("groups mode: run_info subjects / group", ri["subjects"] == ["S0_T1w", "S1_T1w"] and ri["group"] == "PA",
+          ri["subjects"])
+    # affine on two exactly-affine subjects: S0 moved into S1 space via the template recovers S1's image
+    fwd0 = np.asarray(nib.load(os.path.join(gout, "brainmorph_affine", "PA", "fields", "S0_T1w_fwd.nii.gz")).dataobj)
+    inv1 = np.asarray(nib.load(os.path.join(gout, "brainmorph_affine", "PA", "fields", "S1_T1w_inv.nii.gz")).dataobj)
+    img0 = np.asarray(nib.load(subs[0]["image"]).dataobj, np.float32)
+    img1 = np.asarray(nib.load(subs[1]["image"]).dataobj, np.float32)
+    pair = F.warp(img0, F.compose(inv1, fwd0), order=1)
+    m1 = img1 > 0.2 * img1.max()
+    ncc = np.corrcoef(pair[m1], img1[m1])[0, 1]
+    check("groups mode: affine pair S0 -> S1 NCC", ncc > 0.97, round(float(ncc), 4))
+    n_calls = len(calls)
+    rc2 = run_groups(ga, kp_fn=kp_group, log=lambda *_: None)
+    check("groups mode: rerun skips finished groups", rc2 == 0 and len(calls) == n_calls, len(calls) - n_calls)
     print("self-test files: %s" % out)
     print("convention check (run with the repo's python):\n  python -m evaluation check-convention "
           "--processed-dir %s --n-subjects 4 --fwd '%s/tps_0/{subject_dir}_fwd.nii.gz' "
@@ -567,6 +625,14 @@ def main():
                          "code uses power weights). Template = power-weighted mean keypoints; fit weights "
                          "= subject power x group-mean power. No effect on tps_0 (lambda 0 interpolates).")
     ap.add_argument("--device", default="cuda")
+    ap.add_argument("--groups-dir", default=None,
+                    help="patient-level mode (MIRIAD): one groupwise registration per <group>.txt in this "
+                         "folder (python -m evaluation.groups write-groups), network loaded once. Writes "
+                         "<out>/<method-prefix>_<align>/<group>/fields/ (+ a copy of the groups folder in "
+                         "<out>/<method-prefix>_<align>/groups) and <out>/_<method-prefix>_keypoints/<group>/"
+                         "{keypoints.npz,run_info.json}; a group with run_info.json is skipped (resume)")
+    ap.add_argument("--groups", nargs="+", default=None, help="with --groups-dir: only these groups")
+    ap.add_argument("--method-prefix", default="brainmorph", help="with --groups-dir (default %(default)s)")
     a = ap.parse_args()
 
     import_keymorph(a.keymorph_dir)
@@ -583,6 +649,8 @@ def main():
             ap.error("--%s is required" % k.replace("_", "-"))
     for s in a.aligns:
         parse_align(s)
+    if a.groups_dir:
+        sys.exit(run_groups(a))
     subs = find_subjects(a.processed_dir, a.label_name, a.subjects_file)
     if a.max_subjects:
         subs = subs[:a.max_subjects]
@@ -599,22 +667,89 @@ def main():
     print("subjects %d  grid %s  pad_lo %s  keymorph %s  device %s" % (
         len(subs), geom.shape, geom.pad_lo.tolist(), KM.path, a.device))
     model = build_network(a.weights, a.num_keypoints, levels, a.device)
+    run(subs, a.out, a.aligns, geom, make_kp_fn(model, a.device), a.device, a.num_iters, a.tps_chunk,
+        info=run_info_base(a), weighted=a.weighted)
+    print("done: %s" % a.out)
 
+
+def make_kp_fn(model, device):
     def kp_fn(i, padded):
-        x = torch.from_numpy(padded)[None, None].to(a.device)
+        x = torch.from_numpy(padded)[None, None].to(device)
         points, feat = model.get_keypoints(x, return_feat=True)
         # channel power as in KeyMorph.weight_by_power (sum of the ReLU'd heatmap per keypoint)
         power = torch.relu(feat).flatten(2).sum(-1)
         return points, power
+    return kp_fn
 
-    info = {"weights": os.path.abspath(a.weights), "num_keypoints": a.num_keypoints, "variant": a.variant,
-            "keymorph": KM.path, "processed_dir": os.path.abspath(a.processed_dir),
+
+def run_info_base(a):
+    return {"weights": os.path.abspath(a.weights) if a.weights else None, "num_keypoints": a.num_keypoints,
+            "variant": a.variant, "keymorph": KM.path, "processed_dir": os.path.abspath(a.processed_dir),
             "torch": torch.__version__,
             "keypoint_weighting": ("power: template = power-weighted mean, fit weight = subject x group-mean "
                                    "normalised power (wrapper option, not BrainMorph code)") if a.weighted
             else "none (as keymorph groupwise_register)"}
-    run(subs, a.out, a.aligns, geom, kp_fn, a.device, a.num_iters, a.tps_chunk, info=info, weighted=a.weighted)
-    print("done: %s" % a.out)
+
+
+def list_groups(groups_dir, only=None):
+    names = sorted(f[:-4] for f in os.listdir(groups_dir) if f.endswith(".txt") and not f.startswith("_"))
+    if only:
+        missing = [g for g in only if g not in names]
+        if missing:
+            raise SystemExit("groups not in %s: %s" % (groups_dir, missing))
+        names = [g for g in names if g in only]
+    return names
+
+
+def run_groups(a, kp_fn=None, log=print):
+    """Patient-level mode: one groupwise registration per group file (network loaded once).
+    Returns the exit status (0 ok, 1 some group failed, 2 nothing to do)."""
+    import shutil
+    import traceback
+    groups = list_groups(a.groups_dir, a.groups)
+    if not groups:
+        log("no group files in %s" % a.groups_dir)
+        return 2
+    for al in a.aligns:   # eval_miriad.sh reads <method root>/groups
+        gd = os.path.join(a.out, "%s_%s" % (a.method_prefix, al), "groups")
+        os.makedirs(gd, exist_ok=True)
+        for f in os.listdir(a.groups_dir):
+            if f.endswith(".txt") or f == "groups.csv":
+                shutil.copyfile(os.path.join(a.groups_dir, f), os.path.join(gd, f))
+    kp_root = os.path.join(a.out, "_%s_keypoints" % a.method_prefix)
+    geom, failed, n_done, n_skip = None, [], 0, 0
+    t0 = time.time()
+    for gi, g in enumerate(groups):
+        kp_dir = os.path.join(kp_root, g)
+        if os.path.isfile(os.path.join(kp_dir, "run_info.json")):
+            n_skip += 1
+            continue
+        try:
+            subs = find_subjects(a.processed_dir, a.label_name, os.path.join(a.groups_dir, g + ".txt"))
+            if geom is None:
+                img0 = nib.load(subs[0]["image"])
+                geom = Geometry(img0.shape[:3], img0.affine, a.pad_to)
+                if np.abs(geom.spacing - 1).max() > 1e-3:
+                    raise SystemExit("BrainMorph expects 1 mm voxels; grid spacing %s" % geom.spacing)
+                if kp_fn is None:   # tests pass a synthetic keypoint function instead of the network
+                    levels = {"S": 4, "M": 5, "L": 6}[a.variant]
+                    kp_fn = make_kp_fn(build_network(a.weights, a.num_keypoints, levels, a.device), a.device)
+            info = run_info_base(a)
+            info["group"] = g
+            log("=== group %d/%d %s (%d scans, %.1f min)" % (gi + 1, len(groups), g, len(subs),
+                                                            (time.time() - t0) / 60))
+            run(subs, kp_dir, a.aligns, geom, kp_fn, a.device, a.num_iters, a.tps_chunk, log=log, info=info,
+                weighted=a.weighted,
+                align_dir=lambda al, g=g: os.path.join(a.out, "%s_%s" % (a.method_prefix, al), g, "fields"))
+            n_done += 1
+        except SystemExit:
+            raise
+        except Exception:
+            log("group %s FAILED:\n%s" % (g, traceback.format_exc()))
+            failed.append(g)
+    log("groups: %d done, %d already done, %d failed (of %d)%s" % (
+        n_done, n_skip, len(failed), len(groups), (": " + " ".join(failed)) if failed else ""))
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":
