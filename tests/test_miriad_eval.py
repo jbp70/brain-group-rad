@@ -17,7 +17,12 @@ import sys
 import tempfile
 import unittest
 
+import nibabel as nib
+import numpy as np
+
+from evaluation import fields as F
 from evaluation import groups as G
+from evaluation.evaluate import main as eval_main
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PREDICT = os.path.join(REPO, "slurm", "predict_miriad.sh")
@@ -34,7 +39,7 @@ SCRIPT_ENV = ("CKPT", "TASK", "NAME", "PROCESSED", "OUT", "PATIENTS", "LABEL_NAM
               "GRID_REF", "LEVELS", "EXTRA", "SCRATCH_ROOT", "METHOD", "PRED", "FWD", "INV", "ATLAS",
               "ATLAS_SEG", "CONV", "IDENTITY", "GROUPS_DIR", "PAIRS", "OVERWRITE", "WORKERS", "PROJ", "REPO",
               "SIF", "SLURM_JOB_ID", "SLURM_CPUS_PER_TASK", "STUB_FAIL", "KEYMORPH_DIR", "WEIGHTS", "ALIGNS",
-              "METHOD_PREFIX")
+              "METHOD_PREFIX", "MATRICES")
 
 
 def _processed(root):
@@ -130,6 +135,100 @@ class TestGroups(unittest.TestCase):
 def _read(path):
     with open(path) as f:
         return f.read()
+
+
+class TestMatrices(unittest.TestCase):
+    """evaluation --matrices: fields built from 4x4 voxel matrices == the same fields stored densely."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="miriad_mat_")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    @staticmethod
+    def _rigid(rng, shape):
+        a = rng.uniform(-0.1, 0.1, 3)
+        cx, cy, cz = np.cos(a)
+        sx, sy, sz = np.sin(a)
+        r = (np.array([[1, 0, 0], [0, cx, -sx], [0, sx, cx]]) @ np.array([[cy, 0, sy], [0, 1, 0], [-sy, 0, cy]])
+             @ np.array([[cz, -sz, 0], [sz, cz, 0], [0, 0, 1]]))
+        c = (np.asarray(shape) - 1) / 2.0
+        m = np.eye(4)
+        m[:3, :3] = r
+        m[:3, 3] = c - r @ c + rng.uniform(-2, 2, 3)
+        return m
+
+    def test_matrix_field_and_load(self):
+        shape = (6, 7, 5)
+        m = self._rigid(np.random.RandomState(0), shape)
+        u = F.matrix_field(m, shape)
+        x = np.array([2.0, 3.0, 1.0])
+        np.testing.assert_allclose(x + u[2, 3, 1], (m @ np.r_[x, 1])[:3], atol=1e-5)
+        p = os.path.join(self.tmp, "m.npz")
+        np.savez(p, subjects=np.array(["a_T1w", "b_T1w"]), fwd_vox=np.stack([m, np.eye(4)]))
+        mats = F.load_matrices(p)
+        np.testing.assert_allclose(mats["a_T1w"][1], np.linalg.inv(m))
+        np.savez(p, subjects=np.array(["a_T1w"]), fwd_vox=m[None], inv_vox=np.eye(4)[None])
+        with self.assertRaises(ValueError):
+            F.load_matrices(p)
+        with self.assertRaises(ValueError):          # neither templates nor matrices
+            F.FieldSource(None, None, F.Convention(), shape, (1, 1, 1))
+        np.savez(p, subjects=np.array(["a_T1w"]), fwd_vox=m[None])
+        with self.assertRaises(ValueError):          # identity and matrices are exclusive
+            F.FieldSource(None, None, F.Convention(), shape, (1, 1, 1), identity=True, matrices=p)
+        src = F.FieldSource(None, None, F.Convention(), shape, (1, 1, 1), matrices=p)
+        np.testing.assert_allclose(src.get("fwd", {"subject": "a", "dir": "a_T1w"}), u)
+        with self.assertRaises(KeyError):
+            src.get("fwd", {"subject": "b", "dir": "b_T1w"})
+
+    def test_evaluation_matrices_equal_dense(self):
+        shape = (20, 22, 18)
+        aff = np.eye(4)
+        rng = np.random.RandomState(1)
+        x, y, z = np.indices(shape).astype(np.float32)
+        c = (np.asarray(shape) - 1) / 2.0
+        r = np.sqrt(((x - c[0]) / 7) ** 2 + ((y - c[1]) / 8) ** 2 + ((z - c[2]) / 6) ** 2)
+        base = (np.clip(0.5 + 0.3 * np.cos(r * 5) + 0.1 * (x - c[0]) / 7, 0.05, None) * (r < 1)).astype(np.float32)
+        lab0 = np.where(r < 1, np.where(x < c[0], 2, 41), 0).astype(np.uint16)
+        lab0[(r < 1) & (r > 0.6) & (y < c[1])] = 1002
+        proc, fld = os.path.join(self.tmp, "proc"), os.path.join(self.tmp, "fields")
+        os.makedirs(fld)
+        mats, names = [], []
+        for i in range(3):
+            m = self._rigid(rng, shape)   # fwd: atlas voxel -> subject voxel
+            u_sub2atlas = F.matrix_field(np.linalg.inv(m), shape)
+            name = "S%d_T1w" % i
+            d = os.path.join(proc, name)
+            os.makedirs(d)
+            nib.save(nib.Nifti1Image(F.warp(base, u_sub2atlas, 1), aff), os.path.join(d, "image.nii.gz"))
+            nib.save(nib.Nifti1Image(F.warp(lab0, u_sub2atlas, 0), aff), os.path.join(d, "labels_synthseg.nii.gz"))
+            nib.save(nib.Nifti1Image(F.matrix_field(m, shape), aff), os.path.join(fld, name + "_fwd.nii.gz"))
+            nib.save(nib.Nifti1Image(F.matrix_field(np.linalg.inv(m), shape), aff),
+                     os.path.join(fld, name + "_inv.nii.gz"))
+            mats.append(m)
+            names.append(name)
+        np.savez(os.path.join(fld, "matrices.npz"), subjects=np.array(names), fwd_vox=np.stack(mats))
+        common = ["run", "--processed-dir", proc, "--label-name", "synthseg", "--method", "m", "--pairs", "all"]
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(eval_main(common + ["--out", os.path.join(self.tmp, "dense"),
+                                                 "--fwd", fld + "/{subject_dir}_fwd.nii.gz",
+                                                 "--inv", fld + "/{subject_dir}_inv.nii.gz"]), 0)
+            self.assertEqual(eval_main(common + ["--out", os.path.join(self.tmp, "mat"),
+                                                 "--matrices", os.path.join(fld, "matrices.npz")]), 0)
+        s = {}
+        for k in ("dense", "mat"):
+            with open(os.path.join(self.tmp, k, "summary.json")) as f:
+                s[k] = json.load(f)
+        self.assertEqual(s["mat"]["matrices"], os.path.join(fld, "matrices.npz"))
+        self.assertIsNone(s["mat"]["convention"])
+        for sec in ("subject_metrics", "pair_metrics"):
+            for k in ("template_lncc", "template_dice", "pair_lncc", "pair_dice"):
+                if k in s["dense"][sec]:
+                    self.assertAlmostEqual(s["mat"][sec][k]["mean"], s["dense"][sec][k]["mean"], places=5)
+        for k in ("centrality_mean_mm", "atlas_intensity_std"):
+            self.assertAlmostEqual(s["mat"]["group"][k], s["dense"]["group"][k], places=5)
+        self.assertGreater(s["mat"]["pair_metrics"]["pair_dice"]["mean"], 0.85)
 
 
 class TestStatic(unittest.TestCase):
@@ -290,6 +389,27 @@ class TestStubRuns(unittest.TestCase):
             s = json.load(f)
         self.assertEqual(s["n_groups"], 2)
         self.assertEqual(s["n_subjects_total"], 8)
+
+    def test_eval_uses_matrices_when_no_dense_fields(self):
+        pred = os.path.join(self.tmp, "results", "predict_miriad", "brainmorph_rigid")
+        gdir = os.path.join(pred, "groups")
+        with contextlib.redirect_stdout(io.StringIO()):
+            G.main(["write-groups", "--processed-dir", self.processed, "--out-dir", gdir])
+        for g in ("miriad_188_AD_M", "miriad_241_HC_M"):
+            os.makedirs(os.path.join(pred, g, "fields"))
+            open(os.path.join(pred, g, "fields", "matrices.npz"), "w").close()
+        open(os.path.join(pred, "miriad_241_HC_M", "fields", "miriad_241_HC_M_01_MR_1_T1w_fwd.nii.gz"), "w").close()
+        r, calls = self.run_script(EVAL, METHOD="brainmorph_rigid")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        ev = [c for c in calls if c.startswith("-m evaluation run")]
+        self.assertIn("--matrices %s/miriad_188_AD_M/fields/matrices.npz" % pred, ev[0])
+        for k in ("--fwd", "--components"):
+            self.assertNotIn(k, ev[0])
+        self.assertIn("--atlas %s/miriad_188_AD_M/fields/atlas.nii.gz" % pred, ev[0])
+        self.assertNotIn("--matrices", ev[1])             # dense fwd files present -> dense path
+        self.assertIn("--fwd", ev[1])
+        r, calls = self.run_script(EVAL, METHOD="brainmorph_rigid", OVERWRITE="1", MATRICES="none")
+        self.assertFalse([c for c in calls if "--matrices" in c])
 
     def test_predict_failure_continues(self):
         r, calls = self.run_script(PREDICT, CKPT="c", TASK="affine", STUB_FAIL="miriad_188_AD_M")

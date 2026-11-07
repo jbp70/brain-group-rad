@@ -34,7 +34,9 @@ align_corners=False on these align_corners=True coordinates, a ~0.4 % zoom; we d
 
 Patient-level mode (``--groups-dir``, MIRIAD): one groupwise registration per group file written by
 ``python -m evaluation.groups write-groups``, network loaded once, outputs in the layout of
-slurm/eval_miriad.sh: ``<out>/brainmorph_<align>/<group>/fields/`` (same files as above) and
+slurm/eval_miriad.sh: ``<out>/brainmorph_<align>/<group>/fields/`` (by default only matrices.npz,
+atlas.nii.gz, atlas_seg.nii.gz for rigid/affine: ``--save-fields matrices``; the evaluation
+builds the dense fields from the matrices with ``--matrices``) and
 ``<out>/brainmorph_<align>/groups/`` (copy of the group files); keypoints and run_info.json per
 group in ``<out>/_brainmorph_keypoints/<group>/`` (run_info.json is written last; a group that has
 it is skipped on rerun). See slurm/brainmorph_miriad.sh.
@@ -315,12 +317,17 @@ def save_nii(arr, affine, path):
 
 # ------------------------------------------------------------------ pipeline
 def run(subs, out, aligns, geom, keypoint_fn, device, num_iters=5, chunk=131072, log=print,
-        info=None, weighted=False, align_dir=None):
+        info=None, weighted=False, align_dir=None, save_fields="dense"):
     """subs: list of {'dir','image','labels'}; keypoint_fn(i, padded [D,H,W] float32) ->
     (points [1, K, 3] normalised 'ij' keypoints, power [1, K] or None), torch on device.
     weighted: optional power weighting of the groupwise fits (see group_weights).
     align_dir(align) -> output folder of that alignment (default <out>/<align>); keypoints.npz and
-    run_info.json (written last) always go to ``out``."""
+    run_info.json (written last) always go to ``out``.
+    save_fields: "dense" writes the per-subject fwd / inv / moved / moved_seg files; "matrices"
+    writes them only for TPS alignments (rigid / affine keep matrices.npz + atlas + atlas_seg;
+    evaluate with ``python -m evaluation run --matrices``)."""
+    if save_fields not in ("dense", "matrices"):
+        raise ValueError("save_fields must be dense or matrices, got %r" % save_fields)
     os.makedirs(out, exist_ok=True)
     n = len(subs)
     t0 = time.time()
@@ -373,18 +380,21 @@ def run(subs, out, aligns, geom, keypoint_fn, device, num_iters=5, chunk=131072,
             if tr.kind != "tps":
                 mats["fwd_vox"].append(tr.fwd_vox)
                 mats["inv_vox"].append(tr.inv_vox)
+            dense = save_fields == "dense" or tr.kind == "tps"
             img = np.asarray(load_vol(s["image"])[0], np.float32)
             moved = F.warp(img, fwd, order=1)
             atlas_sum += moved
             sp = geom.spacing.astype(np.float32)
-            save_nii((fwd * sp).astype(np.float32), geom.affine, os.path.join(d, s["dir"] + "_fwd.nii.gz"))
-            save_nii((inv * sp).astype(np.float32), geom.affine, os.path.join(d, s["dir"] + "_inv.nii.gz"))
-            save_nii(moved, geom.affine, os.path.join(d, s["dir"] + "_moved.nii.gz"))
+            if dense:
+                save_nii((fwd * sp).astype(np.float32), geom.affine, os.path.join(d, s["dir"] + "_fwd.nii.gz"))
+                save_nii((inv * sp).astype(np.float32), geom.affine, os.path.join(d, s["dir"] + "_inv.nii.gz"))
+                save_nii(moved, geom.affine, os.path.join(d, s["dir"] + "_moved.nii.gz"))
             if s["labels"]:
                 lab = np.rint(np.asarray(load_vol(s["labels"])[0], np.float32)).astype(np.int32)
                 ml = F.warp(lab, fwd, order=0)
                 moved_labs.append(ml)
-                save_nii(ml, geom.affine, os.path.join(d, s["dir"] + "_moved_seg.nii.gz"))
+                if dense:
+                    save_nii(ml, geom.affine, os.path.join(d, s["dir"] + "_moved_seg.nii.gz"))
             log("%s %d/%d %s  |fwd| mean %.2f mm  (%.1f s)" % (
                 align, i + 1, n, s["dir"], float(F.norm_mm(fwd, geom.spacing).mean()), time.time() - ta))
         save_nii((atlas_sum / n).astype(np.float32), geom.affine, os.path.join(d, "atlas.nii.gz"))
@@ -404,7 +414,7 @@ def run(subs, out, aligns, geom, keypoint_fn, device, num_iters=5, chunk=131072,
     np.savez(os.path.join(out, "keypoints.npz"), **kp)
     meta = dict(info or {})
     meta.update(n_subjects=n, aligns=list(aligns), num_iters=num_iters, grid=list(geom.shape),
-                weighted=weighted, subjects=[s["dir"] for s in subs],
+                weighted=weighted, subjects=[s["dir"] for s in subs], save_fields=save_fields,
                 align_dirs={al: (align_dir(al) if align_dir else os.path.join(out, al)) for al in aligns},
                 pad_lo=geom.pad_lo.tolist(), pad_to=geom.pad_to, timings=timings,
                 convention="--components xyz --signs +++ --units mm")
@@ -568,13 +578,19 @@ def self_test(device="cpu"):
                                method_prefix="brainmorph", processed_dir=proc, label_name="dkt31aseg",
                                pad_to=P, device=device, num_iters=5, tps_chunk=8192, weighted=False,
                                weights=None, num_keypoints=40, variant="L")
+    # 3b. matrices.npz of the dense run reproduces its dense fields (evaluation --matrices)
+    mats = F.load_matrices(os.path.join(out, "affine", "matrices.npz"))
+    dense_fwd = np.asarray(nib.load(os.path.join(out, "affine", "S1_T1w_fwd.nii.gz")).dataobj)
+    dense_inv = np.asarray(nib.load(os.path.join(out, "affine", "S1_T1w_inv.nii.gz")).dataobj)
+    e = max(np.abs(F.matrix_field(mats["S1_T1w"][0], shape) - dense_fwd).max(),
+            np.abs(F.matrix_field(mats["S1_T1w"][1], shape) - dense_inv).max())
+    check("affine: fields from matrices.npz == dense fwd/inv [vox]", e < 1e-3, "%.2e" % e)
+
     rc = run_groups(ga, kp_fn=kp_group, log=lambda *_: None)
     fd = os.path.join(gout, "brainmorph_affine", "PB", "fields")
-    want = {"S2_T1w_fwd.nii.gz", "S2_T1w_inv.nii.gz", "S3_T1w_fwd.nii.gz", "atlas.nii.gz", "atlas_seg.nii.gz",
-            "matrices.npz"}
     have = set(os.listdir(fd)) if os.path.isdir(fd) else set()
-    check("groups mode: rc 0 and <out>/brainmorph_<align>/<group>/fields layout", rc == 0 and want <= have,
-          sorted(want - have))
+    check("groups mode: rc 0, fields/ holds only matrices.npz + atlas + atlas_seg",
+          rc == 0 and have == {"atlas.nii.gz", "atlas_seg.nii.gz", "matrices.npz"}, sorted(have))
     check("groups mode: groups folder copied per method",
           sorted(os.listdir(os.path.join(gout, "brainmorph_rigid", "groups"))) == ["PA.txt", "PB.txt", "groups.csv"],
           os.listdir(os.path.join(gout, "brainmorph_rigid", "groups")))
@@ -583,8 +599,10 @@ def self_test(device="cpu"):
     check("groups mode: run_info subjects / group", ri["subjects"] == ["S0_T1w", "S1_T1w"] and ri["group"] == "PA",
           ri["subjects"])
     # affine on two exactly-affine subjects: S0 moved into S1 space via the template recovers S1's image
-    fwd0 = np.asarray(nib.load(os.path.join(gout, "brainmorph_affine", "PA", "fields", "S0_T1w_fwd.nii.gz")).dataobj)
-    inv1 = np.asarray(nib.load(os.path.join(gout, "brainmorph_affine", "PA", "fields", "S1_T1w_inv.nii.gz")).dataobj)
+    src = F.FieldSource(None, None, F.Convention(), shape, (1.0, 1.0, 1.0),
+                        matrices=os.path.join(gout, "brainmorph_affine", "PA", "fields", "matrices.npz"))
+    fwd0 = src.get("fwd", {"subject": "S0", "dir": "S0_T1w"})
+    inv1 = src.get("inv", {"subject": "S1", "dir": "S1_T1w"})
     img0 = np.asarray(nib.load(subs[0]["image"]).dataobj, np.float32)
     img1 = np.asarray(nib.load(subs[1]["image"]).dataobj, np.float32)
     pair = F.warp(img0, F.compose(inv1, fwd0), order=1)
@@ -633,6 +651,10 @@ def main():
                          "{keypoints.npz,run_info.json}; a group with run_info.json is skipped (resume)")
     ap.add_argument("--groups", nargs="+", default=None, help="with --groups-dir: only these groups")
     ap.add_argument("--method-prefix", default="brainmorph", help="with --groups-dir (default %(default)s)")
+    ap.add_argument("--save-fields", choices=("dense", "matrices"), default=None,
+                    help="dense: per-subject fwd/inv/moved/moved_seg NIfTIs; matrices: rigid/affine keep only "
+                         "matrices.npz + atlas + atlas_seg (evaluate with --matrices; TPS always dense). "
+                         "Default: matrices with --groups-dir, dense otherwise")
     a = ap.parse_args()
 
     import_keymorph(a.keymorph_dir)
@@ -649,6 +671,8 @@ def main():
             ap.error("--%s is required" % k.replace("_", "-"))
     for s in a.aligns:
         parse_align(s)
+    if a.save_fields is None:
+        a.save_fields = "matrices" if a.groups_dir else "dense"
     if a.groups_dir:
         sys.exit(run_groups(a))
     subs = find_subjects(a.processed_dir, a.label_name, a.subjects_file)
@@ -668,7 +692,7 @@ def main():
         len(subs), geom.shape, geom.pad_lo.tolist(), KM.path, a.device))
     model = build_network(a.weights, a.num_keypoints, levels, a.device)
     run(subs, a.out, a.aligns, geom, make_kp_fn(model, a.device), a.device, a.num_iters, a.tps_chunk,
-        info=run_info_base(a), weighted=a.weighted)
+        info=run_info_base(a), weighted=a.weighted, save_fields=a.save_fields)
     print("done: %s" % a.out)
 
 
@@ -739,7 +763,7 @@ def run_groups(a, kp_fn=None, log=print):
             log("=== group %d/%d %s (%d scans, %.1f min)" % (gi + 1, len(groups), g, len(subs),
                                                             (time.time() - t0) / 60))
             run(subs, kp_dir, a.aligns, geom, kp_fn, a.device, a.num_iters, a.tps_chunk, log=log, info=info,
-                weighted=a.weighted,
+                weighted=a.weighted, save_fields=getattr(a, "save_fields", None) or "matrices",
                 align_dir=lambda al, g=g: os.path.join(a.out, "%s_%s" % (a.method_prefix, al), g, "fields"))
             n_done += 1
         except SystemExit:

@@ -29,6 +29,9 @@
 #   PRED        prediction root with <patient>/fields (default $PROJ/results/predict_miriad/$METHOD)
 #   FWD, INV    field templates ({group}, {subject}, {subject_dir}); default our layout
 #               $PRED/{group}/fields/{subject_dir}_fwd.nii.gz / _inv.nii.gz
+#   MATRICES    linear methods storing only 4x4 matrices ({group}); default
+#               $PRED/{group}/fields/matrices.npz, used (python -m evaluation run --matrices) when it
+#               exists, the folder has no *_fwd.nii.gz and FWD is not set; "none" = never
 #   ATLAS, ATLAS_SEG  atlas templates ({group}); default $PRED/{group}/fields/atlas.nii.gz /
 #               atlas_seg.nii.gz; set to "none" for the mean image / majority vote
 #   CONV        convention flags (default "--components xyz --signs +++ --units mm")
@@ -53,6 +56,8 @@ PRED=${PRED:-$PROJ/results/predict_miriad/$METHOD}
 OUT=${OUT:-$PROJ/results/eval_miriad/$METHOD}
 # Defaults with literal {group} / {subject_dir} set in if blocks: a "}" inside ${VAR:-...} would
 # end the expansion early.
+if [ -z "${MATRICES:-}" ]; then MATRICES="$PRED/{group}/fields/matrices.npz"; fi
+USER_FWD=${FWD:-}
 if [ -z "${FWD:-}" ]; then FWD="$PRED/{group}/fields/{subject_dir}_fwd.nii.gz"; fi
 if [ -z "${INV:-}" ]; then INV="$PRED/{group}/fields/{subject_dir}_inv.nii.gz"; fi
 if [ -z "${ATLAS:-}" ]; then ATLAS="$PRED/{group}/fields/atlas.nii.gz"; fi
@@ -93,11 +98,19 @@ for g in $LIST; do
     if [ "$IDENTITY" = "1" ]; then
         ARGS+=(--identity)
     else
-        ARGS+=(--fwd "${FWD//\{group\}/$g}" --inv "${INV//\{group\}/$g}")
+        MAT="${MATRICES//\{group\}/$g}"
+        # Linear methods that store only 4x4 matrices: matrices.npz and no dense fwd files (an
+        # explicit FWD always uses the dense files).
+        if [ -z "$USER_FWD" ] && [ "$MATRICES" != "none" ] && [ -f "$MAT" ] \
+                && ! ls "$(dirname "$MAT")"/*_fwd.nii.gz >/dev/null 2>&1; then
+            ARGS+=(--matrices "$MAT")
+        else
+            ARGS+=(--fwd "${FWD//\{group\}/$g}" --inv "${INV//\{group\}/$g}")
+            # shellcheck disable=SC2206
+            ARGS+=($CONV)
+        fi
         [ "$ATLAS" != "none" ] && ARGS+=(--atlas "${ATLAS//\{group\}/$g}")
         [ "$ATLAS_SEG" != "none" ] && ARGS+=(--atlas-seg "${ATLAS_SEG//\{group\}/$g}")
-        # shellcheck disable=SC2206
-        ARGS+=($CONV)
     fi
     # shellcheck disable=SC2206
     ARGS+=($EXTRA)

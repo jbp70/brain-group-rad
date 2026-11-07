@@ -129,12 +129,51 @@ def load_field(path: str, shape: Sequence[int], spacing: Sequence[float], conv: 
     return conv.to_canonical(load_raw_field(path, shape), spacing)
 
 
+def load_matrices(path: str) -> dict:
+    """Linear transforms of a group from an .npz: ``subjects`` [N] (subject folder names or
+    subject ids), ``fwd_vox`` [N, 4, 4] and optionally ``inv_vox`` [N, 4, 4] (default: inverse
+    of fwd_vox). fwd_vox_i maps ATLAS voxel coordinates to SUBJECT i voxel coordinates of the
+    processed grid (x_subject = M x_atlas, the canonical fwd point map phi_i); inv_vox_i = its
+    inverse. Returns {name: (fwd [4, 4], inv [4, 4])} (float64)."""
+    z = np.load(path, allow_pickle=False)
+    for k in ("subjects", "fwd_vox"):
+        if k not in z:
+            raise ValueError("%s: missing array %r (needs subjects, fwd_vox[, inv_vox])" % (path, k))
+    names = [str(s) for s in z["subjects"]]
+    fwd = np.asarray(z["fwd_vox"], np.float64)
+    if fwd.shape != (len(names), 4, 4):
+        raise ValueError("%s: fwd_vox has shape %s, expected (%d, 4, 4)" % (path, fwd.shape, len(names)))
+    inv = np.asarray(z["inv_vox"], np.float64) if "inv_vox" in z else np.linalg.inv(fwd)
+    if inv.shape != fwd.shape:
+        raise ValueError("%s: inv_vox has shape %s, expected %s" % (path, inv.shape, fwd.shape))
+    err = np.abs(np.einsum("nij,njk->nik", fwd, inv) - np.eye(4)).max()
+    if err > 1e-4:
+        raise ValueError("%s: inv_vox is not the inverse of fwd_vox (max |fwd inv - I| %.2e)" % (path, err))
+    return {n: (fwd[i], inv[i]) for i, n in enumerate(names)}
+
+
+def matrix_field(m: np.ndarray, shape: Sequence[int]) -> np.ndarray:
+    """Canonical voxel displacement [X, Y, Z, 3] of the point map x -> m x (4x4, voxel coords)."""
+    g = identity_grid(shape)
+    m = np.asarray(m, np.float64)
+    a = (m[:3, :3] - np.eye(3)).astype(np.float32)
+    t = m[:3, 3].astype(np.float32)
+    out = np.empty(tuple(shape) + (3,), np.float32)
+    for c in range(3):
+        out[..., c] = a[c, 0] * g[0] + a[c, 1] * g[1] + a[c, 2] * g[2] + t[c]
+    return out
+
+
 class FieldSource:
     """Canonical fwd/inv fields per subject from path templates ({subject}, {subject_dir}), with
-    a small LRU cache; ``identity=True`` returns zero fields (the no-registration reference)."""
+    a small LRU cache; ``identity=True`` returns zero fields (the no-registration reference);
+    ``matrices`` (an .npz, see load_matrices) builds the fields of linear methods from their 4x4
+    matrices instead of reading dense files (the convention does not apply to them)."""
 
     def __init__(self, fwd_template: Optional[str], inv_template: Optional[str], conv: Convention,
-                 shape: Sequence[int], spacing: Sequence[float], identity: bool = False, cache: int = 16):
+                 shape: Sequence[int], spacing: Sequence[float], identity: bool = False, cache: int = 16,
+                 matrices: Optional[str] = None):
+        self.matrices = load_matrices(matrices) if matrices else None
         self.templates = {"fwd": fwd_template, "inv": inv_template}
         self.conv = conv
         self.shape = tuple(shape)
@@ -145,12 +184,28 @@ class FieldSource:
         self._preloaded = {}
         self._zero = None
         self.loads = 0
-        if not identity and not (fwd_template and inv_template):
-            raise ValueError("--fwd and --inv path templates are required (or use --identity)")
+        if identity and self.matrices is not None:
+            raise ValueError("--identity and --matrices are exclusive")
+        if not identity and self.matrices is None and not (fwd_template and inv_template):
+            raise ValueError("--fwd and --inv path templates (or --matrices) are required (or use --identity)")
 
     def path(self, role: str, subject: dict) -> str:
         tpl = self.templates[self.conv.file_role(role)]
         return tpl.format(subject=subject["subject"], subject_dir=subject["dir"])
+
+    def _matrix(self, role: str, subject: dict) -> np.ndarray:
+        for name in (subject["dir"], subject["subject"]):
+            if name in self.matrices:
+                return self.matrices[name][0 if role == "fwd" else 1]
+        raise KeyError("no matrix for %s (%s) in --matrices" % (subject["subject"], subject["dir"]))
+
+    def _load(self, role: str, subject: dict) -> np.ndarray:
+        if self.matrices is not None:
+            return matrix_field(self._matrix(role, subject), self.shape)
+        p = self.path(role, subject)
+        if not os.path.isfile(p):
+            raise FileNotFoundError("%s field of %s not found: %s" % (role, subject["subject"], p))
+        return load_field(p, self.shape, self.spacing, self.conv)
 
     def get(self, role: str, subject: dict) -> np.ndarray:
         if self.identity:
@@ -164,10 +219,7 @@ class FieldSource:
         if key in self._cache:
             self._cache.move_to_end(key)
             return self._cache[key]
-        p = self.path(role, subject)
-        if not os.path.isfile(p):
-            raise FileNotFoundError("%s field of %s not found: %s" % (role, subject["subject"], p))
-        f = load_field(p, self.shape, self.spacing, self.conv)
+        f = self._load(role, subject)
         f.flags.writeable = False
         self.loads += 1
         self._cache[key] = f
@@ -185,10 +237,7 @@ class FieldSource:
             key = (role, s["subject"])
             if key not in self._preloaded:
                 self._cache.pop(key, None)
-                p = self.path(role, s)
-                if not os.path.isfile(p):
-                    raise FileNotFoundError("%s field of %s not found: %s" % (role, s["subject"], p))
-                f = load_field(p, self.shape, self.spacing, self.conv)
+                f = self._load(role, s)
                 f.flags.writeable = False
                 self.loads += 1
                 self._preloaded[key] = f

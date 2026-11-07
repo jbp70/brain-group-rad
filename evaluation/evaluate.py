@@ -30,6 +30,8 @@ group
 
 ``--identity``: zero fields (the no-registration reference); the atlas defaults to the mean image
 and the atlas segmentation to the majority vote, as for any method without them.
+``--matrices M.npz``: linear methods store 4x4 voxel matrices only (subjects, fwd_vox[, inv_vox];
+see fields.load_matrices); the dense fields are built from them in memory.
 
 Outputs in --out: per_subject.csv, per_pair.csv, per_label.csv, summary.json (mean/std/median/
 min/max per metric + group metrics + inputs and convention), labels.txt.
@@ -325,7 +327,8 @@ def cmd_run(a) -> int:
     images, labels, masks, shape, aff = load_grid_data(subs)
     sp = spacing_of(aff)
     conv = F.Convention(a.components, a.signs, a.units, a.swap_roles)
-    src = F.FieldSource(a.fwd, a.inv, conv, shape, sp, identity=a.identity, cache=a.field_cache)
+    src = F.FieldSource(a.fwd, a.inv, conv, shape, sp, identity=a.identity, cache=a.field_cache,
+                        matrices=a.matrices)
     if a.labels:
         with open(a.labels) as f:
             lab_list = sorted({int(x.split("#", 1)[0]) for x in f if x.split("#", 1)[0].strip()})
@@ -339,7 +342,7 @@ def cmd_run(a) -> int:
         f.write("\n".join(map(str, lab_list)) + "\n")
     log.info("%d subjects, grid %s, spacing %s, %d labels (%d cortical), method %s, convention %s",
              n, shape, sp, len(lab_list), int(M.is_cortical(lab_list).sum()), a.method,
-             "identity" if a.identity else conv.describe())
+             "identity" if a.identity else ("matrices %s" % a.matrices if a.matrices else conv.describe()))
     if a.preload_fwd:
         src.preload("fwd", subs)
         log.info("preloaded %d forward fields, %.0f s", n, time.time() - t0)
@@ -430,8 +433,9 @@ def cmd_run(a) -> int:
         plabel.append(r)
     _write_csv(os.path.join(a.out, "per_label.csv"), plabel)
     summary = {"method": a.method, "n_subjects": n, "n_pairs": len(prow), "n_labels": len(lab_list),
-               "identity": a.identity, "convention": None if a.identity else conv.as_dict(),
-               "fwd": a.fwd, "inv": a.inv, "atlas": atlas_src, "atlas_seg": seg_src,
+               "identity": a.identity,
+               "convention": None if (a.identity or a.matrices) else conv.as_dict(),
+               "fwd": a.fwd, "inv": a.inv, "matrices": a.matrices, "atlas": atlas_src, "atlas_seg": seg_src,
                "processed_dir": os.path.abspath(a.processed_dir), "grid": list(shape), "spacing": list(sp),
                "lncc_window": a.lncc_window, "pairs": a.pairs, "seed": a.seed, "group": group,
                "subject_metrics": {k: _summ([r.get(k) for r in rows]) for k in rows[0] if k != "subject"},
@@ -480,6 +484,10 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--method", required=True, help="name stored in summary.json")
     r.add_argument("--out", required=True)
     r.add_argument("--identity", action="store_true", help="zero fields (no-registration reference)")
+    r.add_argument("--matrices", default=None,
+                   help="linear methods: .npz with subjects [N], fwd_vox [N,4,4] (atlas voxel -> subject voxel "
+                        "point map on the processed grid) and optionally inv_vox; the fields are built from "
+                        "the matrices (replaces --fwd/--inv and the convention flags)")
     r.add_argument("--components", default="xyz", help="stored component order, e.g. zyx (default %(default)s)")
     r.add_argument("--signs", default="+++", help="sign per x/y/z axis, e.g. --+ for LPS fields")
     r.add_argument("--swap-roles", action="store_true", help="the method's 'forward' file is our inverse")
