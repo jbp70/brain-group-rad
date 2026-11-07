@@ -23,8 +23,10 @@
 # slurm/brainmorph_mindboggle.sh).
 #
 # Outputs ($OUT = $PROJ/results/predict_miriad):
-#   $OUT/brainmorph_rigid/<patient>/fields/{<scan>_T1w_fwd,_inv,_moved,_moved_seg}.nii.gz,
-#       atlas.nii.gz, atlas_seg.nii.gz, matrices.npz        (same for brainmorph_affine)
+#   $OUT/brainmorph_rigid/<patient>/fields/{matrices.npz, atlas.nii.gz, atlas_seg.nii.gz}
+#       (same for brainmorph_affine). No dense fields: matrices.npz holds the 4x4 voxel matrices
+#       (fwd_vox atlas -> scan, inv_vox, and world-mm versions); eval_miriad.sh evaluates with
+#       --matrices. EXTRA="--save-fields dense" writes the per-scan fwd/inv/moved NIfTIs as well.
 #   $OUT/brainmorph_<align>/groups/<patient>.txt              (read by eval_miriad.sh)
 #   $OUT/_brainmorph_keypoints/<patient>/{keypoints.npz,run_info.json}  (run_info.json written
 #       last; a patient that has it is skipped, so resubmitting the same command resumes;
