@@ -4,10 +4,21 @@ D1-D4, D6, items 1-3): `diffeo.exp_compose_upsampled`, `cascade.integrate_frozen
 'current' = the frozen SVFs integrated on the grid of the level that uses them), the
 --frozen-integration-grid chain rule and main.py's config.json records. TINY models under the
 6000 MB GTX 1080 cap; level-1 chain forwards at N 2 (no level-1 training step).
+
+TestInferenceFine (plan D5, item 4): predict.py --integration-grid fine / auto in the streamed and
+unchunked runners (default plan, --levels plans, level-4 checkpoints, TTA, affine+deform, the
+level-1 chain on /CPU:0), the loader rule, LoadedModel checks and the CLI flag.
 """
+import argparse
+import contextlib
+import io
 import json
+import logging
 import os
+import shutil
 import sys
+import tempfile
+import time
 import unittest
 
 import tests.tf_setup  # noqa: F401  (log level, TF32 off, GPU memory cap)
@@ -15,14 +26,26 @@ import numpy as np
 import tensorflow as tf
 
 import main as MAIN
+from inference import cli as CLI
+from inference import levels as LVS
+from inference import loader as LD
+from inference import predict as PR
+from inference import tta as TTA
+from inference.loader import LoadedModel
+from inference.runner import StreamedRunner, UnchunkedRunner, _pool_to
+from inference.store import RamStore
 from models import cascade
 from models import diffeo
 from models.group_net import GroupRegLevelModel
+from models.precision import policy_scope
 from runtime import args as A
 from runtime import checkpoint as C
 from runtime import fixed_data as fd
 from tests import test_cascade as TC
+from tests import test_predict_runner as TPR
+from tests.predict_helpers import save_cascade_run, save_level4_run, write_subjects
 from tests.runtime_helpers import TINY_ARGS, free_memory, tiny_config
+from tests.test_predict_streaming import TINY_L1, _images
 from tests.test_trainer import _OpDeterminism
 
 WHILE_OPS = ("While", "StatelessWhile")
@@ -480,6 +503,306 @@ class TestTrainerCurrent(TC.CascadeTrainerCase):
         x_in, ok = tr._recal_input("deform", None)
         self.assertTrue(ok)
         np.testing.assert_allclose(x_in.numpy(), cascade.prewarp_deform(x, want["U"]).numpy(), rtol=0, atol=1e-6)
+
+
+# ============================================================================ inference (item 4)
+B_FINE_REF = 1e-5          # runner (unchunked, float32) vs eager training-time references
+
+
+def _fine_level2(seed=3, cfg=None):
+    """`TPR._level2` with a 'current' FrozenStage -> LoadedModel(integration_grid='fine')."""
+    cfg = cfg or tiny_config(**TC.STAGE_KW)
+    m4 = GroupRegLevelModel(4, cfg).build_model(2)
+    TC.randomize(m4, seed, 0.02)
+    frozen = cascade.FrozenStage.from_model(m4, integration_grid="current")
+    with policy_scope("float32"):
+        m2 = GroupRegLevelModel(2, cfg, lean_sampler=True, split_group_conv=True).build_model(1)
+    m2.copy_weights_from(m4)
+    TC.randomize(m2, seed + 1, 0.01)
+    return LoadedModel(2, m2, frozen, integration_grid="fine")
+
+
+def _set_grid(prefix, cascade_value=None, args_value=None):
+    """Edit the run's config.json: cascade / args frozen_integration_grid (None = key removed)."""
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(prefix))), "config.json")
+    with open(path) as f:
+        cfg = json.load(f)
+    for block, value in (("cascade", cascade_value), ("args", args_value)):
+        d = cfg.setdefault(block, {})
+        d.pop("frozen_integration_grid", None)
+        if value is not None:
+            d["frozen_integration_grid"] = value
+    with open(path, "w") as f:
+        json.dump(cfg, f)
+
+
+class TestInferenceFine(TPR.RunnerCase):
+    """Item 4: --integration-grid fine in both runners == the training-time ('current') formulas,
+    streamed == unchunked; the loader / LoadedModel / CLI rules (plan D5)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="bgr_fgi_inf_")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+        super(TestInferenceFine, self).tearDown()
+
+    def check_refs(self, label, pairs, atol=B_FINE_REF):
+        diffs = {k: _max_diff(g, w) for k, g, w in pairs}
+        print("\n[FGI-4] %s vs references max |diff|: %s" % (label, ", ".join(
+            "%s %.3g" % kv for kv in sorted(diffs.items()))), file=sys.stderr)
+        for k, v in diffs.items():
+            self.assertLessEqual(v, atol, "%s %s" % (label, k))
+
+    def test_level2_default_plan(self):
+        loaded = _fine_level2()
+        self.assertEqual(loaded.knobs["integration_grid"], {"checkpoint": "current", "used": "fine"})
+        steps = loaded.model_cfg.integration_steps
+        x1 = TPR._full_res(_images(2), 2)
+        worst = {}
+        out = self.compare_modes("L2 fine", loaded, x1, (1, 2, TPR.N), ("deform", "affine+deform"), False,
+                                 worst, fields=TPR.FIELD_KEYS + ("v",), keep_ref=True)
+        TPR._print("L2 fine streamed vs unchunked", worst)
+        for br in out:
+            self.assertEqual(out[br]["summary"]["integration_grid"], "fine", br)
+        ref = out["deform"]["ref"]
+        # The trainer's level-2 formulas with a 'current' FrozenStage; U1 = both SVFs at level 1.
+        fz, model = loaded.frozen, loaded.model
+        x2 = _pool_to(x1, 2)
+        p = fz.deform(x2)
+        o = model(cascade.prewarp_deform(x2, p["U"]), task="deform", training=False)
+        u, ui = diffeo.compose_cascade(p["U"], p["U_inv"], o["u"], o["u_inv"])
+        U1, U1i = cascade.integrate_frozen_at([(4, fz.svf(x2)), (2, o["v"])], 1, steps)
+        self.check_refs("L2 fine unchunked", (("u_ckpt", ref["u_ckpt"], u), ("u_inv_ckpt", ref["u_inv_ckpt"], ui),
+                                              ("v", ref["v"], o["v"]), ("U1", ref["U1"], U1),
+                                              ("U1_inv", ref["U1_inv"], U1i)))
+        # Not the native read-out (upsampled level-2 fields), and not identity.
+        self.assertGreater(_max_diff(ref["U1"], diffeo.upsample_displacement(u)), 1e-5)
+        self.assertGreater(float(np.abs(ref["U1"]).max()), 1e-3)
+
+    def test_level_plans(self):
+        loaded = _fine_level2()
+        steps = loaded.model_cfg.integration_steps
+        x1 = TPR._full_res(_images(2), 2)
+        x2 = _pool_to(x1, 2)
+        fz, model = loaded.frozen, loaded.model
+        worst = {}
+        # --levels 4: truncation, U1 = exp at level 1 of up(up(v4)); no checkpoint fields.
+        p4 = LVS.plan(loaded.levels, (4,))
+        out = self.compare_modes("L2 fine --levels 4", loaded, x1, (1, TPR.N), ("deform", "affine+deform"),
+                                 False, worst, fields=("U1", "U1_inv"), plan=p4, keep_ref=True)
+        ref = out["deform"]["ref"]
+        U1, U1i = cascade.integrate_frozen_at([(4, fz.svf(x2))], 1, steps)
+        self.check_refs("--levels 4", (("U1", ref["U1"], U1), ("U1_inv", ref["U1_inv"], U1i)))
+        # --levels 2 (skip 4, untrained skip allowed): the trainer's skip input warp(x2, 0).
+        p2 = LVS.plan(loaded.levels, (2,))
+        out = self.compare_modes("L2 fine --levels 2", loaded, x1, (1, TPR.N), ("deform",), False, worst,
+                                 fields=TPR.FIELD_KEYS + ("v",), plan=p2, keep_ref=True)
+        ref = out["deform"]["ref"]
+        z = tf.zeros(ref["u_ckpt"].shape, tf.float32)
+        o = model(cascade.prewarp_deform(x2, z), task="deform", training=False)
+        u, ui = diffeo.compose_cascade(z, z, o["u"], o["u_inv"])
+        U1, U1i = cascade.integrate_frozen_at([(2, o["v"])], 1, steps)
+        self.check_refs("--levels 2", (("u_ckpt", ref["u_ckpt"], u), ("u_inv_ckpt", ref["u_inv_ckpt"], ui),
+                                       ("v", ref["v"], o["v"]), ("U1", ref["U1"], U1),
+                                       ("U1_inv", ref["U1_inv"], U1i)))
+        TPR._print("L2 fine plans streamed vs unchunked", worst)
+
+    def test_level4_checkpoint(self):
+        cfg = tiny_config(**TC.STAGE_KW)
+        with policy_scope("float32"):
+            m = GroupRegLevelModel(4, cfg, lean_sampler=True, split_group_conv=True).build_model(1)
+        TC.randomize(m, 3, 0.02)
+        loaded = LoadedModel(4, m, integration_grid="fine")
+        self.assertEqual(loaded.knobs["integration_grid"], {"checkpoint": "native", "used": "fine"})
+        x1 = TPR._full_res(_images(2), 2)
+        worst = {}
+        out = self.compare_modes("L4 fine", loaded, x1, (1, TPR.N), ("deform", "affine+deform"), False, worst,
+                                 fields=TPR.FIELD_KEYS + ("v",), keep_ref=True)
+        TPR._print("L4 fine streamed vs unchunked", worst)
+        ref = out["deform"]["ref"]
+        o = m(_pool_to(x1, 4), task="deform", training=False)
+        up = diffeo.upsample_displacement
+        a, ai = diffeo.exp_and_inverse(up(up(o["v"])), cfg.integration_steps)
+        self.check_refs("L4 fine", (("U1", ref["U1"], a), ("U1_inv", ref["U1_inv"], ai),
+                                    ("u_ckpt", ref["u_ckpt"], o["u"]), ("v", ref["v"], o["v"])))
+        self.assertGreater(_max_diff(ref["U1"], up(up(o["u"]))), 1e-5)            # not the native read-out
+
+    def test_tta(self):
+        loaded = _fine_level2()
+        x1 = TPR._full_res(_images(2), 2)
+        chunks = {"l1": 2, "l2": 2, "l4": 2}
+        keys = ("A",) + TPR.FIELD_KEYS + ("v",)
+
+        def run(tta, br):
+            st = RamStore()
+            try:
+                got, summ = TPR._collect(StreamedRunner(loaded, st, chunks=chunks, tta=tta), x1, br, keys)
+                self.assertEqual(st.nbytes(), 0, st.names())
+            finally:
+                st.close()
+            return got, summ
+        base, s0 = run(None, "deform")
+        self.assertEqual(s0["integration_grid"], "fine")
+        self.assertIsNone(s0["tta"])
+        idt, s1 = run(TTA.TTAConfig("flip8", loaded.levels, flips=TTA.IDENTITY_ONLY), "deform")
+        self.assertEqual(sorted(idt), sorted(base))
+        for k in base:
+            np.testing.assert_array_equal(idt[k], base[k], err_msg=k)
+        f8, s8 = run(TTA.TTAConfig("flip8", loaded.levels), "affine+deform")
+        self.assertEqual(sorted(f8), sorted(keys))
+        for k, a in f8.items():
+            self.assertTrue(np.all(np.isfinite(a)), k)
+        self.assertEqual(s8["integration_grid"], "fine")
+        self.assertTrue(s8["tta"]["rows"])
+        self.assertIn("l2/deform", s8["tta"]["nonfinite_flips"])
+        self.assertFalse(any(v for v in s8["tta"]["nonfinite_flips"].values()), s8["tta"]["nonfinite_flips"])
+        self.assertGreater(float(np.abs(f8["U1"]).max()), 1e-3)
+
+    def test_level1_chain_cpu(self):
+        if not tf.config.list_physical_devices("GPU"):
+            self.skipTest("tf_gpu env requires a visible GPU (the level-1 case runs on /CPU:0)")
+        t0 = time.time()
+        worst = {}
+        with tf.device("/CPU:0"):
+            cfg = tiny_config(**dict(TC.STAGE_KW, **TINY_L1))
+            m4 = GroupRegLevelModel(4, cfg).build_model(2)
+            TC.randomize(m4, 3, 0.02)
+            m2 = GroupRegLevelModel(2, cfg).build_model(2)
+            m2.copy_weights_from(m4)
+            TC.randomize(m2, 4, 0.01)
+            chain = cascade.FrozenChain.from_models(m4, m2, integration_grid="current")
+            with policy_scope("float32"):
+                m1 = GroupRegLevelModel(1, cfg, lean_sampler=True, split_group_conv=True).build_model(1)
+            m1.copy_weights_from(chain.model2)
+            TC.randomize(m1, 5, 0.01)
+            loaded = LoadedModel(1, m1, chain, integration_grid="fine")
+            x1 = _images(1, n=2)
+            out = self.compare_modes("L1 fine CPU", loaded, x1, (1,), ("deform",), False, worst,
+                                     fields=("U1", "U1_inv"), keep_ref=True)
+            ref = out["deform"]["ref"]
+            self.assertEqual(out["deform"]["summary"]["integration_grid"], "fine")
+            # Level-1 model input and prior of a streamed run (one chunk) == the training pre-warp.
+            sr = StreamedRunner(loaded, RamStore(), chunks={"l1": 2, "l2": 2, "l4": 2})
+            cap = {}
+            orig = sr._deform_stage
+
+            def spy(lv, eng, n, input_fn, prev_fn, sink):
+                if lv == 1:
+                    cap["x_in"] = np.asarray(input_fn(0, n))
+                    cap["U"] = np.asarray(prev_fn(0, n)[0])
+                return orig(lv, eng, n, input_fn, prev_fn, sink)
+            sr._deform_stage = spy
+            got, _ = TPR._collect(sr, x1, "deform", ("U1", "U1_inv"))
+            sr.store.close()
+            xt = tf.constant(x1)
+            U = chain.deform(xt)["U"]
+            want_x = cascade.prewarp_deform(xt, U)
+            self.check_refs("L1 fine streamed", (("model input", cap["x_in"], want_x), ("prior U", cap["U"], U),
+                                                 ("U1 chunk 2 vs unchunked", got["U1"], ref["U1"]),
+                                                 ("U1_inv chunk 2 vs unchunked", got["U1_inv"], ref["U1_inv"])),
+                            atol=TPR.B_STREAM_FIELD)
+        TPR._print("L1 fine CPU streamed vs unchunked", worst, "; total %.0f s" % (time.time() - t0))
+
+    def save_level2(self, name, cfg=None):
+        cfg = cfg or tiny_config(**TC.STAGE_KW)
+        m4 = GroupRegLevelModel(4, cfg).build_model(2)
+        TC.randomize(m4, 3, 0.02)
+        frozen = cascade.FrozenStage.from_model(m4)
+        m2 = GroupRegLevelModel(2, cfg, lean_sampler=True, split_group_conv=True).build_model(1)
+        m2.copy_weights_from(m4)
+        TC.randomize(m2, 4, 0.01)
+        return save_cascade_run(self.tmp, name, m2, frozen), cfg
+
+    def assert_loaded(self, lm, used, ckpt, frozen=None):
+        self.assertEqual(lm.integration_grid, used)
+        self.assertEqual(lm.knobs["integration_grid"], {"checkpoint": ckpt, "used": used})
+        if frozen is not None:
+            self.assertEqual(lm.frozen.integration_grid, frozen)
+
+    def test_loader_rule(self):
+        prefix, cfg = self.save_level2("l2")
+        self.assert_loaded(LD.load_model(prefix, "deform"), "native", "native", "native")   # no key: native
+        _set_grid(prefix, cascade_value="current")
+        lm = LD.load_model(prefix, "deform")
+        self.assert_loaded(lm, "fine", "current", "current")
+        self.assert_loaded(LD.load_model(prefix, "deform", integration_grid="fine"), "fine", "current", "current")
+        with self.assertLogs(LD.logger, logging.WARNING) as logs:
+            lm_nat = LD.load_model(prefix, "deform", integration_grid="native")
+        self.assertTrue(any("--integration-grid native overrides" in m for m in logs.output), logs.output)
+        self.assert_loaded(lm_nat, "native", "current", "native")
+        # args fallback (no cascade key)
+        _set_grid(prefix, cascade_value=None, args_value="current")
+        self.assert_loaded(LD.load_model(prefix, "affine+deform"), "fine", "current", "current")
+        # invalid values
+        _set_grid(prefix, cascade_value="fine")
+        with self.assertRaisesRegex(LD.LoaderError, "frozen_integration_grid"):
+            LD.load_model(prefix, "deform")
+        _set_grid(prefix, cascade_value="current")
+        for bad in ("current", "Fine", None):
+            with self.assertRaises(LD.LoaderError):
+                LD.load_model(prefix, "deform", integration_grid=bad)
+        # LoadedModel consistency checks
+        with self.assertRaisesRegex(ValueError, "frozen stages"):
+            LoadedModel(2, lm_nat.model, lm_nat.frozen, integration_grid="fine")
+        with self.assertRaisesRegex(ValueError, "frozen stages"):
+            LoadedModel(2, lm.model, lm.frozen)
+        with self.assertRaises(ValueError):
+            LoadedModel(2, lm.model, lm.frozen, integration_grid="current")
+        self.assertEqual(LoadedModel(2, lm_nat.model, lm_nat.frozen).knobs["integration_grid"],
+                         {"checkpoint": "native", "used": "native"})
+        # predict._load passes the flag through.
+        ns = argparse.Namespace(checkpoint=prefix, branches="deform", precision="float32", device="gpu",
+                                integration_grid="auto")
+        self.assert_loaded(PR._load(ns), "fine", "current", "current")
+        ns.integration_grid = "native"
+        with self.assertLogs(LD.logger, logging.WARNING):
+            self.assert_loaded(PR._load(ns), "native", "current", "native")
+        del ns.integration_grid                                     # linear-eval: no flag -> auto
+        self.assert_loaded(PR._load(ns), "fine", "current", "current")
+        # Level 4: auto = native; explicit fine warns (a level-4 run has no frozen grid).
+        prefix4, _ = save_level4_run(self.tmp, "l4", cfg, seed=5)
+        self.assert_loaded(LD.load_model(prefix4, "deform"), "native", "native")
+        with self.assertLogs(LD.logger, logging.WARNING):
+            lm4 = LD.load_model(prefix4, "deform", integration_grid="fine")
+        self.assert_loaded(lm4, "fine", "native")
+        self.assertIsNone(lm4.frozen)
+
+    def test_predict_run_records_knobs(self):
+        prefix, _ = self.save_level2("l2run")
+        _set_grid(prefix, cascade_value="current")
+        proc = os.path.join(self.tmp, "proc")
+        write_subjects(proc, 3, textured=True, seed=2)
+        out = os.path.join(self.tmp, "out")
+        args = CLI.parse_args(["run", "--checkpoint", prefix, "--processed-dir", proc, "--out", out,
+                               "--branches", "deform", "--check-internal", "1"])
+        code = PR.run_predict(args, configure_device=False)
+        with open(os.path.join(out, "predict.json")) as f:
+            rec = json.load(f)
+        self.assertEqual(code, 0, rec.get("message"))
+        self.assertEqual(rec["knobs"]["integration_grid"], {"checkpoint": "current", "used": "fine"})
+        self.assertTrue(rec["internal_check"]["passed"])
+
+    def test_cli_flag(self):
+        ck = os.path.join(self.tmp, "run", "ckpt", "last")
+        os.makedirs(ck)
+        proc = os.path.join(self.tmp, "proc")
+        os.makedirs(proc)
+        common = ["--checkpoint", ck, "--processed-dir", proc]
+        run = ["run"] + common + ["--out", os.path.join(self.tmp, "o")]
+        chk = ["check-streaming"] + common + ["--out", os.path.join(self.tmp, "c.json")]
+        lin = ["linear-eval"] + common + ["--task", "rigid", "--out", os.path.join(self.tmp, "le")]
+        self.assertEqual(CLI.parse_args(run).integration_grid, "auto")
+        self.assertEqual(CLI.parse_args(chk).integration_grid, "auto")
+        for v in LD.INTEGRATION_GRIDS_CLI:
+            self.assertEqual(CLI.parse_args(run + ["--integration-grid", v]).integration_grid, v)
+            self.assertEqual(CLI.parse_args(chk + ["--integration-grid", v]).integration_grid, v)
+        self.assertFalse(hasattr(CLI.parse_args(lin), "integration_grid"))
+        for argv in (run + ["--integration-grid", "current"], lin + ["--integration-grid", "fine"]):
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err), self.assertRaises(SystemExit) as cm:
+                CLI.parse_args(argv)
+            self.assertEqual(cm.exception.code, 2, err.getvalue())
 
 
 if __name__ == "__main__":

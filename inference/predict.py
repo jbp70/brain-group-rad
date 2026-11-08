@@ -473,7 +473,8 @@ def _load(args):
     from inference import loader as LD
     try:
         return LD.load_model(args.checkpoint, args.branches, precision=args.precision,
-                             device=args.device)
+                             device=args.device,
+                             integration_grid=getattr(args, "integration_grid", "auto"))
     except LD.LoaderError as e:
         raise PredictError(CLI.EXIT_INPUT, str(e))
 

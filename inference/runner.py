@@ -45,6 +45,16 @@ level: the next level's input is pre-warped with the averaged result). Linear: `
 calls run. summary['tta'] = None without TTA, else {rows (per image, level, task: the
 `tta.SPREAD_COLUMNS`), gauge {'l<lv>/<task>': [deg, mm]}, nonfinite_flips, timing_s, flips}.
 `UnchunkedRunner` has no TTA.
+
+Fine-grid integration (fine-grid-integration plan D5): with ``loaded.integration_grid == 'fine'``
+both runners run the deform cascade in `_deform_fine` (default and level plans; streamed TTA
+through the same `_deform_stage*` calls); the native methods above are not used. Every run level's
+input is pre-warped with the earlier run levels' SVFs integrated and composed on its own grid
+(`cascade.integrate_frozen_at`, as a --frozen-integration-grid current training); u_ckpt /
+u_inv_ckpt = that prior composed with the checkpoint level's exp(v); U1, U1_inv = ALL run levels'
+SVFs integrated and composed at level 1 (no upsampling of integrated fields). Skipped levels are
+omitted (identity), truncated levels not run. summary['integration_grid'] = 'fine' (native
+summaries have no such key).
 """
 import contextlib
 import logging
@@ -167,6 +177,27 @@ class _Runner(object):
     def _is_default(self):
         """True iff the unchanged default path runs (no plan or the normalised full plan)."""
         return self.plan is None or self.plan.default
+
+    def _fine_grid(self):
+        """True iff the deform cascade runs `_deform_fine` (``loaded.integration_grid == 'fine'``)."""
+        return getattr(self.loaded, "integration_grid", "native") == "fine"
+
+    def _fine_plan(self):
+        """The level plan of `_deform_fine` (None = the full plan)."""
+        return self.plan if self.plan is not None else LVS.plan(self.levels, None)
+
+    def _fine_integrate_fn(self, svf_levels, level):
+        """tf.function (*v) -> (U, U_inv): SVFs of ``svf_levels`` (coarse first, one argument
+        each, in their own level's voxels) integrated and composed on the grid of ``level``
+        (`cascade.integrate_frozen_at`, per image)."""
+        steps = self.loaded.model_cfg.integration_steps
+        svf_levels = tuple(int(lv) for lv in svf_levels)
+
+        def body(*vs):
+            pairs = [(lv, tf.cast(v, tf.float32)) for lv, v in zip(svf_levels, vs)]
+            u, u_inv = CS.integrate_frozen_at(pairs, level, steps)[:2]
+            return u, u_inv
+        return self._fn(("fine_integrate", svf_levels, int(level)), body)
 
     def _plan_dict(self):
         if self.plan is not None:
@@ -528,7 +559,8 @@ class StreamedRunner(_Runner):
             else:
                 def src(i0, i1):
                     return x1[i0:i1]
-            self._deform(n, src, A, sink, summary, phases, free_src=A is not None)
+            deform = self._deform_fine if self._fine_grid() else self._deform
+            deform(n, src, A, sink, summary, phases, free_src=A is not None)
         elif sink is not None:
             for i0, i1 in _bounds(n, self.chunks["l1"]):
                 sink(i0, i1, self._res(A[i0:i1]))
@@ -706,7 +738,8 @@ class StreamedRunner(_Runner):
             else:
                 def src(i0, i1):
                     return x1[i0:i1]
-            self._deform_sel(n, src, A, sink, summary, phases, free_src=A is not None)
+            deform = self._deform_fine if self._fine_grid() else self._deform_sel
+            deform(n, src, A, sink, summary, phases, free_src=A is not None)
         elif sink is not None:
             for i0, i1 in _bounds(n, self.chunks["l1"]):
                 sink(i0, i1, self._res(A[i0:i1]))
@@ -715,6 +748,125 @@ class StreamedRunner(_Runner):
         summary["gpu_peak_mb"] = phases.gpu_peak_mb if phases.gpu else None
         summary["tta"] = self._tta_summary()
         return summary
+
+    # ---------------------------------------------------------------- fine-grid integration (plan D5)
+    # Used only when loaded.integration_grid == 'fine'; the native paths above are not touched.
+    def _fine_prewarp_fn(self, level, svf_levels):
+        """warp(pool(x1), U) at ``level`` with U = the SVFs of ``svf_levels`` integrated and
+        composed at ``level`` (the pre-warp of a --frozen-integration-grid current training)."""
+        lean = self.lean
+        steps = self.loaded.model_cfg.integration_steps
+        svf_levels = tuple(int(lv) for lv in svf_levels)
+
+        def body(x1, *vs):
+            pairs = [(lv, tf.cast(v, tf.float32)) for lv, v in zip(svf_levels, vs)]
+            U = CS.integrate_frozen_at(pairs, level, steps)[0]
+            return diffeo.warp(_pool_to(x1, level), U, lean=lean)
+        return self._fn(("fine_prewarp", int(level), svf_levels), body)
+
+    def _fine_svf_sink(self, n, level, name):
+        """Sink of a non-last level: its centred SVF v (float32) into the store under ``name``."""
+        shape = (int(n),) + tuple(P.LEVEL_SHAPE[level]) + (3,)
+
+        def svf_sink(i0, i1, d):
+            if name not in self.store:
+                self.store.alloc(name, shape, np.float32)
+            self.store.put(name, i0, np.asarray(tf.cast(d["v"], tf.float32).numpy(), np.float32))
+        return svf_sink
+
+    def _fine_level_sink(self, level, A, sink, svf_levels, names):
+        """Last-level sink: U1, U1_inv = every run level's SVF integrated and composed at level 1
+        (d['u'] itself at level 1); u_ckpt, u_inv_ckpt, v, v_raw only when ``level`` is the
+        checkpoint level (the `_level_sink_sel` rule)."""
+        to_l1 = None if level == 1 else self._fine_integrate_fn(tuple(svf_levels) + (level,), 1)
+        ckpt_fields = level == self.level
+
+        def level_sink(i0, i1, d):
+            if sink is None:
+                return
+            if level == 1:
+                U1, U1_inv = d["u"], d["u_inv"]
+            else:
+                U1, U1_inv = to_l1(*([self.store.get(nm, i0, i1) for nm in names] + [d["v"]]))
+            fields = {"U1": U1, "U1_inv": U1_inv}
+            if ckpt_fields:
+                fields.update(u_ckpt=d["u"], u_inv_ckpt=d["u_inv"], v=d["v"], v_raw=d["v_raw"])
+            sink(i0, i1, self._res(None if A is None else A[i0:i1], fields))
+        return level_sink
+
+    def _deform_fine(self, n, src, A, sink, summary, phases, free_src):
+        """Deform cascade with every frozen SVF integrated on the grid of the level that uses it
+        (default plan and level plans, TTA via `_deform_stage_freeing`). Each run level's model
+        input = warp(pool(x), prior at its grid), the prior = the earlier run levels' SVFs
+        integrated and composed there (skipped levels omitted = identity; only skipped levels
+        so far: warp(pool(x), 0) and (0, 0), as the trainer's skip). Non-last levels store their
+        centred SVF ('FG_v<level>'); the last level composes with its prior (u_ckpt) and its
+        sink integrates all run SVFs at level 1 (U1)."""
+        plan = self._fine_plan()
+        svfs = []                                       # (level, store name) of the run levels so far
+        had_skip = False
+        self._deform_masks(n, src, plan.run)
+        for lv in self.levels:
+            kind = plan.kind(lv)
+            if kind == "truncated":
+                break
+            if kind == "skipped":
+                had_skip = True
+                continue
+            eng = self._engine(lv)
+            is_last = lv == plan.last
+            lvls = tuple(k for k, _ in svfs)
+            names = tuple(nm for _, nm in svfs)
+            prev_fn = None
+            if not svfs and not had_skip:
+                pool = self._pool_fn(lv)
+
+                def input_fn(i0, i1, pool=pool):
+                    return pool(src(i0, i1))
+            elif not svfs:
+                prewarp0 = self._prewarp_deform_zero_fn(lv)
+
+                def input_fn(i0, i1, prewarp0=prewarp0):
+                    return prewarp0(src(i0, i1))
+                if is_last:
+                    zeros = self._zero_fields_fn(lv)
+
+                    def prev_fn(i0, i1, zeros=zeros):
+                        return zeros(i1 - i0)
+            else:
+                prewarp = self._fine_prewarp_fn(lv, lvls)
+
+                def input_fn(i0, i1, prewarp=prewarp, names=names):
+                    return prewarp(src(i0, i1), *[self.store.get(nm, i0, i1) for nm in names])
+                if is_last:
+                    prior = self._fine_integrate_fn(lvls, lv)
+
+                    def prev_fn(i0, i1, prior=prior, names=names):
+                        return prior(*[self.store.get(nm, i0, i1) for nm in names])
+            if is_last and free_src and not self._tta_active(lv):
+                inner = input_fn
+
+                def input_fn(i0, i1, inner=inner):     # free the source after the last P0 chunk
+                    x = inner(i0, i1)
+                    if i1 == n:
+                        self.store.free(SRC_AFFINE)
+                    return x
+            if is_last:
+                level_sink = self._fine_level_sink(lv, A, sink, lvls, names)
+            else:
+                name = "FG_v%d" % lv
+                level_sink = self._fine_svf_sink(n, lv, name)
+            with phases("deform:l%d" % lv):
+                self._deform_stage_freeing(lv, eng, n, input_fn, prev_fn, level_sink,
+                                           is_last and free_src)
+            self._record(summary, lv, "deform", eng)
+            if is_last:
+                break
+            svfs.append((lv, name))
+        for _, name in svfs:
+            if name in self.store:
+                self.store.free(name)
+        summary["integration_grid"] = "fine"
 
 
 # ============================================================================ unchunked
@@ -822,15 +974,20 @@ class UnchunkedRunner(_Runner):
                     x, a, P.LEVEL_SPACING[1]), [self._spec(n, 1), tf.TensorSpec((n, 4, 4), tf.float32)])
                 with phases("affine+deform:resample"):
                     src = _sync(fn(x1_t, A))
-            out = self._deform(src, n, phases)
-            del src
-            to_l1 = self._fn(("to_l1", n), lambda u, u_inv: (
-                _up_to_level1(u, self.level), _up_to_level1(u_inv, self.level)))
-            U1, U1_inv = (out["u"], out["u_inv"]) if self.level == 1 else to_l1(out["u"], out["u_inv"])
-            fields = {"U1": U1, "U1_inv": U1_inv, "u_ckpt": out["u"], "u_inv_ckpt": out["u_inv"],
-                      "v": out["v"], "v_raw": out["v_raw"]}
+            if self._fine_grid():
+                fields = self._deform_fine(src, n, phases)
+                del src
+                summary["integration_grid"] = "fine"
+            else:
+                out = self._deform(src, n, phases)
+                del src
+                to_l1 = self._fn(("to_l1", n), lambda u, u_inv: (
+                    _up_to_level1(u, self.level), _up_to_level1(u_inv, self.level)))
+                U1, U1_inv = (out["u"], out["u_inv"]) if self.level == 1 else to_l1(out["u"], out["u_inv"])
+                fields = {"U1": U1, "U1_inv": U1_inv, "u_ckpt": out["u"], "u_inv_ckpt": out["u_inv"],
+                          "v": out["v"], "v_raw": out["v_raw"]}
             summary["stats"]["max_abs_v"]["l%d" % self.level] = float(
-                tf.reduce_max(tf.abs(out["v"])))
+                tf.reduce_max(tf.abs(fields["v"])))
             for lv in self.levels:
                 summary["chunks"]["l%d" % lv][dfm] = [(0, n)]
         if sink is not None:
@@ -966,7 +1123,11 @@ class UnchunkedRunner(_Runner):
                     x, a, P.LEVEL_SPACING[1]), [self._spec(n, 1), tf.TensorSpec((n, 4, 4), tf.float32)])
                 with phases("affine+deform:resample"):
                     src = _sync(fn(x1_t, A))
-            fields = self._deform_sel(src, n, phases)
+            if self._fine_grid():
+                fields = self._deform_fine(src, n, phases)
+                summary["integration_grid"] = "fine"
+            else:
+                fields = self._deform_sel(src, n, phases)
             del src
             if plan.last == self.level:
                 summary["stats"]["max_abs_v"]["l%d" % self.level] = float(
@@ -979,3 +1140,68 @@ class UnchunkedRunner(_Runner):
         summary["timing_s"] = phases.timing
         summary["gpu_peak_mb"] = phases.gpu_peak_mb if phases.gpu else None
         return summary
+
+    # ---------------------------------------------------------------- fine-grid integration (plan D5)
+    # Used only when loaded.integration_grid == 'fine'; the native paths above are not touched.
+    def _deform_fine(self, x1, n, phases):
+        """Fields of the fine-grid deform cascade (default plan and level plans; the dict of
+        `_deform_sel`): the frozen SVFs (`FrozenStage.svf` / `FrozenChain.svfs`, skip4 as the
+        trainer) of the run frozen levels, the prior = their integration at the checkpoint grid
+        (zeros when none ran), the trainable stage on warp(x, prior) composed with it (u_ckpt),
+        U1 = every run level's SVF integrated and composed at level 1."""
+        model, frozen, lv, lean = self.loaded.model, self.loaded.frozen, self.level, self.lean
+        plan = self._fine_plan()
+        none = {"u_ckpt": None, "u_inv_ckpt": None, "v": None, "v_raw": None}
+        if frozen is None:                              # level 4: the full plan only
+            out = self._deform(x1, n, phases)
+            with phases("deform:fine_l1"):
+                U1, U1_inv = _sync(self._fine_integrate_fn((lv,), 1)(out["v"]))
+            return {"U1": U1, "U1_inv": U1_inv, "u_ckpt": out["u"], "u_inv_ckpt": out["u_inv"],
+                    "v": out["v"], "v_raw": out["v_raw"]}
+        x = self._pool(x1, lv, n, phases)
+        spec, fspec = self._spec(n, lv), self._spec(n, lv, 3)
+        chain = lv == 1
+        skip4 = 4 in plan.skipped
+        kept = tuple(k for k in LD.frozen_levels_of(lv) if plan.kind(k) == "run")
+
+        def frozen_body(x):
+            if chain:
+                v = frozen.svfs(x, skip4=tf.constant(True) if skip4 else None)
+            else:
+                v = {4: frozen.svf(x)}
+            return tuple(v[k] for k in kept)
+        vs = ()
+        if kept:
+            f_frozen = self._fn(("deform_fine_frozen", n, plan.selected), frozen_body, [spec])
+            with phases("deform:frozen"):
+                vs = tuple(_sync(f_frozen(x)))
+        if plan.last != lv:                             # truncated: the frozen levels only
+            with phases("deform:fine_l1"):
+                U1, U1_inv = _sync(self._fine_integrate_fn(kept, 1)(*vs))
+            res = {"U1": U1, "U1_inv": U1_inv}
+            res.update(none)
+            return res
+        if kept:
+            with phases("deform:fine_prior"):
+                U, U_inv = _sync(self._fine_integrate_fn(kept, lv)(*vs))
+        else:                                           # every frozen level skipped: identity
+            U = tf.zeros([n] + list(P.LEVEL_SHAPE[lv]) + [3], tf.float32)
+            U_inv = tf.zeros_like(U)
+
+        def body(x, U, U_inv):
+            x_in = diffeo.warp(tf.cast(x, tf.float32), U, lean=lean)
+            out = model(x_in, task="deform", training=False)
+            u, u_inv = diffeo.compose_cascade(U, U_inv, out["u"], out["u_inv"], lean=lean)
+            return {"u": tf.cast(u, tf.float32), "u_inv": tf.cast(u_inv, tf.float32),
+                    "v": tf.cast(out["v"], tf.float32), "v_raw": tf.cast(out["v_raw"], tf.float32)}
+        f_train = self._fn(("deform_fine", n), body, [spec, fspec, fspec])
+        with phases("deform:l%d" % lv):
+            out = _sync(f_train(x, U, U_inv))
+        del U, U_inv
+        if lv == 1:
+            U1, U1_inv = out["u"], out["u_inv"]
+        else:
+            with phases("deform:fine_l1"):
+                U1, U1_inv = _sync(self._fine_integrate_fn(kept + (lv,), 1)(*(vs + (out["v"],))))
+        return {"U1": U1, "U1_inv": U1_inv, "u_ckpt": out["u"], "u_inv_ckpt": out["u_inv"],
+                "v": out["v"], "v_raw": out["v_raw"]}

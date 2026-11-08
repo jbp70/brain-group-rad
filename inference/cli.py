@@ -82,6 +82,11 @@ def _common(p, default_branches, chunk_defaults, branches=True):
                             "processed Mindboggle is; not checked); affine+deform: affine cascade, "
                             "images resampled into the affine space, deform cascade, one composed "
                             "field (%s; default %%(default)s)" % BRANCH_NOTE)
+        p.add_argument("--integration-grid", choices=("auto", "native", "fine"), default="auto",
+                       help="auto = the checkpoint's recorded frozen_integration_grid (native for "
+                            "older runs; current -> fine); fine = frozen SVFs integrated at each "
+                            "level's grid as in a --frozen-integration-grid current training, "
+                            "outputs at 1 mm (default %(default)s)")
     p.add_argument("--levels", type=_levels, default=None, metavar="LEVELS",
                    help="cascade levels to run, coarse to fine, comma-separated (e.g. 4 | 4,2 | 2,1 | "
                         "1; default: all levels of the checkpoint). Levels finer than the last one "

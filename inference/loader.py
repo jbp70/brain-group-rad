@@ -15,6 +15,14 @@ GPU-resident indices); ``knobs.lean_sampler`` records ``{'checkpoint': <value>, 
 
 `unchunked_n_max` / `check_unchunked` (design 3.2 step 4b) bound the group size of the unchunked
 mode by the int32 per-tensor element limit, from the config alone (no model build).
+
+Integration grid (fine-grid-integration plan D5): ``integration_grid`` 'auto' (default) follows the
+checkpoint's recorded frozen_integration_grid (config.json cascade record, else args, else
+'native'): 'native' -> 'native' (every older run, outputs unchanged), 'current' -> 'fine'. An
+explicit 'native' / 'fine' that differs logs a WARNING (an experiment: the cascade was trained the
+other way). 'fine' builds the frozen stages with integration_grid 'current'; the runners then
+integrate every frozen SVF on the grid of the level that uses it and the outputs at 1 mm.
+``knobs.integration_grid`` records {'checkpoint': native | current, 'used': native | fine}.
 """
 import json
 import logging
@@ -28,6 +36,9 @@ logger = logging.getLogger(__name__)
 
 PRECISIONS = ("checkpoint", "float32")
 DEVICES = ("gpu", "cpu")
+INTEGRATION_GRIDS_CLI = ("auto", "native", "fine")      # --integration-grid (plan D5)
+USED_GRIDS = ("native", "fine")
+FROZEN_GRID_OF = {"native": "native", "fine": "current"}   # used grid -> frozen-stage integration_grid
 CASCADE_LEVELS = (4, 2, 1)
 # Runtime knobs read from config.json args, with the defaults of runs that predate them.
 KNOB_DEFAULTS = (("amp", False), ("split_group_conv", False), ("deform_decoder_dtype", "policy"),
@@ -52,13 +63,14 @@ class LoadedModel(object):
 
     Attributes: level, model, frozen (None | cascade.FrozenStage | cascade.FrozenChain),
     model_cfg, knobs (dict), step, prefix, run_dir, config (the config.json dict),
-    training_group_sizes {group_size, deform_group_size}, precision (dict). Tests construct it
-    directly from built models; absent fields default from the model.
+    training_group_sizes {group_size, deform_group_size}, precision (dict), integration_grid
+    ('native' | 'fine'; plan D5, the frozen stages' integration_grid must be 'native' / 'current'
+    to match). Tests construct it directly from built models; absent fields default from the model.
     """
 
     def __init__(self, level, model, frozen=None, model_cfg=None, knobs=None, step=None,
                  prefix=None, run_dir=None, config=None, training_group_sizes=None,
-                 precision=None):
+                 precision=None, integration_grid="native"):
         self.level = P.check_level(level)
         if model.level != self.level:
             raise ValueError("LoadedModel: model is level %d, expected %d" % (model.level, self.level))
@@ -67,6 +79,15 @@ class LoadedModel(object):
         if got != expected:
             raise ValueError("LoadedModel: a level-%d stage needs %d frozen stage(s), got %d"
                              % (self.level, expected, got))
+        if integration_grid not in USED_GRIDS:
+            raise ValueError("LoadedModel: integration_grid must be one of %s, got %r"
+                             % (USED_GRIDS, integration_grid))
+        frozen_grid = None if frozen is None else getattr(frozen, "integration_grid", "native")
+        if frozen_grid is not None and frozen_grid != FROZEN_GRID_OF[integration_grid]:
+            raise ValueError("LoadedModel: integration_grid %r needs frozen stages with integration_grid "
+                             "%r, got %r" % (integration_grid, FROZEN_GRID_OF[integration_grid],
+                                             frozen_grid))
+        self.integration_grid = integration_grid
         self.model = model
         self.frozen = frozen
         self.model_cfg = model_cfg if model_cfg is not None else model.config
@@ -77,7 +98,9 @@ class LoadedModel(object):
                      "fp16_act_clip": float(model.fp16_act_clip),
                      "fp16_act_clip_scope": model.fp16_act_clip_scope,
                      "bn_epsilon_override": float(model.bn_epsilon_override),
-                     "lean_sampler": {"checkpoint": bool(model.lean_sampler), "used": True}}
+                     "lean_sampler": {"checkpoint": bool(model.lean_sampler), "used": True},
+                     "integration_grid": {"checkpoint": frozen_grid or "native",
+                                          "used": integration_grid}}
         self.knobs = knobs
         self.step = step
         self.prefix = prefix
@@ -232,13 +255,33 @@ def _check_fingerprints(level, config, frozen, cfg_path):
                               "fingerprint %s" % (cfg_path, lv, current[lv], s.get("fingerprint")))
 
 
-def load_model(checkpoint_path, branches, precision="checkpoint", device="gpu"):
+def _integration_grid_plan(config, requested, cfg_path):
+    """(checkpoint grid 'native' | 'current', used grid 'native' | 'fine') of plan D5; WARNING when
+    an explicit ``requested`` differs from what 'auto' would use."""
+    from models import cascade as CS
+    args = config.get("args") or {}
+    ckpt = ((config.get("cascade") or {}).get("frozen_integration_grid")
+            or args.get("frozen_integration_grid") or "native")
+    if ckpt not in CS.INTEGRATION_GRIDS:
+        raise LoaderError("%s: frozen_integration_grid %r is not one of %s"
+                          % (cfg_path, ckpt, CS.INTEGRATION_GRIDS))
+    auto = "fine" if ckpt == "current" else "native"
+    if requested == "auto":
+        return ckpt, auto
+    if requested != auto:
+        logger.warning("--integration-grid %s overrides the checkpoint's frozen_integration_grid %s "
+                       "(experiment: the cascade was trained the other way)", requested, ckpt)
+    return ckpt, requested
+
+
+def load_model(checkpoint_path, branches, precision="checkpoint", device="gpu", integration_grid="auto"):
     """Restore a run checkpoint for prediction -> `LoadedModel` (design 3.2 steps 1-9).
 
     checkpoint_path: a checkpoint prefix or a checkpoint directory (its latest checkpoint).
     branches: a ``--branches`` value (rigid, affine, deform, affine+deform).
     precision: 'checkpoint' (the run's policy) or 'float32'. device: 'gpu' or 'cpu' (only the
-    precision rule; device placement is the caller's).
+    precision rule; device placement is the caller's). integration_grid: 'auto' (the
+    checkpoint's recorded frozen_integration_grid), 'native' or 'fine' (module docstring).
     """
     import tensorflow as tf
     from models import cascade as CS
@@ -250,6 +293,9 @@ def load_model(checkpoint_path, branches, precision="checkpoint", device="gpu"):
         raise LoaderError("precision must be one of %s, got %r" % (PRECISIONS, precision))
     if device not in DEVICES:
         raise LoaderError("device must be one of %s, got %r" % (DEVICES, device))
+    if integration_grid not in INTEGRATION_GRIDS_CLI:
+        raise LoaderError("integration_grid must be one of %s, got %r"
+                          % (INTEGRATION_GRIDS_CLI, integration_grid))
     tasks = _tasks_of(branches)
     try:
         prefix = os.path.abspath(C.resolve_checkpoint(checkpoint_path))
@@ -267,6 +313,8 @@ def load_model(checkpoint_path, branches, precision="checkpoint", device="gpu"):
     if level not in CASCADE_LEVELS:
         raise LoaderError("%s: args.level %r is not one of %s" % (cfg_path, level, CASCADE_LEVELS))
     knobs = _knobs(args)
+    ckpt_grid, used_grid = _integration_grid_plan(config, integration_grid, cfg_path)
+    knobs["integration_grid"] = {"checkpoint": ckpt_grid, "used": used_grid}
     if "deform" in tasks and not model_cfg.deform_decoder:
         raise LoaderError("branches %r need a deform decoder, but the model of %s has none "
                           "(model_config.deform_decoder false)" % (branches, cfg_path))
@@ -281,10 +329,11 @@ def load_model(checkpoint_path, branches, precision="checkpoint", device="gpu"):
     except ValueError as e:
         raise LoaderError("%s: cannot build the level-%d model: %s" % (cfg_path, level, e))
     frozen = None
+    frozen_grid = FROZEN_GRID_OF[used_grid]
     if level == 2:
-        frozen = CS.FrozenStage.from_config(model_cfg)
+        frozen = CS.FrozenStage.from_config(model_cfg, integration_grid=frozen_grid)
     elif level == 1:
-        frozen = CS.FrozenChain.from_config(model_cfg)
+        frozen = CS.FrozenChain.from_config(model_cfg, integration_grid=frozen_grid)
     extra = {} if frozen is None else frozen.checkpoint_extra()
     _restore(prefix, model, extra)
     if frozen is not None:
@@ -298,4 +347,4 @@ def load_model(checkpoint_path, branches, precision="checkpoint", device="gpu"):
                 level, prefix, step, prec["trainable"], list(frozen_levels_of(level)))
     return LoadedModel(level, model, frozen, model_cfg=model_cfg, knobs=knobs, step=step,
                        prefix=prefix, run_dir=os.path.dirname(cfg_path), config=config,
-                       training_group_sizes=sizes, precision=prec)
+                       training_group_sizes=sizes, precision=prec, integration_grid=used_grid)
