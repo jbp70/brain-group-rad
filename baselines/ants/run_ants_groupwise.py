@@ -32,6 +32,14 @@ Defaults per type (override with --ants-args, appended last so they win):
     --no-linear deformable for pre-aligned inputs: -r 0 -l 0 (SyN only; 0GenericAffine.mat = identity),
                 results in <out>/deformable_nolinear/
 
+Patient-level mode (--groups-dir, MIRIAD; rigid / affine only): one template construction per group
+file of ``python -m evaluation.groups write-groups``, --parallel-groups patients at a time with
+--cpus / --parallel-groups registrations each. Outputs in the layout of slurm/eval_miriad.sh:
+<out>/ants_<type>/<group>/fields/{matrices.npz, atlas.nii.gz, atlas_seg.nii.gz} (no dense fields;
+evaluate with --matrices), <out>/ants_<type>/groups/, and per group <out>/_ants_work/<type>/<group>/
+(ANTs .mat transforms, logs, ants_check.json, timing, run_info.json = done marker; finished
+groups are skipped, ANTs' images are deleted unless --keep-work). See slurm/ants_miriad.sh.
+
 Timing: <out>/<name>/timing.json and a "TIMING" log line: wall clock of the ANTs template
 construction alone (the number to report), its CPU-hours (wall x CPUs), and our conversion.
 
@@ -200,8 +208,16 @@ def transforms_of(work, ttype, j, name):
     return [aff], ["[%s,1]" % aff], aff, base
 
 
-def convert(ants, subs, work, d, ttype, log_every=10):
-    """Dense fields, moved images/labels, atlas, matrices, checks."""
+def convert(ants, subs, work, d, ttype, log_every=10, dense=True, field_check_n=None, log=log):
+    """Dense fields, moved images/labels, atlas, matrices, checks.
+
+    dense=False (rigid / affine only): no per-subject NIfTIs; matrices.npz + atlas + atlas_seg only,
+    the fields for the atlas are built from the .mat matrices; ANTs' own dense field is still
+    computed for the first ``field_check_n`` subjects (default 1) to check matrix == field."""
+    if not dense and ttype == "deformable":
+        raise ValueError("dense=False needs a linear type (deformable fields have no matrices)")
+    if field_check_n is None:
+        field_check_n = len(subs) if dense else 1
     img0 = nib.load(subs[0]["image"])
     shape, affine = tuple(int(v) for v in img0.shape[:3]), img0.affine
     spacing = np.sqrt((affine[:3, :3] ** 2).sum(0))
@@ -221,33 +237,41 @@ def convert(ants, subs, work, d, ttype, log_every=10):
             p = p.strip("[]").split(",")[0]
             if not os.path.isfile(p):
                 raise FileNotFoundError("missing ANTs output %s" % p)
-        ants.field(s["image"], fwd_t, os.path.join(tmp, "fwd.nii.gz"))
-        ants.field(s["image"], inv_t, os.path.join(tmp, "inv.nii.gz"))
-        fwd_mm = itk_field_to_grid_mm(os.path.join(tmp, "fwd.nii.gz"), shape, affine)
-        inv_mm = itk_field_to_grid_mm(os.path.join(tmp, "inv.nii.gz"), shape, affine)
-        fwd, inv = fwd_mm / spacing.astype(np.float32), inv_mm / spacing.astype(np.float32)
+        M = None
+        if ttype != "deformable":
+            M = Vi @ LPS @ read_itk_affine(aff_path) @ LPS @ V  # voxel: atlas -> subject
+            mats.append(M)
+        ants_field = dense or M is None or j < field_check_n
+        if ants_field:
+            ants.field(s["image"], fwd_t, os.path.join(tmp, "fwd.nii.gz"))
+            ants.field(s["image"], inv_t, os.path.join(tmp, "inv.nii.gz"))
+            fwd_mm = itk_field_to_grid_mm(os.path.join(tmp, "fwd.nii.gz"), shape, affine)
+            inv_mm = itk_field_to_grid_mm(os.path.join(tmp, "inv.nii.gz"), shape, affine)
+            fwd, inv = fwd_mm / spacing.astype(np.float32), inv_mm / spacing.astype(np.float32)
+        else:
+            fwd, inv = F.matrix_field(M, shape), F.matrix_field(np.linalg.inv(M), shape)
         img = np.asarray(im.dataobj, np.float32)
         moved = F.warp(img, fwd, order=1)
         atlas_sum += moved
-        save_nii(fwd_mm, affine, os.path.join(d, s["dir"] + "_fwd.nii.gz"))
-        save_nii(inv_mm, affine, os.path.join(d, s["dir"] + "_inv.nii.gz"))
-        save_nii(moved, affine, os.path.join(d, s["dir"] + "_moved.nii.gz"))
+        if dense:
+            save_nii(fwd_mm, affine, os.path.join(d, s["dir"] + "_fwd.nii.gz"))
+            save_nii(inv_mm, affine, os.path.join(d, s["dir"] + "_inv.nii.gz"))
+            save_nii(moved, affine, os.path.join(d, s["dir"] + "_moved.nii.gz"))
         if s["labels"]:
             lab = np.rint(np.asarray(nib.load(s["labels"]).dataobj, np.float32)).astype(np.int32)
             ml = F.warp(lab, fwd, order=0)
             labs.append(ml)
-            save_nii(ml, affine, os.path.join(d, s["dir"] + "_moved_seg.nii.gz"))
+            if dense:
+                save_nii(ml, affine, os.path.join(d, s["dir"] + "_moved_seg.nii.gz"))
         row = {"subject": s["dir"], "fwd_mean_mm": float(F.norm_mm(fwd, spacing).mean())}
-        if ttype != "deformable":
-            M = Vi @ LPS @ read_itk_affine(aff_path) @ LPS @ V  # voxel: atlas -> subject
-            mats.append(M)
+        if M is not None and ants_field:
             row["matrix_vs_field_max_vox"] = float(np.abs(apply(M, g) - g - fwd.reshape(-1, 3)).max())
         warped = os.path.join(work, "%stemplate0%s%dWarpedToTemplate.nii.gz" % (PREFIX, s["dir"], j))
         if os.path.isfile(warped):
             w = np.asarray(nib.load(warped).dataobj, np.float32)
             m = (w != 0) | (moved != 0)
             row["ncc_vs_ants_warped"] = float(np.corrcoef(w[m], moved[m])[0, 1])
-        if j < 3:
+        if j < 3 and ants_field:
             ident = F.norm_mm(F.compose(fwd, inv), spacing)
             row["inv_consistency_mean_mm"] = float(ident.mean())
         checks["subjects"].append(row)
@@ -266,15 +290,16 @@ def convert(ants, subs, work, d, ttype, log_every=10):
                  note="fwd: atlas -> subject point map (x_subject = M x_atlas), inv = fwd^-1; "
                       "vox = processed-grid voxel coords, world = scanner (RAS) mm of the grid affine")
     tpl = os.path.join(work, PREFIX + "template0.nii.gz")
-    if os.path.isfile(tpl):
+    if os.path.isfile(tpl) and dense:
         shutil.copy(tpl, os.path.join(d, "ants_template0.nii.gz"))
     nccs = [r["ncc_vs_ants_warped"] for r in checks["subjects"] if "ncc_vs_ants_warped" in r]
     checks["min_ncc_vs_ants_warped"] = min(nccs) if nccs else None
     if mats:
-        checks["max_matrix_vs_field_vox"] = max(r["matrix_vs_field_max_vox"] for r in checks["subjects"])
+        checks["max_matrix_vs_field_vox"] = max(r["matrix_vs_field_max_vox"] for r in checks["subjects"]
+                                                if "matrix_vs_field_max_vox" in r)
     ok = (not nccs or min(nccs) > 0.99) and (not mats or checks["max_matrix_vs_field_vox"] < 0.05)
     checks["pass"] = bool(ok)
-    with open(os.path.join(d, "ants_check.json"), "w") as f:
+    with open(os.path.join(d if dense else work, "ants_check.json"), "w") as f:
         json.dump(checks, f, indent=2)
     log("checks: min NCC(our moved, ANTs WarpedToTemplate) %s, matrix vs field %s -> %s" % (
         checks["min_ncc_vs_ants_warped"], checks.get("max_matrix_vs_field_vox"), "PASS" if ok else "FAIL"))
@@ -332,10 +357,111 @@ def run_type(ants, subs, out, ttype, iterations, cpus, extra, skip_template=Fals
     return checks
 
 
+# ------------------------------------------------------------------ patient-level mode
+def list_groups(groups_dir, only=None):
+    names = sorted(f[:-4] for f in os.listdir(groups_dir) if f.endswith(".txt") and not f.startswith("_"))
+    if only:
+        missing = [g for g in only if g not in names]
+        if missing:
+            raise SystemExit("groups not in %s: %s" % (groups_dir, missing))
+        names = [g for g in names if g in only]
+    return names
+
+
+def run_one_group(ants, a, g, ttype, cpus_per_group, extra, info=None):
+    """One patient's template construction + matrices-only conversion. Returns (group, ok, message)."""
+    work = os.path.join(a.out, "_%s_work" % a.method_prefix, ttype, g)
+    d = os.path.join(a.out, "%s_%s" % (a.method_prefix, ttype), g, "fields")
+    marker = os.path.join(work, "run_info.json")
+    try:
+        subs = find_subjects(a.processed_dir, a.label_name, os.path.join(a.groups_dir, g + ".txt"))
+        if len(subs) < 2:
+            raise ValueError("group %s has %d scans" % (g, len(subs)))
+        os.makedirs(d, exist_ok=True)
+        os.makedirs(work, exist_ok=True)
+        t0 = time.time()
+        if not (a.skip_template and os.path.isfile(os.path.join(work, PREFIX + "template0.nii.gz"))):
+            template_construction(ants, subs, work, ttype, a.iterations, cpus_per_group, extra,
+                                  os.path.join(work, "ants_template_construction.log"))
+        t_tpl = time.time() - t0
+        quiet = lambda *_: None  # noqa: E731  (parallel groups: one summary line per group instead)
+        checks = convert(ants, subs, work, d, ttype, dense=False, field_check_n=1, log=quiet)
+        timing = {"template_construction_s": t_tpl, "template_construction_hms": hms(t_tpl),
+                  "template_construction_cpu_h": t_tpl * cpus_per_group / 3600, "cpus": cpus_per_group,
+                  "conversion_s": time.time() - t0 - t_tpl, "n_subjects": len(subs), "iterations": a.iterations}
+        if not a.keep_work:   # keep the transforms (.mat), logs and checks; drop ANTs' images
+            for f in os.listdir(work):
+                p = os.path.join(work, f)
+                if f.endswith((".nii.gz", ".nii")) and (os.path.islink(p) or os.path.isfile(p)):
+                    os.remove(p)
+        if not checks["pass"]:
+            return g, False, "checks FAILED (see %s/ants_check.json)" % work
+        meta = dict(info or {})
+        meta.update(group=g, type=ttype, subjects=[s["dir"] for s in subs], iterations=a.iterations,
+                    ants_args=["-r", "1"] + PRESETS[ttype] + list(extra), timing=timing, checks=checks,
+                    dense_fields=False, convention="matrices.npz (python -m evaluation run --matrices)")
+        with open(marker, "w") as f:
+            json.dump(meta, f, indent=2)
+        return g, True, "%d scans, template construction %s, min NCC vs ANTs %.4f, matrix vs field %.1e vox" % (
+            len(subs), hms(t_tpl), checks["min_ncc_vs_ants_warped"] or float("nan"),
+            checks.get("max_matrix_vs_field_vox", float("nan")))
+    except Exception as e:  # one failing patient must not stop the others
+        import traceback
+        with open(os.path.join(work, "error.txt") if os.path.isdir(work) else os.devnull, "w") as f:
+            f.write(traceback.format_exc())
+        return g, False, "%s: %s" % (type(e).__name__, e)
+
+
+def run_groups(ants, a, ttype, info=None):
+    """Patient-level mode (MIRIAD): one ANTs template construction per group file, ``a.parallel_groups``
+    patients at a time, each with ``a.cpus // a.parallel_groups`` parallel registrations. Layout of
+    slurm/eval_miriad.sh: <out>/<prefix>_<type>/<group>/fields/{matrices.npz, atlas.nii.gz,
+    atlas_seg.nii.gz}, <out>/<prefix>_<type>/groups/ (copy of the group files); ANTs transforms, logs,
+    ants_check.json and run_info.json (= done marker; finished groups are skipped) in
+    <out>/_<prefix>_work/<type>/<group>/. Returns the exit status (0 ok, 1 some group failed)."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    if ttype == "deformable":
+        raise SystemExit("--groups-dir supports rigid and affine only")
+    groups = list_groups(a.groups_dir, a.groups)
+    if not groups:
+        log("no group files in %s" % a.groups_dir)
+        return 2
+    gd = os.path.join(a.out, "%s_%s" % (a.method_prefix, ttype), "groups")
+    os.makedirs(gd, exist_ok=True)
+    for f in os.listdir(a.groups_dir):
+        if f.endswith(".txt") or f == "groups.csv":
+            shutil.copyfile(os.path.join(a.groups_dir, f), os.path.join(gd, f))
+    todo = [g for g in groups if not os.path.isfile(
+        os.path.join(a.out, "_%s_work" % a.method_prefix, ttype, g, "run_info.json"))]
+    par = max(1, min(int(a.parallel_groups), len(todo) or 1))
+    per = max(1, int(a.cpus) // par)
+    log("%s: %d groups, %d already done, %d to run: %d at a time x %d parallel registrations" % (
+        ttype, len(groups), len(groups) - len(todo), len(todo), par, per))
+    extra = a.ants_args.split()
+    if todo:   # fill the shared identity-grid cache before the worker threads start (it is not locked)
+        first = find_subjects(a.processed_dir, a.label_name, os.path.join(a.groups_dir, todo[0] + ".txt"))[0]
+        F.identity_grid(nib.load(first["image"]).shape[:3])
+    t0 = time.time()
+    failed, done = [], 0
+    with ThreadPoolExecutor(max_workers=par) as ex:
+        futures = [ex.submit(run_one_group, ants, a, gg, ttype, per, extra, info) for gg in todo]
+        for fut in as_completed(futures):
+            g, ok, msg = fut.result()
+            done += 1
+            log("[%d/%d, %s] %s %s: %s" % (done, len(todo), hms(time.time() - t0), g, "OK" if ok else "FAILED", msg))
+            if not ok:
+                failed.append(g)
+    log("groups: %d done, %d already done, %d failed (of %d)%s; wall %s" % (
+        len(todo) - len(failed), len(groups) - len(todo), len(failed), len(groups),
+        (": " + " ".join(failed)) if failed else "", hms(time.time() - t0)))
+    return 1 if failed else 0
+
+
 # ------------------------------------------------------------------ self-test
-def self_test(ants, keep=False):
+def self_test(ants, keep=False, linear_only=False):
     """ANTs conversions on synthetic data: a known affine through antsApplyTransforms, then small
-    real affine and SyN template constructions (4 subjects, 40x48x36 voxels)."""
+    real affine and SyN template constructions (4 subjects, 40x48x36 voxels), then the patient-level
+    mode (two groups of two, matrices only). linear_only: skip the SyN parts (MIRIAD job)."""
     rng = np.random.RandomState(0)
     ok = True
 
@@ -390,7 +516,7 @@ def self_test(ants, keep=False):
     out = os.path.join(tmp, "out")
     small = {"affine": ["-q", "100x50x20", "-f", "4x2x1", "-s", "2x1x0vox"],
              "deformable": ["-q", "20x10x5", "-f", "4x2x1", "-s", "2x1x0vox"]}
-    for ttype in ("affine", "deformable"):
+    for ttype in (("affine",) if linear_only else ("affine", "deformable")):
         t = time.time()
         c = run_type(ants, subs, out, ttype, 2, 2, small[ttype])
         d = os.path.join(out, ttype)
@@ -422,16 +548,64 @@ def self_test(ants, keep=False):
         check("%s: timing.json written" % ttype, os.path.isfile(os.path.join(d, "timing.json")), "")
 
     # 3. deformable without rigid / affine stages (-r 0 -l 0): affine files must be identity
-    t = time.time()
-    c = run_type(ants, subs, out, "deformable", 2, 2, small["deformable"], no_linear=True,
-                 name="deformable_nolinear")
-    w = os.path.join(out, "deformable_nolinear", "work")
-    dev = max(np.abs(read_itk_affine(transforms_of(w, "deformable", j, s["dir"])[2]) - np.eye(4)).max()
-              for j, s in enumerate(subs))
-    check("deformable no-linear: ran + converted (%.0f s)" % (time.time() - t), len(c["subjects"]) == 4, "")
-    check("deformable no-linear: every 0GenericAffine.mat is identity", dev < 1e-6, "%.1e" % dev)
-    check("deformable no-linear: our moved == ANTs WarpedToTemplate (min NCC)",
-          (c["min_ncc_vs_ants_warped"] or 0) > 0.995, c["min_ncc_vs_ants_warped"])
+    if not linear_only:
+        t = time.time()
+        c = run_type(ants, subs, out, "deformable", 2, 2, small["deformable"], no_linear=True,
+                     name="deformable_nolinear")
+        w = os.path.join(out, "deformable_nolinear", "work")
+        dev = max(np.abs(read_itk_affine(transforms_of(w, "deformable", j, s["dir"])[2]) - np.eye(4)).max()
+                  for j, s in enumerate(subs))
+        check("deformable no-linear: ran + converted (%.0f s)" % (time.time() - t), len(c["subjects"]) == 4, "")
+        check("deformable no-linear: every 0GenericAffine.mat is identity", dev < 1e-6, "%.1e" % dev)
+        check("deformable no-linear: our moved == ANTs WarpedToTemplate (min NCC)",
+              (c["min_ncc_vs_ants_warped"] or 0) > 0.995, c["min_ncc_vs_ants_warped"])
+
+    # 4. patient-level mode: two groups of two subjects, two at a time, matrices only
+    import types
+    gdir = os.path.join(tmp, "groups")
+    os.makedirs(gdir)
+    for g, members in (("PA", ["S0_T1w", "S1_T1w"]), ("PB", ["S2_T1w", "S3_T1w"])):
+        with open(os.path.join(gdir, g + ".txt"), "w") as f:
+            f.write("\n".join(members) + "\n")
+    gout = os.path.join(tmp, "groups_out")
+    for ttype in ("rigid", "affine"):
+        ga = types.SimpleNamespace(groups_dir=gdir, groups=None, out=gout, method_prefix="ants",
+                                   processed_dir=proc, label_name="dkt31aseg", iterations=2, cpus=2,
+                                   parallel_groups=2, ants_args=" ".join(small["affine"]), skip_template=False,
+                                   keep_work=False)
+        t = time.time()
+        rc = run_groups(ants, ga, ttype)
+        fd = os.path.join(gout, "ants_" + ttype, "PA", "fields")
+        have = sorted(os.listdir(fd)) if os.path.isdir(fd) else []
+        check("groups %s: rc 0, fields/ = matrices.npz + atlas + atlas_seg (%.0f s)" % (ttype, time.time() - t),
+              rc == 0 and have == ["atlas.nii.gz", "atlas_seg.nii.gz", "matrices.npz"], have)
+        wk = os.path.join(gout, "_ants_work", ttype, "PA")
+        ri = json.load(open(os.path.join(wk, "run_info.json")))
+        check("groups %s: checks pass (NCC vs ANTs %.4f, matrix vs field %.1e)" % (
+            ttype, ri["checks"]["min_ncc_vs_ants_warped"], ri["checks"]["max_matrix_vs_field_vox"]),
+            ri["checks"]["pass"], "")
+        check("groups %s: work folder keeps transforms, no images" % ttype,
+              not [f for f in os.listdir(wk) if f.endswith(".nii.gz")]
+              and any(f.endswith("0GenericAffine.mat") for f in os.listdir(wk)), "")
+        mats = F.load_matrices(os.path.join(fd, "matrices.npz"))
+        if ttype == "rigid":
+            r = mats["S0_T1w"][0][:3, :3]
+            check("groups rigid: matrices are rotations", abs(np.linalg.det(r) - 1) < 1e-4, "%.6f" % np.linalg.det(r))
+        else:   # S0 moved into S1's space via the template matches S1 (true maps are affine)
+            src = F.FieldSource(None, None, F.Convention(), shape, (1.0, 1.0, 1.0),
+                                matrices=os.path.join(fd, "matrices.npz"))
+            u = F.compose(src.get("inv", {"subject": "S1", "dir": "S1_T1w"}),
+                          src.get("fwd", {"subject": "S0", "dir": "S0_T1w"}))
+            i0 = np.asarray(nib.load(subs[0]["image"]).dataobj, np.float32)
+            i1 = np.asarray(nib.load(subs[1]["image"]).dataobj, np.float32)
+            pw = F.warp(i0, u, 1)
+            m = (i1 > 0.2 * i1.max()) & (pw > 0)
+            ncc = float(np.corrcoef(pw[m], i1[m])[0, 1])
+            check("groups affine: pair S0 -> S1 via matrices NCC", ncc > 0.97, round(ncc, 4))
+        mtime = os.path.getmtime(os.path.join(wk, "run_info.json"))
+        rc2 = run_groups(ants, ga, ttype)
+        check("groups %s: rerun skips finished groups" % ttype,
+              rc2 == 0 and os.path.getmtime(os.path.join(wk, "run_info.json")) == mtime, rc2)
     log("self-test files: %s" % tmp)
     if not keep and ok:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -444,6 +618,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--self-test", action="store_true", help="synthetic checks (needs ANTs, ~5-15 min)")
     ap.add_argument("--keep-self-test", action="store_true")
+    ap.add_argument("--self-test-linear-only", action="store_true",
+                    help="with --self-test: skip the SyN parts (rigid / affine and patient-level mode only)")
     ap.add_argument("--type", choices=("rigid", "affine", "deformable"))
     ap.add_argument("--processed-dir", help="<subject>_T1w/image.nii.gz folders on one common grid")
     ap.add_argument("--label-name", default="dkt31aseg", help="labels_<name>.nii.gz (optional)")
@@ -457,6 +633,17 @@ def main():
     ap.add_argument("--ants-args", default="", help="extra template-construction flags, appended last")
     ap.add_argument("--skip-template", action="store_true",
                     help="reuse the transforms in <out>/<type>/work (only redo the conversion)")
+    ap.add_argument("--groups-dir", default=None,
+                    help="patient-level mode (MIRIAD, rigid / affine): one template construction per <group>.txt "
+                         "(python -m evaluation.groups write-groups); matrices-only outputs, see run_groups")
+    ap.add_argument("--groups", nargs="+", default=None, help="with --groups-dir: only these groups")
+    ap.add_argument("--method-prefix", default="ants", help="with --groups-dir (default %(default)s)")
+    ap.add_argument("--parallel-groups", type=int, default=2,
+                    help="with --groups-dir: patients run at the same time; each gets --cpus / this many "
+                         "parallel registrations (default %(default)s)")
+    ap.add_argument("--keep-work", action="store_true",
+                    help="with --groups-dir: keep ANTs' images in the work folders (default: keep only "
+                         "transforms, logs and checks)")
     ap.add_argument("--no-linear", action="store_true",
                     help="deformable only: skip all rigid / affine alignment (-r 0 -l 0), for inputs that "
                          "are already affinely aligned (e.g. processed Mindboggle); results in "
@@ -465,10 +652,15 @@ def main():
 
     ants = Ants(a.ants_path, threads=1)
     if a.self_test:
-        sys.exit(0 if self_test(ants, a.keep_self_test) else 1)
+        sys.exit(0 if self_test(ants, a.keep_self_test, a.self_test_linear_only) else 1)
     for k in ("type", "processed_dir", "out"):
         if not getattr(a, k):
             ap.error("--%s is required" % k.replace("_", "-"))
+    if a.groups_dir:
+        if a.type == "deformable" or a.no_linear:
+            ap.error("--groups-dir supports --type rigid / affine only")
+        sys.exit(run_groups(ants, a, a.type, {"processed_dir": os.path.abspath(a.processed_dir),
+                                              "ants_path": ants.path}))
     subs = find_subjects(a.processed_dir, a.label_name, a.subjects_file)
     if a.max_subjects:
         subs = subs[:a.max_subjects]
