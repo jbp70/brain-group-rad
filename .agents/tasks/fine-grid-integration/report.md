@@ -117,3 +117,13 @@ cannot resolve, which made the git-dependent tests (test_predict TestGitCommit, 
 TestCascadeRuns dry run) fail inside the worktree only. The pointer (untracked, worktree-local)
 now uses the relative form `gitdir: ../../.git/worktrees/fine-grid-integration`, which Windows git
 and WSL git both resolve; both test classes pass in the full run above.
+
+## Rebase and merge (2026-11-08)
+Branch `fine-grid-integration` rebased onto local main `cfd906b` without conflicts (main had added
+only the SynthMorph/ANTs MIRIAD wrappers: baselines/, slurm/{ants,synthmorph}_miriad.sh,
+tests/test_miriad_eval.py; no overlap with this branch). The full suite above ran on the
+pre-rebase commits and was not rerun after the rebase. Rebased hashes: FEAT-001 `3345ff4`,
+FEAT-002 `dead90b`, FEAT-003 `8c727f7`, report `bcce444`, workflow artifacts `d5140b7`.
+`git -C <main checkout> merge --ff-only fine-grid-integration` succeeded (Fast-forward
+cfd906b..d5140b7). This report update is a separate commit on top, fast-forwarded to main as
+well. Not pushed. Worktree and branch kept.
