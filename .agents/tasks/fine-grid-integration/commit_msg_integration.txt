@@ -1,0 +1,13 @@
+docs: fine-grid integration report: commits + full-suite results
+
+Integration verification on 289be0d (no code change needed):
+- ran: wsl -d Ubuntu bash .worktrees/fine-grid-integration/tests/run_tests_wsl.sh
+  -> suite status: 0; py3.8 syntax OK (130 files), TF-free 226 tests OK;
+  unittest 1048 tests (5 skipped), 0 failing invocations, wall time 28145 s.
+- goldens: test_predict_tta_golden 70 hashes, 0 differ; test_trainer
+  TestDeformUnchanged / TestLinearOnlyUnchanged max |diff| 0.
+- seams checked: config.json cascade.frozen_integration_grid (L1 via
+  upstream_cascade) read by inference loader and eval_run; all frozen
+  factories pass the grid.
+- worktree-local (untracked) .git pointer made relative so WSL git resolves
+  it; git-dependent tests now pass in the worktree.

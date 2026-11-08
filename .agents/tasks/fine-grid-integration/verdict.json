@@ -1,0 +1,30 @@
+{
+  "verdict": "APPROVED",
+  "findings": [
+    {
+      "severity": "NIT",
+      "file": "inference/runner.py",
+      "detail": "Streamed fine path integrates the same prior SVFs up to three times per chunk: _fine_prewarp_fn (input), the last level's prev_fn, and, for checkpoints above level 1, _fine_level_sink (to_l1). Under TTA flip8 input_fn runs once per flip, so the pre-warp integration repeats 8x per chunk. Run time only; outputs are correct.",
+      "fix": "Compute the per-chunk prior (U, U_inv) once (store it, or return it with the pre-warp) and reuse it for prev_fn and across TTA flips."
+    },
+    {
+      "severity": "NIT",
+      "file": "models/cascade.py",
+      "detail": "integrate_frozen_at / exp_compose_upsampled are always called with lean=False, from FrozenStage/FrozenChain and from the runner's _fine_integrate_fn / _fine_prewarp_fn, even though the runner has self.lean and level-1 training uses --lean-sampler. This makes the per-image 1 mm transient that fgi_memory.sh measures larger than it needs to be.",
+      "fix": "If the L1 current config is tight in fgi_memory.sh, pass the model's lean_sampler setting through to exp_compose_upsampled."
+    },
+    {
+      "severity": "NIT",
+      "file": "inference/predict.py",
+      "detail": "check-streaming does not record which integration grid it validated: predict.json gets knobs.integration_grid, but the check-streaming JSON only stores checkpoint prefix/step.",
+      "fix": "Add rec['integration_grid'] = loaded.knobs['integration_grid'] in the check-streaming record."
+    },
+    {
+      "severity": "NIT",
+      "file": "inference/runner.py",
+      "detail": "The host-store estimate (estimate_store_gb) does not count the fine path's FG_v4 / FG_v2 SVF stores (about 1.2 GB at an L1 checkpoint with N 101), so the RAM-vs-disk store choice can be slightly optimistic.",
+      "fix": "Add the SVF stores to the estimate when integration_grid is fine, or note the omission."
+    }
+  ],
+  "summary": "The whole diff (FEAT-001..003) matches the request and plan D1-D9. Native branches are verbatim with goldens at 0 diff, runtime/run.py is unchanged and no script default changed. The 'current' math is consistent across train steps, skips, validation (frozen / frozen4), BN recal and eval_run. The chain rule is recorded in config.json and enforced on fresh L1 runs and on resume. Inference auto/native/fine covers streamed, unchunked, --levels, TTA and affine+deform. fgi_memory.sh follows the policy and was not submitted. Only 4 NITs (duplicated integrations, non-lean sampler, check-streaming record, store estimate)."
+}

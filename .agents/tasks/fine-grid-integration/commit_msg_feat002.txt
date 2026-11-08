@@ -1,0 +1,26 @@
+fine-grid integration: predict.py --integration-grid (streamed, unchunked, levels, TTA)
+
+Plan D5 / item 4 (FEAT-002). load_model(..., integration_grid='auto'|'native'|'fine'):
+auto follows the checkpoint's frozen_integration_grid (cascade record, else args, else native;
+current -> fine), an explicit value that differs logs a WARNING; frozen stages are built with
+integration_grid 'current' for fine; knobs.integration_grid = {checkpoint, used}. LoadedModel
+gains integration_grid='native' with a frozen-grid consistency check. CLI --integration-grid on
+run and check-streaming only (not linear-eval); predict._load passes it.
+
+Runners: new StreamedRunner._deform_fine / UnchunkedRunner._deform_fine (default plan, --levels
+plans with skipped / truncated levels, level-4 checkpoints, affine+deform, streamed TTA via
+_deform_stage_freeing). Each run level's input = warp(pool(x), earlier run SVFs integrated and
+composed at its grid); u_ckpt = prior o exp(v); U1 = all run SVFs integrated at level 1.
+run()/_run_sel() dispatch on loaded.integration_grid; native _deform, _deform_sel, _level_sink,
+_level_sink_sel and the unchunked counterparts are unchanged.
+
+Verification (WSL tf_gpu, BGR_TF_GPU_LIMIT_MB=6000):
+  tests.test_fine_grid_integration 22 OK (2059 s; new TestInferenceFine 8 tests)
+  tests.test_predict_tta_golden 1 OK (70 hashes compared, 0 differ)
+  tests.test_predict_loader 6 OK, tests.test_predict_streaming 16 OK,
+  tests.test_predict_runner 7 OK, tests.test_predict_levels_runner 4 OK, tests.test_predict_tta 17 OK
+  tests.test_predict 37 run, 1 failure: TestGitCommit.test_real_repository (environment only:
+    the worktree's .git file holds a Windows gitdir path that WSL git cannot resolve; git_commit
+    not touched by this change)
+WSL bgr_preproc38 (py3.8.20): tests.test_predict_levels tests.test_predict_store 27 OK;
+  py_compile inference/*.py predict.py tests/test_fine_grid_integration.py OK.

@@ -1,0 +1,7 @@
+{
+  "task_id": "task-fine-grid-integration",
+  "task_description": "Optional, default-off fine-grid integration of frozen cascade stages, consistent between training (levels 2 and 1, --frozen-integration-grid native|current, chain rule via --cascade-from) and inference (predict.py --integration-grid auto|native|fine, streamed + unchunked, --levels, TTA, affine+deform), plus a real-trainer memory sbatch script and env knobs. Plan and design decisions: d:\\Research\\Brain_Registration_Projects\\brain-group-rad\\.worktrees\\fine-grid-integration\\.agents\\tasks\\fine-grid-integration\\plan.md",
+  "status": "pending",
+  "feature_order": ["FEAT-001", "FEAT-002", "FEAT-003"],
+  "blocked_reason": null
+}
