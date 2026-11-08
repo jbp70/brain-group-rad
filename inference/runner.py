@@ -192,10 +192,11 @@ class _Runner(object):
         (`cascade.integrate_frozen_at`, per image)."""
         steps = self.loaded.model_cfg.integration_steps
         svf_levels = tuple(int(lv) for lv in svf_levels)
+        lean = self.lean
 
         def body(*vs):
             pairs = [(lv, tf.cast(v, tf.float32)) for lv, v in zip(svf_levels, vs)]
-            u, u_inv = CS.integrate_frozen_at(pairs, level, steps)[:2]
+            u, u_inv = CS.integrate_frozen_at(pairs, level, steps, lean=lean)[:2]
             return u, u_inv
         return self._fn(("fine_integrate", svf_levels, int(level)), body)
 
@@ -760,7 +761,7 @@ class StreamedRunner(_Runner):
 
         def body(x1, *vs):
             pairs = [(lv, tf.cast(v, tf.float32)) for lv, v in zip(svf_levels, vs)]
-            U = CS.integrate_frozen_at(pairs, level, steps)[0]
+            U = CS.integrate_frozen_at(pairs, level, steps, lean=lean)[0]
             return diffeo.warp(_pool_to(x1, level), U, lean=lean)
         return self._fn(("fine_prewarp", int(level), svf_levels), body)
 

@@ -143,6 +143,16 @@ class TestExpComposeUpsampled(unittest.TestCase):
         np.testing.assert_array_equal(one[0].numpy(), one[2].numpy())
         np.testing.assert_array_equal(one[1].numpy(), one[3].numpy())
 
+    def test_lean_sampler_same_values(self):
+        """Review NIT 2: the frozen-stage / inference fine paths pass lean=True; the lean forward
+        is the default trilinear forward, so the fields agree (eager: bitwise)."""
+        self.assertTrue(cascade.FROZEN_FINE_LEAN)
+        ref = cascade.integrate_frozen_at([(4, self.v_coarse), (2, self.v_mid)], 1, T_STEPS, return_first=True)
+        got = cascade.integrate_frozen_at([(4, self.v_coarse), (2, self.v_mid)], 1, T_STEPS, return_first=True,
+                                          lean=True)
+        for g, w in zip(got, ref):
+            np.testing.assert_allclose(g.numpy(), w.numpy(), rtol=0, atol=1e-6)
+
     def test_errors(self):
         with self.assertRaises(ValueError):
             diffeo.exp_compose_upsampled([self.v_mid, self.v_mid], [1, 2], T_STEPS)      # shapes differ

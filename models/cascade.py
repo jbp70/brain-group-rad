@@ -43,13 +43,15 @@ def _check_grid(value):
     return value
 
 
-def integrate_frozen_at(svfs, level, steps, return_first=False):
+def integrate_frozen_at(svfs, level, steps, return_first=False, lean=False):
     """Frozen SVFs integrated and composed on the grid of `level` (fine-grid-integration D3).
 
     ``svfs``: list of (level_k, v_k), coarse first, v_k in level_k voxels (level_k >= `level`, a
     power-of-two multiple); each is upsampled log2(level_k / level) times. Returns
     `diffeo.exp_compose_upsampled` (u, u_inv) [+ (u_0, u_0_inv) with ``return_first``]. An empty
-    list is not supported (ValueError): callers handle "nothing to compose"."""
+    list is not supported (ValueError): callers handle "nothing to compose". ``lean``: the lean
+    trilinear sampler (bitwise the same forward values, no corner tensors kept for a backward);
+    the frozen-stage callers pass `FROZEN_FINE_LEAN`."""
     level = int(level)
     vs, ups = [], []
     for lv, v in svfs:
@@ -62,7 +64,14 @@ def integrate_frozen_at(svfs, level, steps, return_first=False):
         ups.append(ratio.bit_length() - 1)
     if not vs:
         raise ValueError("integrate_frozen_at needs at least one SVF")
-    return diffeo.exp_compose_upsampled(vs, ups, steps, return_first=return_first)
+    return diffeo.exp_compose_upsampled(vs, ups, steps, lean=lean, return_first=return_first)
+
+
+# The frozen-stage 'current' integrations run forward-only (outside the tape, stop_gradient), so
+# they always use the lean sampler: bitwise the same values as the default sampler
+# (`layers._lean_linear_forward`), without corner tensors kept for a backward (fine-grid
+# integration review NIT 2).
+FROZEN_FINE_LEAN = True
 
 
 def pool_to_coarser(images):
@@ -172,7 +181,8 @@ class FrozenStage:
         if self._integration_grid == "native":
             return {k: tf.stop_gradient(up(out[s])) for k, s in (("U", "u"), ("U_inv", "u_inv"), ("V", "v"))}
         v = out["v"]
-        U, U_inv = integrate_frozen_at([(FROZEN_LEVEL, v)], CHAIN_LEVEL, self.model.config.integration_steps)
+        U, U_inv = integrate_frozen_at([(FROZEN_LEVEL, v)], CHAIN_LEVEL, self.model.config.integration_steps,
+                                       lean=FROZEN_FINE_LEAN)
         return {"U": tf.stop_gradient(U), "U_inv": tf.stop_gradient(U_inv), "V": tf.stop_gradient(up(v))}
 
 
@@ -331,7 +341,7 @@ class FrozenChain:
             v4 = self.stage4.svf(x2)
             if skip4 is not None:
                 v4 = skip_fields(skip4, [v4])[0]
-            U4 = integrate_frozen_at([(FROZEN_LEVEL, v4)], CHAIN_LEVEL, self._steps)[0]
+            U4 = integrate_frozen_at([(FROZEN_LEVEL, v4)], CHAIN_LEVEL, self._steps, lean=FROZEN_FINE_LEAN)[0]
         else:
             out4 = self.stage4.model(pool_to_coarser(x2), task=DEFORM_TASK, training=False)
             v4, U4 = out4["v"], diffeo.upsample_displacement(out4["u"])
@@ -343,7 +353,7 @@ class FrozenChain:
     def _deform_current(self, images_l1, return_first=False):
         v = self.svfs(images_l1)
         res = integrate_frozen_at([(FROZEN_LEVEL, v[FROZEN_LEVEL]), (CHAIN_LEVEL, v[CHAIN_LEVEL])], 1,
-                                  self._steps, return_first=return_first)
+                                  self._steps, return_first=return_first, lean=FROZEN_FINE_LEAN)
         up = diffeo.upsample_displacement
         out = {"U": tf.stop_gradient(res[0]), "U_inv": tf.stop_gradient(res[1]),
                "V": tf.stop_gradient(up(v[CHAIN_LEVEL]))}
@@ -395,7 +405,8 @@ class FrozenChain:
             v2 = v[CHAIN_LEVEL]
             if skip2 is not None:
                 v2 = skip_fields(skip2, [v2])[0]
-            U, Ui = integrate_frozen_at([(FROZEN_LEVEL, v[FROZEN_LEVEL]), (CHAIN_LEVEL, v2)], 1, self._steps)
+            U, Ui = integrate_frozen_at([(FROZEN_LEVEL, v[FROZEN_LEVEL]), (CHAIN_LEVEL, v2)], 1, self._steps,
+                                        lean=FROZEN_FINE_LEAN)
             return {"U": tf.stop_gradient(U), "U_inv": tf.stop_gradient(Ui)}
         x2 = pool_to_coarser(images_l1)
         p4 = self.stage4.deform(x2)                       # level-4 fields upsampled to level 2
