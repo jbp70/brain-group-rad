@@ -98,6 +98,22 @@ VAL_EVERY, BN_RECAL_BATCHES, CONFIG_TIMEOUT (3600), ONLY. Output `$PROJ/scratch/
 | Feature | Commit | Tests |
 |---|---|---|
 | FEAT-001 training path | e7c0851 | test_fine_grid_integration 14 OK, test_cascade 52, test_main 44, test_trainer 74 (goldens 0 diff) |
-| FEAT-002 inference | 90c3d41 | test_fine_grid_integration 22 OK, test_predict* OK (TTA golden 0 diff); test_predict TestGitCommit fails only in the worktree (WSL git cannot read the worktree .git file) |
-| FEAT-003 scripts + docs | (this commit, see git log) | test_slurm_scripts (see FEAT-003 findings) |
-| Full suite | TODO (integration step) | TODO: `tests/run_tests_wsl.sh` -> `suite status: ...` |
+| FEAT-002 inference | 90c3d41 | test_fine_grid_integration 22 OK, test_predict* OK (TTA golden 0 diff) |
+| FEAT-003 scripts + docs | 289be0d | test_slurm_scripts 77 OK |
+| Full suite (integration, on 289be0d) | no code change needed | `tests/run_tests_wsl.sh` in the worktree: `suite status: 0`; py3.8 syntax check OK (130 files), TF-free tests 226 OK; unittest 1048 tests (5 skipped), 0 failing invocations, wall time 28145 s (7 h 49 min) |
+
+Goldens in the full run: `tests.test_predict_tta_golden` 70 hashes compared, 0 differ (fixture
+commit 19b8a60); `tests.test_trainer` TestDeformUnchanged max |diff| 0 and TestLinearOnlyUnchanged
+max |diff| 0 (tolerance 0). New module `tests.test_fine_grid_integration` 22 OK.
+
+Integration check of the seams between the features: the training record
+(`config.json cascade.frozen_integration_grid`, level 1 via the level-2 source's
+`upstream_cascade`) is what `inference/loader.py` (`auto`) and `runtime/eval_run.py` read; every
+`FrozenStage` / `FrozenChain` factory call in main.py, eval_run.py and the loader passes the grid.
+No seam fix was needed.
+
+Worktree note: the worktree's `.git` pointer held a Windows path (`D:/...`) that WSL git 2.25
+cannot resolve, which made the git-dependent tests (test_predict TestGitCommit, test_slurm_scripts
+TestCascadeRuns dry run) fail inside the worktree only. The pointer (untracked, worktree-local)
+now uses the relative form `gitdir: ../../.git/worktrees/fine-grid-integration`, which Windows git
+and WSL git both resolve; both test classes pass in the full run above.
