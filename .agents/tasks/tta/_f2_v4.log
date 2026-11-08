@@ -1,0 +1,40 @@
+[run_tests] py38: tests.test_predict_store tests.test_predict_levels (2026-11-06T21:38:08-05:00)
+test_auto_slurm (tests.test_predict_store.TestChooseStore) ... ok
+test_explicit_kinds (tests.test_predict_store.TestChooseStore) ... ok
+test_meminfo_and_fallback (tests.test_predict_store.TestChooseStore) ... ok
+test_cleanup_on_error (tests.test_predict_store.TestDiskStore) ... ok
+test_existing_dir_kept (tests.test_predict_store.TestDiskStore) ... ok
+test_files_and_cleanup (tests.test_predict_store.TestDiskStore) ... ok
+test_round_trip_and_free (tests.test_predict_store.TestDiskStore) ... ok
+test_bad_args (tests.test_predict_store.TestEstimate) ... ok
+test_level1_deform_n101 (tests.test_predict_store.TestEstimate) ... 
+[estimate] level 1 default widths N 101 deform fp16: 44.7 GB (float32 54.2, affine+deform 47.5, affine 33.0)
+ok
+test_monotone_and_ordering (tests.test_predict_store.TestEstimate) ... ok
+test_tta_term (tests.test_predict_store.TestEstimate)
+T11: +28 V bytes per image at a TTA deform level (s1 12 V + s2 4 V + c0 12 V); rigid ... 
+[estimate] level 1 N 101 deform with TTA at all levels: float32 73.67 GB (+19.46), float16 55.60 GB (+10.86)
+ok
+test_unchanged_without_tta (tests.test_predict_store.TestEstimate)
+TTA design 6 / T11: the default (no tta_levels) equals the values of the code before ... ok
+test_bottleneck_every_level (tests.test_predict_store.TestGeometry) ... ok
+test_level1_default (tests.test_predict_store.TestGeometry) ... ok
+test_round_trip_and_free (tests.test_predict_store.TestRamStore) ... ok
+test_levels_parse (tests.test_predict_levels.TestCLILevels) ... ok
+test_levels_type_error_is_argparse_error (tests.test_predict_levels.TestCLILevels) ... ok
+test_old_chain_refused_truncation_allowed (tests.test_predict_levels.TestExposure) ... ok
+test_retrained_chain_table (tests.test_predict_levels.TestExposure) ... ok
+test_unknown_source (tests.test_predict_levels.TestExposure) ... ok
+test_parse_levels (tests.test_predict_levels.TestParseAndPlan) ... ok
+test_plan_default_and_normalise (tests.test_predict_levels.TestParseAndPlan) ... ok
+test_plan_level1 (tests.test_predict_levels.TestParseAndPlan) ... ok
+test_plan_level_not_in_checkpoint (tests.test_predict_levels.TestParseAndPlan) ... ok
+test_legacy_and_absent (tests.test_predict_levels.TestSkipProbs) ... ok
+test_resume_mismatch_warning (tests.test_predict_levels.TestSkipProbs) ... ok
+test_stage_mode_string_keys (tests.test_predict_levels.TestSkipProbs) ... ok
+
+----------------------------------------------------------------------
+Ran 27 tests in 0.340s
+
+OK
+TF-free tests OK without TF (27 tests)

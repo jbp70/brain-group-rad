@@ -1,0 +1,26 @@
+﻿[run_tests] tf: tests.test_linear_eval (2026-11-06T22:24:23-05:00)
+test_cli_errors (tests.test_linear_eval.TestLinearEval) ... ok
+test_level2_affine_flip8 (tests.test_linear_eval.TestLinearEval) ... WARNING:tensorflow:5 out of the last 33 calls to <function StreamedLevel._f_enc.<locals>.body at 0x7f2f43e62550> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+
+[linear-eval] L2 affine flip8: exit 0 in 34.9 s (model 26.8 s)
+ok
+test_level4_tasks_and_arms (tests.test_linear_eval.TestLinearEval) ... WARNING:tensorflow:5 out of the last 33 calls to <function StreamedLevel._f_enc.<locals>.body at 0x7f2f43fcd310> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+
+[linear-eval] L4 rigid --tta none: exit 0 in 7.7 s (model 3.0 s); center 19.579 / pair 32.923 mm
+
+[linear-eval] L4 rigid --tta flip8: exit 0 in 13.1 s (model 8.3 s); center 19.429 / pair 32.670 mm
+
+[linear-eval] L4 rigid: rendered group sha256 identical in both arms (a97cf0486beb...)
+
+[linear-eval] L4 affine --tta none: exit 0 in 6.6 s (model 2.2 s); center 19.857 / pair 33.759 mm
+
+[linear-eval] L4 affine --tta flip8: exit 0 in 13.5 s (model 8.1 s); center 19.704 / pair 33.492 mm
+
+[linear-eval] L4 affine: rendered group sha256 identical in both arms (8d3d13162935...)
+ok
+test_one_subject_exit2 (tests.test_linear_eval.TestLinearEval) ... ok
+
+----------------------------------------------------------------------
+Ran 4 tests in 96.822s
+
+OK

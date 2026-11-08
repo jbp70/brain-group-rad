@@ -1,0 +1,12 @@
+[run_tests] script: .agents/tasks/tta/check_flip_signs.py (2026-11-07T08:30:18-05:00)
+C3 axis x derived == Jay: True
+C3 axis y derived == Jay: True
+C3 axis z derived == Jay: True
+C3 combined flips == products of Jay's patterns: True
+C1 rigid  max |M(p s_f) - F M(p) F| over 8 flips x 64 random (float64): 0.00e+00
+C2 affine max |M(p s_f) - F M(p) F| over 8 flips x 64 random (float64): 0.00e+00
+C4 max |center(F A F) - F center(A) F| (N 12, float64): 0.00e+00
+C5 max |T(flip I, F M F) - flip T(I, M)| (level 4, float32): 7.75e-06
+C6 max |v| 4.94 vox; unflip(flip(v)) == v exactly: True; max |exp(v^F) - (exp v)^F| 2.15e-06 vox; max |warp(flip I, u^F) - flip warp(I, u)| 3.81e-06
+C7 average of 8 unflipped equivariant predictions: float64 accumulation max diff 0.0e+00 (exact); float32 running sum max rel diff 1.5e-07 (rounding of 3x, 5x, 7x)
+ALL PASS

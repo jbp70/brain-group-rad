@@ -1,0 +1,158 @@
+[run_tests] tf: tests.test_predict_tta tests.test_tta (2026-11-06T18:56:38-05:00)
+test_overwrite_protects_tta_spread (tests.test_predict_tta.TestCLIAndRecords) ... ok
+test_parse (tests.test_predict_tta.TestCLIAndRecords) ... ok
+test_unrun_tta_level_exit2_record (tests.test_predict_tta.TestCLIAndRecords) ... ok
+test_flip8 (tests.test_predict_tta.TestEndToEnd) ... 
+[tta] E2E flip8 l4 rigid: exit 0 in 41 s; spread_rms_mm max {'l4/rigid': 0.2948}
+WARNING:tensorflow:5 out of the last 33 calls to <function StreamedLevel._f_enc.<locals>.body at 0x7fae6a78a820> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:5 out of the last 5 calls to <function StreamedLevel._f_tta_acc.<locals>.body at 0x7fae6a63dc10> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:6 out of the last 6 calls to <function StreamedLevel._f_tta_acc.<locals>.body at 0x7fae6a63de50> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+
+[tta] E2E flip8 l4 deform: exit 0 in 47 s; spread_rms_mm max {'l4/deform': 0.1276}
+WARNING:tensorflow:5 out of the last 33 calls to <function StreamedLevel._f_enc.<locals>.body at 0x7fae6a7659d0> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+
+[tta] E2E flip8 l4 affine+deform: exit 0 in 61 s; spread_rms_mm max {'l4/affine': 0.3194, 'l4/deform': 0.128}
+
+[tta] E2E flip8 l2 rigid: exit 0 in 55 s; spread_rms_mm max {'l2/rigid': 0.4621, 'l4/rigid': 0.1535}
+
+[tta] E2E flip8 l2 deform: exit 0 in 61 s; spread_rms_mm max {'l2/deform': 0.1335, 'l4/deform': 0.2101}
+WARNING:tensorflow:5 out of the last 5 calls to <function StreamedLevel._f_p12.<locals>.body at 0x7fae6717b430> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:5 out of the last 5 calls to <function StreamedLevel._f_tta_spread.<locals>.body at 0x7fae6717b940> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:6 out of the last 6 calls to <function StreamedLevel._f_p12.<locals>.body at 0x7fae672798b0> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:6 out of the last 6 calls to <function StreamedLevel._f_tta_spread.<locals>.body at 0x7fae67092160> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+
+[tta] E2E flip8 l2 affine+deform: exit 0 in 87 s; spread_rms_mm max {'l2/affine': 0.5251, 'l2/deform': 0.1356, 'l4/affine': 0.2028, 'l4/deform': 0.2145}
+ok
+test_tta_levels_2 (tests.test_predict_tta.TestEndToEnd) ... WARNING:tensorflow:5 out of the last 26 calls to <function StreamedLevel._f_dec.<locals>.body at 0x7fae6a75da60> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:6 out of the last 27 calls to <function StreamedLevel._f_dec.<locals>.body at 0x7fae6981a310> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:5 out of the last 5 calls to <function StreamedRunner._to_level1_fn.<locals>.<lambda> at 0x7fadf006c310> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+ok
+test_tta_none_equals_golden (tests.test_predict_tta.TestEndToEnd) ... WARNING:tensorflow:6 out of the last 6 calls to <function StreamedRunner._to_level1_fn.<locals>.<lambda> at 0x7fae699fda60> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:5 out of the last 20 calls to <function StreamedRunner._pool_fn.<locals>.<lambda> at 0x7fae6a74c5e0> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:5 out of the last 5 calls to <function StreamedRunner._resample.<locals>.<lambda> at 0x7fae6a74c040> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:6 out of the last 6 calls to <function StreamedRunner._resample.<locals>.<lambda> at 0x7fae6a74c040> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:6 out of the last 22 calls to <function StreamedRunner._pool_fn.<locals>.<lambda> at 0x7fae6a63ddc0> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:5 out of the last 13 calls to <function StreamedLevel._f_xsum.<locals>.body at 0x7fae6a63dc10> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:5 out of the last 13 calls to <function StreamedLevel._f_p1.<locals>.body at 0x7fadf801c9d0> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:5 out of the last 13 calls to <function StreamedLevel._f_p2.<locals>.body at 0x7fae6a75e820> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:6 out of the last 14 calls to <function StreamedLevel._f_xsum.<locals>.body at 0x7fae6a765310> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:6 out of the last 14 calls to <function StreamedLevel._f_p1.<locals>.body at 0x7fae6a68eee0> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:6 out of the last 14 calls to <function StreamedLevel._f_p2.<locals>.body at 0x7fae6a74c5e0> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:5 out of the last 12 calls to <function StreamedLevel._f_linear.<locals>.body at 0x7fae6a62d700> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:5 out of the last 12 calls to <function StreamedLevel._f_d2.<locals>.body at 0x7fae6a765550> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:5 out of the last 12 calls to <function StreamedLevel._f_d1.<locals>.body at 0x7fae6717b3a0> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:6 out of the last 13 calls to <function StreamedLevel._f_linear.<locals>.body at 0x7fae675d0550> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:6 out of the last 13 calls to <function StreamedLevel._f_d2.<locals>.body at 0x7fae6981a550> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:6 out of the last 13 calls to <function StreamedLevel._f_d1.<locals>.body at 0x7fae6a68e280> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:5 out of the last 5 calls to <function StreamedRunner._up_fn.<locals>.<lambda> at 0x7fae6992db80> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+
+[tta] E2E --tta none: 66 NIfTI hashes == pre-TTA fixture
+ok
+test_level2 (tests.test_predict_tta.TestEquivariance) ... WARNING:tensorflow:5 out of the last 12 calls to <function StreamedRunner._prewarp_linear_fn.<locals>.<lambda> at 0x7fae6981a040> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:5 out of the last 12 calls to <function StreamedRunner._prewarp_deform_fn.<locals>.body at 0x7fae6a7cb5e0> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:6 out of the last 6 calls to <function StreamedRunner._up_fn.<locals>.<lambda> at 0x7fae673abb80> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+
+[tta] T6 L2 N 3: A_mm 1.04e-05, U1 2.17e-06, U1_inv 2.26e-06, u_ckpt 1.32e-06, u_inv_ckpt 1.39e-06
+ok
+test_level4 (tests.test_predict_tta.TestEquivariance) ... 
+[tta] T6 L4 N 3: A_mm 8.22e-06, U1 1.06e-06, U1_inv 1.11e-06, u_ckpt 4.06e-07, u_inv_ckpt 4.32e-07
+ok
+test_level4_n2 (tests.test_predict_tta.TestEquivariance) ... 
+[tta] T6 L4 N 2: A_mm 5.69e-06, U1 9.02e-07, U1_inv 8.79e-07, u_ckpt 4.68e-07, u_inv_ckpt 4.49e-07
+ok
+test_deform_stub_level2 (tests.test_predict_tta.TestEquivariantStubs) ... WARNING:tensorflow:5 out of the last 83 calls to <function StreamedRunner._prewarp_deform_fn.<locals>.body at 0x7fae673df9d0> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:5 out of the last 83 calls to <function StreamedRunner._prewarp_linear_fn.<locals>.<lambda> at 0x7fad876dfb80> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+
+[tta] T7 L2 deform stub: affine+deform_U1 3.42e-05, affine+deform_U1_inv 3.46e-05, affine+deform_u_ckpt 2.51e-05, affine+deform_u_inv_ckpt 1.82e-05, affine+deform_v 1.61e-05, deform_U1 1.46e-05, deform_U1_inv 9.10e-06, deform_shift_mm 2.61e-07, deform_spread_p99_mm 3.04e-07, deform_spread_rms_mm 9.27e-08, deform_u_ckpt 1.22e-05, deform_u_inv_ckpt 7.66e-06, deform_v 1.30e-05
+ok
+test_deform_stub_level4 (tests.test_predict_tta.TestEquivariantStubs) ... 
+[tta] T7 L4 deform stub: affine+deform_U1 4.29e-06, affine+deform_U1_inv 4.77e-06, affine+deform_u_ckpt 2.41e-06, affine+deform_u_inv_ckpt 2.77e-06, affine+deform_v 6.56e-07, deform_U1 4.17e-06, deform_U1_inv 5.13e-06, deform_shift_mm 2.61e-07, deform_spread_p99_mm 3.04e-07, deform_spread_rms_mm 9.27e-08, deform_u_ckpt 2.44e-06, deform_u_inv_ckpt 2.95e-06, deform_v 2.38e-07
+ok
+test_gauge_stub_level2 (tests.test_predict_tta.TestEquivariantStubs) ... 
+[tta] T7 L2 _GaugeStub: A_mm 1.56e-05, gauge_deg_l2 1.96e+01, gauge_deg_l4 1.96e+01, pair_mm 2.68e-05
+ok
+test_gauge_stub_level4 (tests.test_predict_tta.TestEquivariantStubs) ... 
+[tta] T7 L4 _GaugeStub: A_mm 1.25e-05, gauge_deg_l4 1.96e+01, pair_mm 5.88e-06, v1_pair_mm 9.86e-03
+ok
+test_linear_stub_level4 (tests.test_predict_tta.TestEquivariantStubs) ... 
+[tta] T7 L4 _LinearStub: A_mm 2.75e-06, gauge_deg_l4 1.51e-17, pair_mm 2.76e-06
+ok
+test_nonfinite_flip_reported (tests.test_predict_tta.TestEquivariantStubs) ... ok
+test_level2 (tests.test_predict_tta.TestIdentityOnly) ... 
+[tta] T5 L2: identity-only TTA bitwise == no TTA for rigid, affine, deform, affine+deform
+ok
+test_level4 (tests.test_predict_tta.TestIdentityOnly) ... 
+[tta] T5 L4: identity-only TTA bitwise == no TTA for rigid, affine, deform, affine+deform
+ok
+test_float32_field_accumulation (tests.test_tta.TestAveraging) ... 
+[tta] C7 float32 running sum of 8 identical fields / 8: max rel diff 1.49e-07
+ok
+test_identical_encodings (tests.test_tta.TestAveraging) ... 
+[tta] C7 mean_linear of 8 identical encodings: max rel diff 4.44e-16, rot_gap min 0.999999999999998, readout_dev max 1.41e-14 deg
+ok
+test_nonfinite_rows_stay_nan (tests.test_tta.TestAveraging) ... ok
+test_plus_minus_theta (tests.test_tta.TestAveraging) ... 
+[tta] eigh read-out of base * R(+-30 deg): angle to base max 3.62e-14 deg; readout_dev_deg ['2.6', '2.58', '2.66']
+ok
+test_center_commutes_with_conjugation (tests.test_tta.TestCentering) ... 
+[tta] C4 max |center(F A F) - F center(A) F| (N 12, float64): 0.00e+00
+ok
+test_unflip_matrices (tests.test_tta.TestCentering) ... ok
+test_flips_and_config (tests.test_tta.TestConfig) ... ok
+test_import_is_tf_free (tests.test_tta.TestConfig) ... ok
+test_gauge_barycenters (tests.test_tta.TestDiagnostics)
+mu_f of G_f A equals G_f mu(A) (converged), so gauge_size returns G_f G_0^-1's size. ... ok
+test_gauge_size (tests.test_tta.TestDiagnostics) ... ok
+test_rotation_scale_shear_spread (tests.test_tta.TestDiagnostics) ... 
+[tta] T8 rot_deg_rms 3.000000 (want 3.0), scale_pct_rms 2.000000 (want 2.0), shear_pct_rms 1.000000 (want 1.0), rot_gap 0.9986, readout_dev 0.00e+00
+ok
+test_summarize_spread (tests.test_tta.TestDiagnostics) ... ok
+test_translation_spread (tests.test_tta.TestDiagnostics) ... ok
+test_invalid_rows_nan (tests.test_tta.TestEncoding) ... ok
+test_raw_k_entries (tests.test_tta.TestEncoding) ... ok
+test_round_trip (tests.test_tta.TestEncoding) ... 
+[tta] E1 rigid encode/decode round trip max |diff|: 1.67e-16
+
+[tta] E1 affine encode/decode round trip max |diff|: 4.44e-16
+ok
+test_sign_covariance (tests.test_tta.TestEncoding) ... 
+[tta] E2 max |encode(F M F) - sigma_f * encode(M)| over 8 flips x 20: 0.00e+00
+ok
+test_exp_and_warp_commute (tests.test_tta.TestFields) ... 
+[tta] C6 max |v| 3.83 vox; max |exp(v^F) - (exp v)^F| 2.21e-06 vox; max |warp(flip I, u^F) - flip warp(I, u)| 5.14e-06
+ok
+test_flip_np (tests.test_tta.TestFields) ... ok
+test_transform_image_commutes (tests.test_tta.TestFields) ... 
+[tta] C5 max |T(flip I, F M F) - flip T(I, M)| (level 4, float32): 1.01e-05
+ok
+test_unflip_involution_and_convention (tests.test_tta.TestFields) ... ok
+test_e3_gauge_free (tests.test_tta.TestGaugeFree) ... 
+[tta] E3 flip-dependent raw gauge, zero model error (N 6): v1 raw averaging pair err 0.121 mm; v2 pair err 3.02e-14 mm; v2 centered max |diff| 4.00e-15
+ok
+test_e4_equivariance (tests.test_tta.TestGaugeFree) ... 
+[tta] E4 TTA(flip_g x) vs F_g TTA(x) F_g, non-equivariant group, rigid + affine, first and later level: max |diff| 1.24e-14
+ok
+test_e5_four_iterations (tests.test_tta.TestGaugeFree) ... 
+[tta] E5 4-iteration centering: v2 pair err 3.20e-14 mm, centered translation max |diff| 2.33e-08 mm
+ok
+test_float32_path_and_nonfinite_flip (tests.test_tta.TestGaugeFree)
+Model dtype path (float32 centering) is finite; a non-finite flip is named and makes the ... ok
+test_identity_only_exact (tests.test_tta.TestGaugeFree) ... ok
+test_n2 (tests.test_tta.TestGaugeFree) ... 
+[tta] E3 at N 2: v1 0.198 mm, v2 4.20e-14 mm, centered 1.78e-14
+ok
+test_axes_equal_jay (tests.test_tta.TestSigns) ... ok
+test_bad_input (tests.test_tta.TestSigns) ... ok
+test_combined_are_products (tests.test_tta.TestSigns) ... ok
+test_matrix_covariance_float32 (tests.test_tta.TestSigns) ... 
+[tta] C1/C2 float32 max |M(p s_f) - F M(p) F| rigid 0.00e+00, affine 0.00e+00 (8 flips x 64)
+ok
+test_matrix_covariance_float64 (tests.test_tta.TestSigns) ... 
+[tta] C1/C2 float64 max |M(p s_f) - F M(p) F| rigid 0.00e+00, affine 0.00e+00 (8 flips x 64)
+ok
+test_probs_and_warnings (tests.test_tta.TestTrainFlip) ... ok
+
+----------------------------------------------------------------------
+Ran 50 tests in 2344.328s
+
+OK

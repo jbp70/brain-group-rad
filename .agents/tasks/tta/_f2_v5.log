@@ -1,0 +1,4 @@
+[run_tests] compile (2026-11-06T21:38:11-05:00): inference/__init__.py inference/canonical.py inference/cli.py inference/levels.py inference/loader.py inference/predict.py inference/runner.py inference/store.py inference/streaming.py inference/tta.py evaluation/__init__.py evaluation/__main__.py evaluation/evaluate.py evaluation/fields.py evaluation/metrics.py predict.py tests/test_tta.py tests/test_predict_tta.py tests/test_predict_tta_golden.py
+py_compile OK
+ast feature_version=(3, 8) OK (19 files)
+inference.tta imports without TF

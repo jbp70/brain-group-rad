@@ -1,0 +1,468 @@
+[run_tests] tf: tests.test_predict_runner tests.test_predict_levels_runner tests.test_predict (2026-11-06T19:35:51-05:00)
+test_level2_float32 (tests.test_predict_runner.TestStreamedVsUnchunked) ... WARNING:tensorflow:5 out of the last 13 calls to <function StreamedLevel._f_enc.<locals>.body at 0x7f85c7ab7af0> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:5 out of the last 13 calls to <function StreamedLevel._f_enc.<locals>.body at 0x7f85c7ab7e50> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:5 out of the last 9 calls to <function StreamedLevel._f_xsum.<locals>.body at 0x7f85c7ef4820> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:6 out of the last 10 calls to <function StreamedLevel._f_xsum.<locals>.body at 0x7f85c7ef4820> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:5 out of the last 9 calls to <function StreamedLevel._f_p1.<locals>.body at 0x7f85c796e040> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:6 out of the last 10 calls to <function StreamedLevel._f_p1.<locals>.body at 0x7f85c796e040> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:5 out of the last 9 calls to <function StreamedLevel._f_p2.<locals>.body at 0x7f85cc98eaf0> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:6 out of the last 10 calls to <function StreamedLevel._f_p2.<locals>.body at 0x7f85cc98eaf0> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+[runner] L2 float32 rigid chunk 2 chunks {'l4': {'rigid': [(0, 2), (2, 3)]}, 'l2': {'rigid': [(0, 2), (2, 3)]}}
+WARNING:tensorflow:5 out of the last 5 calls to <function StreamedLevel._f_linear.<locals>.body at 0x7f85c0428b80> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:6 out of the last 6 calls to <function StreamedLevel._f_linear.<locals>.body at 0x7f85c0154430> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+[runner] L2 float32 affine chunk 2 chunks {'l4': {'affine': [(0, 2), (2, 3)]}, 'l2': {'affine': [(0, 2), (2, 3)]}}
+WARNING:tensorflow:5 out of the last 13 calls to <function StreamedLevel._f_dec.<locals>.body at 0x7f85348b7670> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:5 out of the last 13 calls to <function StreamedLevel._f_dec.<locals>.body at 0x7f85348b7040> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:5 out of the last 9 calls to <function StreamedLevel._f_d2.<locals>.body at 0x7f853335c550> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:6 out of the last 10 calls to <function StreamedLevel._f_d2.<locals>.body at 0x7f853335c550> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:5 out of the last 9 calls to <function StreamedLevel._f_d1.<locals>.body at 0x7f853335c0d0> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:6 out of the last 10 calls to <function StreamedLevel._f_d1.<locals>.body at 0x7f853335c0d0> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:5 out of the last 9 calls to <function StreamedLevel._f_p12.<locals>.body at 0x7f853317b040> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:6 out of the last 10 calls to <function StreamedLevel._f_p12.<locals>.body at 0x7f853317b040> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+[runner] L2 float32 deform chunk 2 chunks {'l4': {'deform': [(0, 2), (2, 3)]}, 'l2': {'deform': [(0, 2), (2, 3)]}}
+[runner] L2 float32 affine+deform chunk 2 chunks {'l4': {'affine': [(0, 2), (2, 3)], 'deform': [(0, 2), (2, 3)]}, 'l2': {'affine': [(0, 2), (2, 3)], 'deform': [(0, 2), (2, 3)]}}
+
+[runner] L2 float32 streamed vs unchunked: A 2.38e-07, U1 8.94e-06, U1_inv 9.40e-06, U1_inv_mean 4.92e-07, U1_mean 4.93e-07, u_ckpt 4.67e-06, u_ckpt_mean 2.93e-07, u_inv_ckpt 5.01e-06, u_inv_ckpt_mean 2.89e-07; unchunked timing {'pool': 0.01, 'affine:frozen': 0.07, 'affine:l2': 0.19, 'affine+deform:resample': 3.28, 'deform:frozen': 0.13, 'deform:l2': 0.43}, gpu_peak_mb {'pool': 550.798095703125, 'affine:frozen': 399.09228515625, 'affine:l2': 713.5771484375, 'affine+deform:resample': 1609.103759765625, 'deform:frozen': 625.499267578125, 'deform:l2': 1663.141845703125}
+ok
+test_level2_fp16 (tests.test_predict_runner.TestStreamedVsUnchunked) ... WARNING:tensorflow:Mixed precision compatibility check (mixed_float16): WARNING
+Your GPUs may run slowly with dtype policy mixed_float16 because they do not have compute capability of at least 7.0. Your GPUs:
+  NVIDIA GeForce GTX 1080, compute capability 6.1 (x2)
+See https://developer.nvidia.com/cuda-gpus for a list of GPUs and their compute capabilities.
+If you will use compatible GPU(s) not attached to this host, e.g. by running a multi-worker model, you can ignore this warning. This message will only be logged once
+[runner] L2 mixed_float16 rigid chunk 2 chunks {'l4': {'rigid': [(0, 2), (2, 3)]}, 'l2': {'rigid': [(0, 2), (2, 3)]}}
+WARNING:tensorflow:5 out of the last 31 calls to <function StreamedRunner._pool_fn.<locals>.<lambda> at 0x7f85a05043a0> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:5 out of the last 19 calls to <function StreamedRunner._prewarp_linear_fn.<locals>.<lambda> at 0x7f85cc98eee0> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+[runner] L2 mixed_float16 affine chunk 2 chunks {'l4': {'affine': [(0, 2), (2, 3)]}, 'l2': {'affine': [(0, 2), (2, 3)]}}
+WARNING:tensorflow:5 out of the last 13 calls to <function StreamedRunner._prewarp_deform_fn.<locals>.body at 0x7f85324775e0> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:5 out of the last 13 calls to <function StreamedRunner._up_fn.<locals>.<lambda> at 0x7f85a08645e0> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:5 out of the last 13 calls to <function StreamedRunner._to_level1_fn.<locals>.<lambda> at 0x7f85a0864160> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+[runner] L2 mixed_float16 deform chunk 2 chunks {'l4': {'deform': [(0, 2), (2, 3)]}, 'l2': {'deform': [(0, 2), (2, 3)]}}
+WARNING:tensorflow:5 out of the last 13 calls to <function StreamedRunner._prewarp_deform_fn.<locals>.body at 0x7f852d0ac820> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:5 out of the last 13 calls to <function StreamedRunner._up_fn.<locals>.<lambda> at 0x7f852d0acf70> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:5 out of the last 13 calls to <function StreamedRunner._to_level1_fn.<locals>.<lambda> at 0x7f852d0acdc0> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:5 out of the last 7 calls to <function StreamedRunner._resample.<locals>.<lambda> at 0x7f85a05ffca0> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:6 out of the last 10 calls to <function StreamedRunner._resample.<locals>.<lambda> at 0x7f85a04d4160> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+[runner] L2 mixed_float16 affine+deform chunk 2 chunks {'l4': {'affine': [(0, 2), (2, 3)], 'deform': [(0, 2), (2, 3)]}, 'l2': {'affine': [(0, 2), (2, 3)], 'deform': [(0, 2), (2, 3)]}}
+
+[runner] L2 mixed_float16 streamed vs unchunked: A 2.30e-04, U1 4.60e-03, U1_inv 4.22e-03, U1_inv_mean 3.41e-04, U1_mean 3.45e-04, u_ckpt 2.88e-03, u_ckpt_mean 2.27e-04, u_inv_ckpt 2.61e-03, u_inv_ckpt_mean 2.19e-04; unchunked timing {'pool': 0.01, 'affine:frozen': 0.07, 'affine:l2': 0.21, 'affine+deform:resample': 2.91, 'deform:frozen': 0.16, 'deform:l2': 0.44}, gpu_peak_mb {'pool': 543.609375, 'affine:frozen': 381.339599609375, 'affine:l2': 509.616455078125, 'affine+deform:resample': 1744.546875, 'deform:frozen': 632.61328125, 'deform:l2': 1628.267578125}
+ok
+test_level4_float32 (tests.test_predict_runner.TestStreamedVsUnchunked) ... [runner] L4 float32 rigid chunk 2 chunks {'l4': {'rigid': [(0, 2), (2, 3)]}}
+WARNING:tensorflow:5 out of the last 31 calls to <function StreamedRunner._pool_fn.<locals>.<lambda> at 0x7f85a0306a60> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+[runner] L4 float32 affine chunk 2 chunks {'l4': {'affine': [(0, 2), (2, 3)]}}
+[runner] L4 float32 deform chunk 2 chunks {'l4': {'deform': [(0, 2), (2, 3)]}}
+[runner] L4 float32 affine+deform chunk 2 chunks {'l4': {'affine': [(0, 2), (2, 3)], 'deform': [(0, 2), (2, 3)]}}
+
+[runner] L4 float32 streamed vs unchunked: A 1.79e-07, U1 2.53e-06, U1_inv 2.59e-06, U1_inv_mean 2.11e-07, U1_mean 2.11e-07, u_ckpt 1.17e-06, u_ckpt_mean 9.64e-08, u_inv_ckpt 1.19e-06, u_inv_ckpt_mean 9.64e-08; unchunked timing {'pool': 0.01, 'affine:l4': 0.07, 'affine+deform:resample': 2.65, 'deform:l4': 0.08}, gpu_peak_mb {'pool': 344.033935546875, 'affine:l4': 160.1484375, 'affine+deform:resample': 1504.168212890625, 'deform:l4': 355.518310546875}
+ok
+test_level4_fp16 (tests.test_predict_runner.TestStreamedVsUnchunked) ... [runner] L4 mixed_float16 rigid chunk 2 chunks {'l4': {'rigid': [(0, 2), (2, 3)]}}
+[runner] L4 mixed_float16 affine chunk 2 chunks {'l4': {'affine': [(0, 2), (2, 3)]}}
+[runner] L4 mixed_float16 deform chunk 2 chunks {'l4': {'deform': [(0, 2), (2, 3)]}}
+[runner] L4 mixed_float16 affine+deform chunk 2 chunks {'l4': {'affine': [(0, 2), (2, 3)], 'deform': [(0, 2), (2, 3)]}}
+
+[runner] L4 mixed_float16 streamed vs unchunked: A 1.03e-04, U1 2.55e-03, U1_inv 2.53e-03, U1_inv_mean 2.31e-04, U1_mean 2.31e-04, u_ckpt 1.10e-03, u_ckpt_mean 1.14e-04, u_inv_ckpt 1.05e-03, u_inv_ckpt_mean 1.14e-04; unchunked timing {'pool': 0.01, 'affine:l4': 0.07, 'affine+deform:resample': 2.71, 'deform:l4': 0.08}, gpu_peak_mb {'pool': 342.78759765625, 'affine:l4': 119.92724609375, 'affine+deform:resample': 1622.47509765625, 'deform:l4': 350.361083984375}
+ok
+test_level1_cpu (tests.test_predict_runner.TestStreamingLevel1) ... [runner] L1 float32 CPU deform chunk 2 chunks {'l4': {'deform': [(0, 2), (2, 3)]}, 'l2': {'deform': [(0, 2), (2, 3)]}, 'l1': {'deform': [(0, 2), (2, 3)]}}
+WARNING:tensorflow:5 out of the last 7 calls to <function UnchunkedRunner._linear.<locals>.frozen_body at 0x7f866397a0d0> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:5 out of the last 7 calls to <function UnchunkedRunner._linear.<locals>.body at 0x7f85328b9160> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:5 out of the last 5 calls to <function UnchunkedRunner.run.<locals>.<lambda> at 0x7f85c7a9af70> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:5 out of the last 21 calls to <function StreamedRunner._prewarp_linear_fn.<locals>.<lambda> at 0x7f85a05f9b80> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+[runner] L1 float32 CPU affine+deform chunk 2 chunks {'l4': {'affine': [(0, 2), (2, 3)], 'deform': [(0, 2), (2, 3)]}, 'l2': {'affine': [(0, 2), (2, 3)], 'deform': [(0, 2), (2, 3)]}, 'l1': {'affine': [(0, 2), (2, 3)], 'deform': [(0, 2), (2, 3)]}}
+
+[runner] L1 float32 CPU streamed vs unchunked: A 3.58e-07, U1 7.85e-06, U1_inv 7.49e-06, U1_inv_mean 3.94e-07, U1_mean 4.02e-07; total 616 s, peak RSS 21.2 GB
+ok
+test_level1_cpu (tests.test_predict_runner.TestTrainerEquivalence) ... WARNING:tensorflow:6 out of the last 8 calls to <function UnchunkedRunner._linear.<locals>.frozen_body at 0x7f85347c7c10> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:6 out of the last 8 calls to <function UnchunkedRunner._linear.<locals>.body at 0x7f85a0b444c0> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+
+[runner] L1 CPU trainer vs unchunked (exact, Dice identical True): A_affine 4.47e-08, A_rigid 5.96e-08, pair_dice 0.00e+00, template_dice 0.00e+00, u 1.34e-07, u_inv 3.07e-07, v 0.00e+00, v_raw 0.00e+00, warp 4.23e-06
+
+[runner] L1 CPU trainer vs streamed chunk 1 (S_stream, Dice identical False): A_affine 2.38e-07, A_rigid 1.19e-07, pair_dice 0.00e+00, template_dice 8.48e-07, u 7.52e-07, u_inv 8.94e-07, v 3.13e-07, v_raw 5.07e-07, warp 8.87e-06
+
+[runner] L1 CPU trainer vs streamed chunk 3 (S_stream, Dice identical False): A_affine 2.98e-07, A_rigid 1.23e-07, pair_dice 0.00e+00, template_dice 8.48e-07, u 7.76e-07, u_inv 8.75e-07, v 3.20e-07, v_raw 5.07e-07, warp 9.60e-06
+[runner] L1 CPU trainer Dice: template [0.9687 0.9681 0.9683], pair mean 0.9372
+[runner] L1 trainer equivalence on CPU: total 716 s, peak RSS 23.9 GB
+ok
+test_level2 (tests.test_predict_runner.TestTrainerEquivalence) ... WARNING:tensorflow:5 out of the last 8 calls to <function UnchunkedRunner._deform.<locals>.frozen_body at 0x7f85cc9f2430> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:5 out of the last 8 calls to <function UnchunkedRunner._deform.<locals>.body at 0x7f85c0161160> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:5 out of the last 9 calls to <function UnchunkedRunner.run.<locals>.<lambda> at 0x7f85a1b55670> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+
+[runner] L2 trainer vs unchunked (exact, Dice identical True): A_affine 0.00e+00, A_rigid 0.00e+00, pair_dice 0.00e+00, template_dice 0.00e+00, u 0.00e+00, u_inv 0.00e+00, v 0.00e+00, v_raw 0.00e+00, warp 0.00e+00
+
+[runner] L2 trainer vs streamed chunk 1 (S_stream, Dice identical True): A_affine 1.19e-07, A_rigid 1.49e-07, pair_dice 0.00e+00, template_dice 0.00e+00, u 5.96e-07, u_inv 8.42e-07, v 4.17e-07, v_raw 7.45e-07, warp 5.19e-06
+
+[runner] L2 trainer vs streamed chunk 3 (S_stream, Dice identical True): A_affine 1.19e-07, A_rigid 1.49e-07, pair_dice 0.00e+00, template_dice 0.00e+00, u 5.96e-07, u_inv 8.42e-07, v 4.17e-07, v_raw 7.45e-07, warp 5.19e-06
+[runner] L2 trainer Dice: template [0.9417 0.943  0.9347], pair mean 0.8817
+ok
+test_level1_cpu (tests.test_predict_levels_runner.TestLevelsLevel1) ... WARNING:tensorflow:6 out of the last 9 calls to <function UnchunkedRunner._deform.<locals>.frozen_body at 0x7f85c7ab71f0> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:6 out of the last 9 calls to <function UnchunkedRunner._deform.<locals>.body at 0x7f85a05043a0> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+[runner] L1 (4, 2) deform chunk 2 chunks {'l4': {'deform': [(0, 2), (2, 3)]}, 'l2': {'deform': [(0, 2), (2, 3)]}}
+[runner] L1 (4, 2) affine+deform chunk 2 chunks {'l4': {'affine': [(0, 2), (2, 3)], 'deform': [(0, 2), (2, 3)]}, 'l2': {'affine': [(0, 2), (2, 3)], 'deform': [(0, 2), (2, 3)]}}
+
+[runner] L1 --levels 4,2 (deform, affine+deform): exact_* = unchunked vs reference, stream_* = streamed vs reference, plain keys = streamed vs unchunked: A 3.58e-07, U1 3.66e-06, U1_inv 3.64e-06, U1_inv_mean 2.57e-07, U1_mean 2.58e-07, exact_A 2.38e-07, exact_U1 3.14e-06, exact_U1_inv 3.10e-06, min_vs_default_U1 1.65e-01, stream_A 3.58e-07, stream_U1 4.22e-06, stream_U1_inv 4.25e-06
+[levels] L1 (4, 2) done after 227 s
+[runner] L1 (4,) deform chunk 2 chunks {'l4': {'deform': [(0, 2), (2, 3)]}}
+[runner] L1 (4,) affine+deform chunk 2 chunks {'l4': {'affine': [(0, 2), (2, 3)], 'deform': [(0, 2), (2, 3)]}}
+
+[runner] L1 --levels 4 (deform, affine+deform): exact_* = unchunked vs reference, stream_* = streamed vs reference, plain keys = streamed vs unchunked: A 2.38e-07, U1 2.07e-06, U1_inv 2.08e-06, U1_inv_mean 1.17e-07, U1_mean 1.17e-07, exact_A 1.19e-07, exact_U1 1.20e-06, exact_U1_inv 1.20e-06, min_vs_default_U1 2.43e-01, stream_A 1.79e-07, stream_U1 2.11e-06, stream_U1_inv 1.91e-06
+[levels] L1 (4,) done after 320 s
+WARNING:tensorflow:5 out of the last 5 calls to <function UnchunkedRunner._deform_sel.<locals>.frozen_body at 0x7f86041e9d30> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+[runner] L1 (2, 1) deform chunk 2 chunks {'l2': {'deform': [(0, 2), (2, 3)]}, 'l1': {'deform': [(0, 2), (2, 3)]}}
+WARNING:tensorflow:6 out of the last 6 calls to <function UnchunkedRunner._deform_sel.<locals>.frozen_body at 0x7f8532f063a0> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+[runner] L1 (2, 1) affine+deform chunk 2 chunks {'l2': {'affine': [(0, 2), (2, 3)], 'deform': [(0, 2), (2, 3)]}, 'l1': {'affine': [(0, 2), (2, 3)], 'deform': [(0, 2), (2, 3)]}}
+
+[runner] L1 --levels 2,1 (deform, affine+deform): exact_* = unchunked vs reference, stream_* = streamed vs reference, plain keys = streamed vs unchunked: A 2.68e-07, U1 7.00e-06, U1_inv 6.98e-06, U1_inv_mean 3.15e-07, U1_mean 3.20e-07, exact_A 1.79e-07, exact_U1 5.63e-06, exact_U1_inv 5.48e-06, min_vs_default_U1 1.90e-01, stream_A 2.38e-07, stream_U1 6.39e-06, stream_U1_inv 6.63e-06
+[levels] L1 (2, 1) done after 871 s
+WARNING:tensorflow:5 out of the last 5 calls to <function StreamedRunner._prewarp_deform_zero_fn.<locals>.body at 0x7f860c04dd30> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:6 out of the last 6 calls to <function StreamedRunner._prewarp_deform_zero_fn.<locals>.body at 0x7f860c04dd30> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:5 out of the last 5 calls to <function StreamedRunner._zero_fields_fn.<locals>.body at 0x7f860c04daf0> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:6 out of the last 6 calls to <function StreamedRunner._zero_fields_fn.<locals>.body at 0x7f860c04daf0> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+[runner] L1 (1,) deform chunk 2 chunks {'l1': {'deform': [(0, 2), (2, 3)]}}
+[runner] L1 (1,) affine+deform chunk 2 chunks {'l1': {'affine': [(0, 2), (2, 3)], 'deform': [(0, 2), (2, 3)]}}
+
+[runner] L1 --levels 1 (deform, affine+deform): exact_* = unchunked vs reference, stream_* = streamed vs reference, plain keys = streamed vs unchunked: A 1.79e-07, U1 4.04e-06, U1_inv 4.02e-06, U1_inv_mean 2.34e-07, U1_mean 2.34e-07, exact_A 1.79e-07, exact_U1 4.06e-06, exact_U1_inv 3.98e-06, min_vs_default_U1 2.17e-01, stream_A 2.38e-07, stream_U1 4.33e-06, stream_U1_inv 4.27e-06
+[levels] L1 (1,) done after 1375 s
+[runner] L1 (2,) deform chunk 2 chunks {'l2': {'deform': [(0, 2), (2, 3)]}}
+WARNING:tensorflow:5 out of the last 5 calls to <function UnchunkedRunner._linear_sel.<locals>.frozen_body at 0x7f85cc9b4310> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:5 out of the last 5 calls to <function UnchunkedRunner._run_sel.<locals>.<lambda> at 0x7f85c7ab7d30> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+[runner] L1 (2,) affine+deform chunk 2 chunks {'l2': {'affine': [(0, 2), (2, 3)], 'deform': [(0, 2), (2, 3)]}}
+
+[runner] L1 --levels 2 (deform, affine+deform): exact_* = unchunked vs reference, stream_* = streamed vs reference, plain keys = streamed vs unchunked: A 1.49e-07, U1 2.53e-06, U1_inv 2.56e-06, U1_inv_mean 1.28e-07, U1_mean 1.28e-07, exact_A 1.19e-07, exact_U1 1.58e-06, exact_U1_inv 1.58e-06, min_vs_default_U1 2.11e-01, stream_A 1.49e-07, stream_U1 1.47e-06, stream_U1_inv 1.49e-06
+[levels] L1 (2,) done after 1496 s
+WARNING:tensorflow:5 out of the last 5 calls to <function UnchunkedRunner._deform_sel.<locals>.body at 0x7f8533241700> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+[runner] L1 (4, 1) deform chunk 2 chunks {'l4': {'deform': [(0, 2), (2, 3)]}, 'l1': {'deform': [(0, 2), (2, 3)]}}
+WARNING:tensorflow:6 out of the last 6 calls to <function UnchunkedRunner._linear_sel.<locals>.frozen_body at 0x7f85a0b584c0> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:6 out of the last 6 calls to <function UnchunkedRunner._run_sel.<locals>.<lambda> at 0x7f85343c2790> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:6 out of the last 6 calls to <function UnchunkedRunner._deform_sel.<locals>.body at 0x7f85c048ba60> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+[runner] L1 (4, 1) affine+deform chunk 2 chunks {'l4': {'affine': [(0, 2), (2, 3)], 'deform': [(0, 2), (2, 3)]}, 'l1': {'affine': [(0, 2), (2, 3)], 'deform': [(0, 2), (2, 3)]}}
+
+[runner] L1 --levels 4,1 (deform, affine+deform): exact_* = unchunked vs reference, stream_* = streamed vs reference, plain keys = streamed vs unchunked: A 2.38e-07, U1 5.74e-06, U1_inv 5.54e-06, U1_inv_mean 3.15e-07, U1_mean 3.22e-07, exact_A 2.38e-07, exact_U1 6.32e-06, exact_U1_inv 6.26e-06, min_vs_default_U1 1.12e-01, stream_A 1.49e-07, stream_U1 5.21e-06, stream_U1_inv 5.10e-06
+[levels] L1 (4, 1) done after 2044 s
+
+[runner] L1 CPU level selections: A 3.58e-07, U1 7.00e-06, U1_inv 6.98e-06, U1_inv_mean 3.15e-07, U1_mean 3.22e-07, exact_A 2.38e-07, exact_U1 6.32e-06, exact_U1_inv 6.26e-06, min_vs_default_U1 1.12e-01, stream_A 3.58e-07, stream_U1 6.39e-06, stream_U1_inv 6.63e-06, trunc4_vs_skip2 0.00e+00, warp0_vs_x1 0.00e+00; total 2082 s
+ok
+test_level1_default_bit_identity_gpu (tests.test_predict_levels_runner.TestLevelsLevel1)
+Test 1(a) at level 1 on the GPU under op determinism. Not on /CPU:0: there the default ... 
+[runner] L1 GPU default path vs general path (full plan): default_vs_full_A 0.00e+00, default_vs_full_U1 0.00e+00, default_vs_full_U1_inv 0.00e+00
+ok
+test_default_bit_identity (tests.test_predict_levels_runner.TestLevelsLevel2) ... 
+[runner] L2 default path vs general path (full plan): default_vs_full_A 0.00e+00, default_vs_full_U1 0.00e+00, default_vs_full_U1_inv 0.00e+00
+ok
+test_truncation_and_skip (tests.test_predict_levels_runner.TestLevelsLevel2) ... WARNING:tensorflow:6 out of the last 10 calls to <function UnchunkedRunner.run.<locals>.<lambda> at 0x7f85a18b31f0> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:5 out of the last 15 calls to <function UnchunkedRunner._pool.<locals>.<lambda> at 0x7f8532b730d0> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:6 out of the last 6 calls to <function UnchunkedRunner.run.<locals>.<lambda> at 0x7f85a0b584c0> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:5 out of the last 12 calls to <function UnchunkedRunner._pool.<locals>.<lambda> at 0x7f852ce2a670> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+[runner] L2 (4,) rigid chunk 2 chunks {'l4': {'rigid': [(0, 2), (2, 3)]}}
+[runner] L2 (4,) deform chunk 2 chunks {'l4': {'deform': [(0, 2), (2, 3)]}}
+[runner] L2 (4,) affine+deform chunk 2 chunks {'l4': {'affine': [(0, 2), (2, 3)], 'deform': [(0, 2), (2, 3)]}}
+
+[runner] L2 --levels 4 (rigid, deform, affine+deform): exact_* = unchunked vs reference, stream_* = streamed vs reference, plain keys = streamed vs unchunked: A 1.79e-07, U1 2.98e-06, U1_inv 2.99e-06, U1_inv_mean 2.83e-07, U1_mean 2.83e-07, exact_A 2.38e-07, exact_U1 3.64e-06, exact_U1_inv 3.47e-06, min_vs_default_U1 6.98e-01, stream_A 1.49e-07, stream_U1 2.83e-06, stream_U1_inv 3.06e-06
+[runner] L2 (2,) rigid chunk 2 chunks {'l2': {'rigid': [(0, 2), (2, 3)]}}
+[runner] L2 (2,) deform chunk 2 chunks {'l2': {'deform': [(0, 2), (2, 3)]}}
+WARNING:tensorflow:5 out of the last 5 calls to <function UnchunkedRunner._linear_sel.<locals>.body at 0x7f85a1a3cd30> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+[runner] L2 (2,) affine+deform chunk 2 chunks {'l2': {'affine': [(0, 2), (2, 3)], 'deform': [(0, 2), (2, 3)]}}
+
+[runner] L2 --levels 2 (rigid, deform, affine+deform): exact_* = unchunked vs reference, stream_* = streamed vs reference, plain keys = streamed vs unchunked: A 1.79e-07, U1 3.44e-06, U1_inv 3.49e-06, U1_inv_mean 2.13e-07, U1_mean 2.13e-07, exact_A 1.79e-07, exact_U1 4.29e-06, exact_U1_inv 4.11e-06, min_vs_default_U1 5.78e-01, stream_A 1.19e-07, stream_U1 5.01e-06, stream_U1_inv 4.83e-06, u_ckpt 2.20e-06, u_ckpt_mean 1.47e-07, u_inv_ckpt 2.20e-06, u_inv_ckpt_mean 1.47e-07
+
+[runner] L2 truncation 4 / skip 2 (vs reference and streamed vs unchunked): A 1.79e-07, U1 3.44e-06, U1_inv 3.49e-06, U1_inv_mean 2.83e-07, U1_mean 2.83e-07, exact_A 2.38e-07, exact_U1 4.29e-06, exact_U1_inv 4.11e-06, min_vs_default_U1 5.78e-01, stream_A 1.49e-07, stream_U1 5.01e-06, stream_U1_inv 4.83e-06, u_ckpt 2.20e-06, u_ckpt_mean 1.47e-07, u_inv_ckpt 2.20e-06, u_inv_ckpt_mean 1.47e-07
+ok
+test_defaults (tests.test_predict.TestCLI) ... ok
+test_rejected_branches_exit2_naming_the_four_values (tests.test_predict.TestCLI) ... ok
+test_resolve_check_chunks (tests.test_predict.TestCLI) ... check-streaming: --chunk-l1 6 above the int32 cap 4; capped
+check-streaming: level 1 not chunked (--chunk-l1 0)
+check-streaming: --chunk-l1 0 above the int32 cap 4; capped
+ok
+test_validate_imports_no_tensorflow (tests.test_predict.TestCLI) ... ok
+test_validation_errors_exit2 (tests.test_predict.TestCLI) ... ok
+test_affine_deform_composition_1mm_and_2mm (tests.test_predict.TestCanonicalConversion) ... 
+[predict] canonical affine+deform spacing (1.0, 1.0, 1.0): fwd 9.24e-07, inv 6.70e-07 vox vs numpy; |compose(fwd, inv)| max 8.40e-07 mm (5349 interior voxels)
+
+[predict] canonical affine+deform spacing (2.0, 2.0, 2.0): fwd 7.11e-07, inv 5.50e-07 vox vs numpy; |compose(fwd, inv)| max 1.09e-06 mm (5675 interior voxels)
+ok
+test_deform_constant_field (tests.test_predict.TestCanonicalConversion) ... ok
+test_rigid_and_affine_1mm_and_2mm (tests.test_predict.TestCanonicalConversion) ... 
+[predict] canonical rigid spacing (1.0, 1.0, 1.0): fwd 7.15e-07, inv 4.67e-07 vox vs numpy; |compose(fwd, inv)| max 8.11e-07 mm (4718 interior voxels)
+
+[predict] canonical affine spacing (1.0, 1.0, 1.0): fwd 9.96e-07, inv 5.83e-07 vox vs numpy; |compose(fwd, inv)| max 9.61e-07 mm (4813 interior voxels)
+
+[predict] canonical rigid spacing (2.0, 2.0, 2.0): fwd 5.43e-07, inv 4.67e-07 vox vs numpy; |compose(fwd, inv)| max 1.28e-06 mm (5232 interior voxels)
+
+[predict] canonical affine spacing (2.0, 2.0, 2.0): fwd 7.45e-07, inv 5.50e-07 vox vs numpy; |compose(fwd, inv)| max 9.87e-07 mm (5461 interior voxels)
+ok
+test_level1_files_vs_trainer_cpu (tests.test_predict.TestFilesVsTrainerLevel1) ... 
+[predict] (b) L1 files vs trainer, unchunked: fwd 2.76e-07, inv 4.67e-07 vox (S_exact); internal check {'S0_T1w': 4.58e-05}; 139 s
+
+[predict] (b) L1 files vs trainer, streamed chunk 1: fwd 6.85e-07, inv 1.39e-06 vox (S_stream); internal check {'S0_T1w': 4.58e-05}; 153 s
+
+[predict] (b) L1 files vs trainer, streamed chunk 3: fwd 6.37e-07, inv 1.36e-06 vox (S_stream); internal check {'S0_T1w': 4.58e-05}; 151 s
+
+[predict] (b) L1 files vs trainer on CPU: total 532 s, peak RSS 23.9 GB
+ok
+test_fallbacks_without_git (tests.test_predict.TestGitCommit) ... ok
+test_real_repository (tests.test_predict.TestGitCommit) ... ok
+test_absent_reference_and_grid_requirements (tests.test_predict.TestGrid) ... ok
+test_json_and_nifti_references (tests.test_predict.TestGrid) ... ok
+test_mirrored_and_bad_references_raise (tests.test_predict.TestGrid) ... ok
+test_0_magnitudes (tests.test_predict.TestLevel2Convention) ... 
+[predict] level-2 cascade, level-4 rigid head designed, SVF heads x2^2: {'rigid_rot_deg': 9.502, 'rigid_trans_mm': 10.654, 'affine_rot_deg': 9.58, 'affine_trans_mm': 10.85, 'u_max_vox': 4.301}
+ok
+test_c_check_convention_and_evaluation (tests.test_predict.TestLevel2Convention) ... 
+[predict] (c) check-convention: best 1.0000, second 0.8588 (xyz --- swap True), identity 0.0818 -> margins 0.1412 / 0.9182
+2026-11-06 21:09:28,110 INFO 3 subjects, grid (160, 224, 192), spacing (1.0, 1.0, 1.0), 4 labels (2 cortical), method tiny_l2, convention components=xyz signs=+++ units=mm swap_roles=False
+2026-11-06 21:09:30,263 INFO preloaded 3 forward fields, 3 s
+2026-11-06 21:09:33,181 INFO pass 1 (warp to atlas space) done, 6 s
+2026-11-06 21:09:59,403 INFO pass 2 (template metrics) done, 32 s
+2026-11-06 21:10:08,262 INFO pass 3 (2 pairs) done, 41 s
+
+[predict] (c) evaluation run --pairs 2: template_dice 0.556, pair_dice 0.262, inv_err_fwd 0.025 mm, centrality 0.504 mm
+ok
+test_c_internal_checks_from_files (tests.test_predict.TestLevel2Convention) ... 
+[predict] (c) rigid S0_T1w from files: coord fwd 7.63e-05 / inv 7.63e-05 vox, moved 2.30e-05, inverse consistency 1.10e-05 mm (raw 1.10e-05), interior 87 %
+
+[predict] (c) rigid S1_T1w from files: coord fwd 6.10e-05 / inv 6.10e-05 vox, moved 1.88e-05, inverse consistency 7.82e-06 mm (raw 7.82e-06), interior 85 %
+
+[predict] (c) rigid S2_T1w from files: coord fwd 7.63e-05 / inv 7.63e-05 vox, moved 1.60e-05, inverse consistency 5.64e-06 mm (raw 5.64e-06), interior 89 %
+
+[predict] (c) affine S0_T1w from files: coord fwd 6.10e-05 / inv 7.63e-05 vox, moved 2.30e-05, inverse consistency 9.60e-06 mm (raw 9.60e-06), interior 87 %
+
+[predict] (c) affine S1_T1w from files: coord fwd 7.63e-05 / inv 7.63e-05 vox, moved 2.07e-05, inverse consistency 8.23e-06 mm (raw 8.23e-06), interior 85 %
+
+[predict] (c) affine S2_T1w from files: coord fwd 7.63e-05 / inv 7.63e-05 vox, moved 1.60e-05, inverse consistency 5.22e-06 mm (raw 5.22e-06), interior 88 %
+
+[predict] (c) deform S0_T1w from files: coord fwd 4.58e-05 / inv 4.58e-05 vox, moved 1.79e-07, inverse consistency 7.56e-07 mm (raw 2.77e-01), interior 94 %
+
+[predict] (c) deform S1_T1w from files: coord fwd 4.58e-05 / inv 4.58e-05 vox, moved 1.79e-07, inverse consistency 7.28e-07 mm (raw 3.44e-01), interior 94 %
+
+[predict] (c) deform S2_T1w from files: coord fwd 4.58e-05 / inv 4.58e-05 vox, moved 1.19e-07, inverse consistency 7.25e-07 mm (raw 2.67e-01), interior 94 %
+
+[predict] (c) affine+deform S0_T1w from files: coord fwd 2.44e-04 / inv 2.14e-04 vox, moved 2.25e-01 (not gated), inverse consistency 6.90e-02 mm (raw 3.44e-01), interior 86 %
+
+[predict] (c) affine+deform S1_T1w from files: coord fwd 2.29e-04 / inv 2.44e-04 vox, moved 2.84e-01 (not gated), inverse consistency 6.91e-02 mm (raw 3.21e-01), interior 84 %
+
+[predict] (c) affine+deform S2_T1w from files: coord fwd 2.29e-04 / inv 2.29e-04 vox, moved 1.92e-01 (not gated), inverse consistency 6.75e-02 mm (raw 2.41e-01), interior 87 %
+ok
+test_c_wrong_conversion_fails (tests.test_predict.TestLevel2Convention) ... 
+[predict] (c) wrong conversion rigid: coord fwd 51.6 / inv 51.5 vox -> passed False
+
+[predict] (c) wrong conversion affine: coord fwd 57.3 / inv 57.4 vox -> passed False
+
+[predict] (c) wrong conversion deform: coord fwd 6.2 / inv 6.2 vox -> passed False
+
+[predict] (c) wrong conversion affine+deform: coord fwd 57.3 / inv 57.3 vox -> passed False
+ok
+test_d_affine_and_deform_compositions (tests.test_predict.TestLevel2Convention) ... 
+[predict] (d) S0_T1w: affine fwd / inv vs Mv(A^-1) p - p, Mv(A) y - y (numpy, the script's A): 6.02e-06 / 6.98e-06 vox; deform fwd / inv vs the deform cascade on the raw images: streamed 0.00e+00 / 0.00e+00, unchunked 4.08e-06 / 4.41e-06 vox
+
+[predict] (d) S1_T1w: affine fwd / inv vs Mv(A^-1) p - p, Mv(A) y - y (numpy, the script's A): 4.18e-06 / 3.91e-06 vox; deform fwd / inv vs the deform cascade on the raw images: streamed 0.00e+00 / 0.00e+00, unchunked 4.41e-06 / 4.65e-06 vox
+
+[predict] (d) S2_T1w: affine fwd / inv vs Mv(A^-1) p - p, Mv(A) y - y (numpy, the script's A): 2.80e-06 / 3.18e-06 vox; deform fwd / inv vs the deform cascade on the raw images: streamed 0.00e+00 / 0.00e+00, unchunked 3.22e-06 / 4.11e-06 vox
+ok
+test_d_affine_deform_composition (tests.test_predict.TestLevel2Convention)
+affine+deform == the deform cascade on the images resampled with the script's A, composed. ... 
+[predict] (d) affine+deform S0_T1w: fwd vs Mv(A^-1)(p + u) - p 6.33e-06 vox (all voxels), inv vs z + u_inv(z) - y 9.87e-06 vox (interior)
+
+[predict] (d) affine+deform S1_T1w: fwd vs Mv(A^-1)(p + u) - p 5.01e-06 vox (all voxels), inv vs z + u_inv(z) - y 8.37e-06 vox (interior)
+
+[predict] (d) affine+deform S2_T1w: fwd vs Mv(A^-1)(p + u) - p 4.74e-06 vox (all voxels), inv vs z + u_inv(z) - y 7.94e-06 vox (interior)
+ok
+test_d_rigid_composition (tests.test_predict.TestLevel2Convention) ... 
+[predict] (d) rigid S0_T1w: |R_fit - R| 6.23e-09, |det - 1| runner 1.82e-09 / fit 2.48e-09, |R^T R - I| runner 1.44e-07 / fit 1.45e-07, rotation 9.50 deg
+
+[predict] (d) rigid S1_T1w: |R_fit - R| 5.19e-09, |det - 1| runner 8.43e-08 / fit 8.47e-08, |R^T R - I| runner 1.28e-07 / fit 1.27e-07, rotation 8.47 deg
+
+[predict] (d) rigid S2_T1w: |R_fit - R| 3.45e-09, |det - 1| runner 4.11e-08 / fit 4.13e-08, |R^T R - I| runner 8.83e-08 / fit 8.81e-08, rotation 6.96 deg
+ok
+test_e_check_streaming_end_to_end (tests.test_predict.TestLevel2Convention) ... 2026-11-06 21:13:20,201 INFO levels: LevelPlan(L4 run, L2 run) (default: all checkpoint levels)
+2026-11-06 21:13:20,205 INFO no --grid-reference; affine not checked against the training grid
+2026-11-06 21:13:23,109 INFO loaded level-2 checkpoint /tmp/bgr_pred2_tgk9_6vl/l2/ckpt/last/last-5 (step 5), trainable float32, frozen levels [4]
+2026-11-06 21:13:23,109 INFO check-streaming: 3 subjects, branches deform, chunks {'l4': 2, 'l2': 2, 'source': {'l4': 'default', 'l2': 'default'}, 'capped': {}}, bound set float32
+2026-11-06 21:13:34,245 INFO store auto: estimate 0.5 GB vs 0.70 x budget 16.7 GB (MemAvailable) -> ram
+2026-11-06 21:13:56,498 INFO check-streaming differences deform: fwd_max_mm 4.41e-06, fwd_mean_mm 1.29e-07, inv_max_mm 4.65e-06, inv_mean_mm 1.29e-07, moved_max 1.02e-05
+2026-11-06 21:13:56,500 INFO /tmp/bgr_pred2_tgk9_6vl/check.json written (status pass)
+
+[predict] check-streaming L2 N 3 deform: {'fwd_max_mm': '4.41e-06', 'fwd_mean_mm': '1.29e-07', 'inv_max_mm': '4.65e-06', 'inv_mean_mm': '1.29e-07', 'moved_max': '1.02e-05'}; gpu_peak_mb {'unchunked': 1285.999267578125, 'streamed': 955.18896484375}
+2026-11-06 21:13:56,650 INFO levels: LevelPlan(L4 run, L2 run) (default: all checkpoint levels)
+2026-11-06 21:13:56,653 INFO no --grid-reference; affine not checked against the training grid
+2026-11-06 21:13:59,922 INFO loaded level-2 checkpoint /tmp/bgr_pred2_tgk9_6vl/l2/ckpt/last/last-5 (step 5), trainable float32, frozen levels [4]
+2026-11-06 21:13:59,923 INFO check-streaming: 3 subjects, branches affine+deform, chunks {'l4': 2, 'l2': 2, 'source': {'l4': 'default', 'l2': 'default'}, 'capped': {}}, bound set float32
+2026-11-06 21:14:20,778 INFO store auto: estimate 0.5 GB vs 0.70 x budget 16.7 GB (MemAvailable) -> ram
+2026-11-06 21:14:52,015 INFO check-streaming differences affine+deform: dA_lin 1.15e-06, dA_t_mm 4.2e-05, fwd_max_mm 0.000204, fwd_mean_mm 3.8e-05, inv_max_mm 0.000231, inv_mean_mm 3.79e-05, moved_max 7.16e-05
+2026-11-06 21:14:52,018 INFO /tmp/bgr_pred2_tgk9_6vl/check_ad.json written (status pass)
+
+[predict] check-streaming L2 N 3 affine+deform (recorded): exit 0, {'fwd_max_mm': '2.04e-04', 'fwd_mean_mm': '3.80e-05', 'inv_max_mm': '2.31e-04', 'inv_mean_mm': '3.79e-05', 'moved_max': '7.16e-05', 'dA_lin': '1.15e-06', 'dA_t_mm': '4.20e-05'}
+ok
+2026-11-06 21:16:36,978 INFO levels: LevelPlan(L4 run, L2 truncated)
+2026-11-06 21:16:36,981 INFO no --grid-reference; affine not checked against the training grid
+2026-11-06 21:16:39,876 INFO loaded level-2 checkpoint /tmp/bgr_predlv_w8fjghrw/l2skip/ckpt/last/last-5 (step 5), trainable float32, frozen levels [4]
+2026-11-06 21:16:39,877 INFO store auto: estimate 0.5 GB vs 0.70 x budget 16.8 GB (MemAvailable) -> ram
+2026-11-06 21:16:39,887 INFO run: 3 subjects, branches deform, mode streamed, level-2 checkpoint step 5, trainable float32
+2026-11-06 21:16:58,110 INFO internal check S0_T1w: coord fwd 4.58e-05 / inv 4.58e-05 vox, moved 1.79e-07, inverse consistency 1.53e-06 mm, interior 93.8 % -> pass
+2026-11-06 21:16:58,111 INFO subject 1 / 3 S0_T1w written
+2026-11-06 21:17:11,456 INFO internal check S1_T1w: coord fwd 4.58e-05 / inv 4.58e-05 vox, moved 1.79e-07, inverse consistency 1.45e-06 mm, interior 93.8 % -> pass
+2026-11-06 21:17:11,456 INFO subject 2 / 3 S1_T1w written
+2026-11-06 21:17:25,401 INFO internal check S2_T1w: coord fwd 4.58e-05 / inv 4.58e-05 vox, moved 1.19e-07, inverse consistency 9.85e-07 mm, interior 93.8 % -> pass
+2026-11-06 21:17:25,401 INFO subject 3 / 3 S2_T1w written
+2026-11-06 21:17:25,402 INFO deform:l4: 45.5 s, TF peak 2397 MiB
+2026-11-06 21:17:27,061 INFO /tmp/bgr_predlv_w8fjghrw/out_L4/predict.json written (status ok)
+2026-11-06 21:17:27,232 INFO levels: LevelPlan(L4 skipped, L2 run)
+2026-11-06 21:17:27,234 INFO no --grid-reference; affine not checked against the training grid
+2026-11-06 21:17:30,505 INFO loaded level-2 checkpoint /tmp/bgr_predlv_w8fjghrw/l2skip/ckpt/last/last-5 (step 5), trainable float32, frozen levels [4]
+2026-11-06 21:17:30,506 INFO store auto: estimate 0.5 GB vs 0.70 x budget 16.7 GB (MemAvailable) -> ram
+2026-11-06 21:17:30,515 INFO run: 3 subjects, branches deform, mode streamed, level-2 checkpoint step 5, trainable float32
+2026-11-06 21:17:52,196 INFO internal check S0_T1w: coord fwd 6.1e-05 / inv 4.58e-05 vox, moved 1.79e-07, inverse consistency 7.25e-07 mm, interior 93.8 % -> pass
+2026-11-06 21:17:52,196 INFO subject 1 / 3 S0_T1w written
+2026-11-06 21:18:05,838 INFO internal check S1_T1w: coord fwd 4.58e-05 / inv 4.58e-05 vox, moved 1.79e-07, inverse consistency 9.54e-07 mm, interior 93.8 % -> pass
+2026-11-06 21:18:05,839 INFO subject 2 / 3 S1_T1w written
+2026-11-06 21:18:19,067 INFO internal check S2_T1w: coord fwd 4.58e-05 / inv 4.58e-05 vox, moved 1.79e-07, inverse consistency 7.25e-07 mm, interior 93.8 % -> pass
+2026-11-06 21:18:19,068 INFO subject 3 / 3 S2_T1w written
+2026-11-06 21:18:19,068 INFO deform:l2: 48.6 s, TF peak 2660 MiB
+2026-11-06 21:18:20,622 INFO /tmp/bgr_predlv_w8fjghrw/out_L2/predict.json written (status ok)
+test_check_convention_on_skip_output (tests.test_predict.TestLevelsEndToEnd) ... 
+[predict] --levels 2 check-convention: best xyz +++ ncc 1.0000
+
+[predict] --levels 4 check-convention: best xyz +++ ncc 1.0000
+ok
+test_check_streaming_levels (tests.test_predict.TestLevelsEndToEnd) ... 2026-11-06 21:31:50,076 INFO levels: LevelPlan(L4 skipped, L2 run)
+2026-11-06 21:31:50,080 INFO no --grid-reference; affine not checked against the training grid
+2026-11-06 21:31:52,948 INFO loaded level-2 checkpoint /tmp/bgr_predlv_w8fjghrw/l2skip/ckpt/last/last-5 (step 5), trainable float32, frozen levels [4]
+2026-11-06 21:31:52,949 INFO check-streaming: 3 subjects, branches deform, chunks {'l2': 2, 'source': {'l2': 'default'}, 'capped': {}}, bound set float32
+WARNING:tensorflow:5 out of the last 5 calls to <function UnchunkedRunner._deform_sel.<locals>.<lambda> at 0x7f85cc1f5310> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+2026-11-06 21:31:59,990 WARNING 5 out of the last 5 calls to <function UnchunkedRunner._deform_sel.<locals>.<lambda> at 0x7f85cc1f5310> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+2026-11-06 21:32:02,467 INFO store auto: estimate 0.5 GB vs 0.70 x budget 16.8 GB (MemAvailable) -> ram
+2026-11-06 21:32:17,283 INFO check-streaming differences deform: fwd_max_mm 3.46e-06, fwd_mean_mm 9.6e-08, inv_max_mm 5.48e-06, inv_mean_mm 9.61e-08, moved_max 1.03e-05
+2026-11-06 21:32:17,288 INFO /tmp/bgr_predlv_w8fjghrw/check_L2.json written (status pass)
+
+[predict] check-streaming --levels 2: {'fwd_max_mm': '3.46e-06', 'fwd_mean_mm': '9.60e-08', 'inv_max_mm': '5.48e-06', 'inv_mean_mm': '9.61e-08', 'moved_max': '1.03e-05'}
+2026-11-06 21:32:17,412 INFO levels: LevelPlan(L4 run, L2 truncated)
+2026-11-06 21:32:17,415 INFO no --grid-reference; affine not checked against the training grid
+2026-11-06 21:32:19,991 INFO loaded level-2 checkpoint /tmp/bgr_predlv_w8fjghrw/l2skip/ckpt/last/last-5 (step 5), trainable float32, frozen levels [4]
+2026-11-06 21:32:19,992 INFO check-streaming: 3 subjects, branches deform, chunks {'l4': 2, 'source': {'l4': 'default'}, 'capped': {}}, bound set float32
+WARNING:tensorflow:6 out of the last 6 calls to <function UnchunkedRunner._deform_sel.<locals>.<lambda> at 0x7f853395d040> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+2026-11-06 21:32:23,589 WARNING 6 out of the last 6 calls to <function UnchunkedRunner._deform_sel.<locals>.<lambda> at 0x7f853395d040> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+2026-11-06 21:32:26,198 INFO store auto: estimate 0.5 GB vs 0.70 x budget 16.8 GB (MemAvailable) -> ram
+2026-11-06 21:32:36,619 INFO check-streaming differences deform: fwd_max_mm 8.11e-06, fwd_mean_mm 2.28e-07, inv_max_mm 8.34e-06, inv_mean_mm 2.28e-07, moved_max 1.41e-05
+2026-11-06 21:32:36,638 INFO /tmp/bgr_predlv_w8fjghrw/check_L4.json written (status pass)
+
+[predict] check-streaming --levels 4: {'fwd_max_mm': '8.11e-06', 'fwd_mean_mm': '2.28e-07', 'inv_max_mm': '8.34e-06', 'inv_mean_mm': '2.28e-07', 'moved_max': '1.41e-05'}
+ok
+test_level_not_in_checkpoint (tests.test_predict.TestLevelsEndToEnd) ... ok
+test_low_exposure_warning (tests.test_predict.TestLevelsEndToEnd) ... ok
+test_refusal_and_force (tests.test_predict.TestLevelsEndToEnd) ... 2026-11-06 21:32:37,097 WARNING forced (--allow-untrained-skip): level 2, task affine, skipped levels [4], p {'4': 0.0}, run config /tmp/bgr_predlv_w8fjghrw/l2skip/config.json is untrained in training
+2026-11-06 21:32:37,097 INFO levels: LevelPlan(L4 skipped, L2 run)
+2026-11-06 21:32:37,102 INFO no --grid-reference; affine not checked against the training grid
+2026-11-06 21:32:39,834 INFO loaded level-2 checkpoint /tmp/bgr_predlv_w8fjghrw/l2skip/ckpt/last/last-5 (step 5), trainable float32, frozen levels [4]
+2026-11-06 21:32:39,835 INFO store auto: estimate 0.3 GB vs 0.70 x budget 16.8 GB (MemAvailable) -> ram
+2026-11-06 21:32:39,842 INFO run: 3 subjects, branches affine, mode streamed, level-2 checkpoint step 5, trainable float32
+2026-11-06 21:32:57,313 INFO internal check S0_T1w: coord fwd 7.63e-05 / inv 7.63e-05 vox, moved 1.84e-05, inverse consistency 4.13e-07 mm, interior 93.8 % -> pass
+2026-11-06 21:32:57,314 INFO subject 1 / 3 S0_T1w written
+2026-11-06 21:33:12,328 INFO internal check S1_T1w: coord fwd 7.63e-05 / inv 6.1e-05 vox, moved 1.93e-05, inverse consistency 3.65e-07 mm, interior 93.8 % -> pass
+2026-11-06 21:33:12,329 INFO subject 2 / 3 S1_T1w written
+2026-11-06 21:33:21,216 INFO subject 3 / 3 S2_T1w written
+2026-11-06 21:33:21,217 INFO affine:l2: 2.6 s, TF peak 679 MiB
+2026-11-06 21:33:22,831 INFO /tmp/bgr_predlv_w8fjghrw/out_forced/predict.json written (status ok)
+
+[predict] refusal: --levels 2 with --branches affine skips levels the checkpoint chain was never trained to skip (or its config is not readable): level 2, task affine, skipped levels [4], p {'4': 0.0}, run config /tmp/bgr_predlv_w8fjghrw/l2skip/config.json (untrained); use --allow-untrained-skip to run it anyway
+ok
+test_run_levels_files_and_record (tests.test_predict.TestLevelsEndToEnd) ... 
+[predict] levels e2e: SVF heads doubled 1 more times; last measured max |U1| for `4` / `2`: ['5.24', '4.16']
+
+[predict] --levels 4: written fields vs the streamed runner under the plan 0.00e+00 vox; max |U1| 5.244
+
+[predict] --levels 2: written fields vs the streamed runner under the plan 0.00e+00 vox; max |U1| 4.158
+ok
+test_absent_and_mirrored_grid_reference (tests.test_predict.TestRunLevel4) ... 2026-11-06 21:33:58,603 INFO levels: LevelPlan(L4 run) (default: all checkpoint levels)
+2026-11-06 21:34:00,083 INFO loaded level-4 checkpoint /tmp/bgr_pred4_851wnrch/l4/ckpt/last/last-7 (step 7), trainable float32, frozen levels []
+2026-11-06 21:34:00,083 INFO store auto: estimate 0.1 GB vs 0.70 x budget 16.9 GB (MemAvailable) -> ram
+2026-11-06 21:34:00,089 INFO run: 2 subjects, branches affine, mode streamed, level-4 checkpoint step 7, trainable float32
+2026-11-06 21:34:17,701 INFO internal check S0_T1w: coord fwd 7.63e-05 / inv 6.1e-05 vox, moved 1.66e-05, inverse consistency 5.36e-07 mm, interior 93.8 % -> pass
+2026-11-06 21:34:17,702 INFO subject 1 / 2 S0_T1w written
+2026-11-06 21:34:33,432 INFO internal check S1_T1w: coord fwd 7.63e-05 / inv 7.63e-05 vox, moved 1.74e-05, inverse consistency 5.07e-07 mm, interior 93.8 % -> pass
+2026-11-06 21:34:33,433 INFO subject 2 / 2 S1_T1w written
+2026-11-06 21:34:33,434 INFO affine:l4: 2.2 s, TF peak 125 MiB
+2026-11-06 21:34:34,839 INFO /tmp/bgr_pred4_851wnrch/o_noref/predict.json written (status ok)
+2026-11-06 21:34:34,975 INFO levels: LevelPlan(L4 run) (default: all checkpoint levels)
+2026-11-06 21:34:34,978 ERROR processed affine
+[[   1.     0.     0.   -79.5]
+ [   0.     1.     0.  -111.5]
+ [   0.     0.     1.   -95.5]
+ [   0.     0.     0.     1. ]]
+differs from the grid reference /tmp/bgr_pred4_851wnrch/mirrored.json
+[[  -1.    -0.    -0.    79.5]
+ [   0.     1.     0.  -111.5]
+ [   0.     0.     1.   -95.5]
+ [   0.     0.     0.     1. ]]
+(max |diff| 159)
+2026-11-06 21:34:34,979 ERROR processed affine differs from the grid reference /tmp/bgr_pred4_851wnrch/mirrored.json by 159 (> 0.001): processed [[1.0, 0.0, 0.0, -79.5], [0.0, 1.0, 0.0, -111.5], [0.0, 0.0, 1.0, -95.5], [0.0, 0.0, 0.0, 1.0]], reference [[-1.0, -0.0, -0.0, 79.5], [0.0, 1.0, 0.0, -111.5], [0.0, 0.0, 1.0, -95.5], [0.0, 0.0, 0.0, 1.0]]
+2026-11-06 21:34:34,980 INFO /tmp/bgr_pred4_851wnrch/o_mirror/predict.json written (status error)
+ok
+test_check_streaming_n_max_exit2_from_config (tests.test_predict.TestRunLevel4) ... 2026-11-06 21:34:35,248 INFO levels: LevelPlan(L4 run, L2 run, L1 run) (default: all checkpoint levels)
+2026-11-06 21:34:35,249 ERROR unchunked mode at level 1 supports at most 4 subjects (largest tensor d1 skip concat, 440401920 elements per image); use --mode streamed or fewer --n-subjects
+2026-11-06 21:34:35,250 INFO /tmp/bgr_pred4_851wnrch/nmax.json written (status error)
+
+[predict] check-streaming --n-subjects 5 (default widths, level 1): unchunked mode at level 1 supports at most 4 subjects (largest tensor d1 skip concat, 440401920 elements per image); use --mode streamed or fewer --n-subjects
+ok
+test_cpu_subprocess (tests.test_predict.TestRunLevel4) ... 
+[predict] predict.py run --device cpu (AMP level-4 TINY, N 2): rc 0, 56 s, visible ['/physical_device:CPU:0']
+ok
+test_internal_mismatch_exit5 (tests.test_predict.TestRunLevel4) ... 2026-11-06 21:35:31,870 INFO levels: LevelPlan(L4 run) (default: all checkpoint levels)
+2026-11-06 21:35:31,873 INFO no --grid-reference; affine not checked against the training grid
+2026-11-06 21:35:33,366 INFO loaded level-4 checkpoint /tmp/bgr_pred4_851wnrch/l4/ckpt/last/last-7 (step 7), trainable float32, frozen levels []
+2026-11-06 21:35:33,367 INFO store auto: estimate 0.1 GB vs 0.70 x budget 16.6 GB (MemAvailable) -> ram
+2026-11-06 21:35:33,374 INFO run: 2 subjects, branches affine, mode streamed, level-4 checkpoint step 7, trainable float32
+2026-11-06 21:35:50,271 INFO internal check S0_T1w: coord fwd 0.0101 / inv 6.1e-05 vox, moved 0.0108, inverse consistency 0.0173 mm, interior 93.8 % -> FAIL
+2026-11-06 21:35:50,272 INFO subject 1 / 2 S0_T1w written
+2026-11-06 21:35:59,978 INFO subject 2 / 2 S1_T1w written
+2026-11-06 21:35:59,979 INFO affine:l4: 2.2 s, TF peak 126 MiB
+2026-11-06 21:36:01,315 ERROR internal consistency check failed (gates coord 0.001 vox, moved 0.001): {'S0_T1w': {'coord_fwd_max_vox': 0.01007080078125, 'coord_inv_max_vox': 6.103515625e-05, 'moved_vs_internal_max_abs': 0.01077774167060852, 'moved_gated': True, 'inv_consistency_max_mm': 0.017322717234492302, 'inv_consistency_raw_max_mm': 0.017322717234492302, 'interior_voxels': 6452160, 'interior_voxels_inv': 6452160, 'interior_fraction': 0.9376395089285714, 'passed': False}}
+2026-11-06 21:36:01,318 INFO /tmp/bgr_pred4_851wnrch/o_shift/predict.json written (status internal_mismatch)
+
+[predict] internal mismatch (+0.01 vox): coord_fwd_max_vox 0.01007 -> exit 5
+ok
+test_nonfinite_exit3_no_atlas (tests.test_predict.TestRunLevel4) ... 2026-11-06 21:36:01,438 INFO levels: LevelPlan(L4 run) (default: all checkpoint levels)
+2026-11-06 21:36:01,441 INFO no --grid-reference; affine not checked against the training grid
+2026-11-06 21:36:02,749 INFO loaded level-4 checkpoint /tmp/bgr_pred4_851wnrch/l4/ckpt/last/last-7 (step 7), trainable float32, frozen levels []
+2026-11-06 21:36:02,750 INFO store auto: estimate 0.1 GB vs 0.70 x budget 16.6 GB (MemAvailable) -> ram
+2026-11-06 21:36:02,755 INFO run: 2 subjects, branches rigid, mode streamed, level-4 checkpoint step 7, trainable float32
+2026-11-06 21:36:13,866 ERROR subject S0_T1w: non-finite values fwd 1, inv 0, moved 0
+2026-11-06 21:36:18,890 INFO internal check S0_T1w: coord fwd nan / inv 6.1e-05 vox, moved 0.368, inverse consistency nan mm, interior 93.8 % -> FAIL
+2026-11-06 21:36:18,890 INFO subject 1 / 2 S0_T1w written
+2026-11-06 21:36:29,058 ERROR subject S1_T1w: non-finite values fwd 1, inv 0, moved 0
+2026-11-06 21:36:34,060 INFO internal check S1_T1w: coord fwd nan / inv 6.1e-05 vox, moved 1.93e-05, inverse consistency nan mm, interior 93.8 % -> FAIL
+2026-11-06 21:36:34,060 INFO subject 2 / 2 S1_T1w written
+2026-11-06 21:36:34,061 INFO rigid:l4: 1.9 s, TF peak 126 MiB
+2026-11-06 21:36:34,062 ERROR 2 non-finite output values; atlas files not written: {'S0_T1w': {'fwd': 1, 'inv': 0, 'moved': 0}, 'S1_T1w': {'fwd': 1, 'inv': 0, 'moved': 0}}
+2026-11-06 21:36:34,063 INFO /tmp/bgr_pred4_851wnrch/o_nan/predict.json written (status nonfinite)
+ok
+test_predict_json_schema_and_grid_reference (tests.test_predict.TestRunLevel4) ... 2026-11-06 21:36:34,236 INFO levels: LevelPlan(L4 run) (default: all checkpoint levels)
+2026-11-06 21:36:34,239 INFO grid reference /tmp/bgr_pred4_851wnrch/target_grid.json: max |affine diff| 0
+2026-11-06 21:36:35,551 INFO loaded level-4 checkpoint /tmp/bgr_pred4_851wnrch/l4/ckpt/last/last-7 (step 7), trainable float32, frozen levels []
+2026-11-06 21:36:35,552 INFO store auto: estimate 0.1 GB vs 0.70 x budget 16.3 GB (MemAvailable) -> ram
+2026-11-06 21:36:35,558 INFO run: 2 subjects, branches rigid, mode streamed, level-4 checkpoint step 7, trainable float32
+2026-11-06 21:36:51,661 INFO internal check S0_T1w: coord fwd 6.1e-05 / inv 6.1e-05 vox, moved 1.84e-05, inverse consistency 4.98e-07 mm, interior 93.8 % -> pass
+2026-11-06 21:36:51,662 INFO subject 1 / 2 S0_T1w written
+2026-11-06 21:37:06,157 INFO internal check S1_T1w: coord fwd 7.63e-05 / inv 6.1e-05 vox, moved 1.93e-05, inverse consistency 4.47e-07 mm, interior 93.8 % -> pass
+2026-11-06 21:37:06,157 INFO subject 2 / 2 S1_T1w written
+2026-11-06 21:37:06,158 INFO rigid:l4: 2.2 s, TF peak 126 MiB
+2026-11-06 21:37:07,480 INFO /tmp/bgr_pred4_851wnrch/o_json/predict.json written (status ok)
+
+[predict] level-4 rigid: internal check {'S0_T1w': {'coord_fwd_max_vox': 6.1e-05, 'coord_inv_max_vox': 6.1e-05, 'moved_vs_internal_max_abs': 1.84e-05, 'moved_gated': True, 'inv_consistency_max_mm': 5e-07, 'inv_consistency_raw_max_mm': 5e-07, 'interior_voxels': 6452160, 'interior_voxels_inv': 6452160, 'interior_fraction': 0.9376395, 'passed': True}, 'S1_T1w': {'coord_fwd_max_vox': 7.63e-05, 'coord_inv_max_vox': 6.1e-05, 'moved_vs_internal_max_abs': 1.93e-05, 'moved_gated': True, 'inv_consistency_max_mm': 4e-07, 'inv_consistency_raw_max_mm': 4e-07, 'interior_voxels': 6452160, 'interior_voxels_inv': 6452160, 'interior_fraction': 0.9376395, 'passed': True}}
+2026-11-06 21:37:08,874 INFO levels: LevelPlan(L4 run) (default: all checkpoint levels)
+2026-11-06 21:37:08,879 INFO grid reference /tmp/bgr_pred4_851wnrch/ref.nii.gz: max |affine diff| 0
+2026-11-06 21:37:10,138 INFO loaded level-4 checkpoint /tmp/bgr_pred4_851wnrch/l4/ckpt/last/last-7 (step 7), trainable float32, frozen levels []
+2026-11-06 21:37:10,145 INFO run: 2 subjects, branches deform, mode unchunked, level-4 checkpoint step 7, trainable float32
+2026-11-06 21:37:26,849 INFO internal check S0_T1w: coord fwd 4.58e-05 / inv 4.58e-05 vox, moved 1.79e-07, inverse consistency 6.08e-08 mm, interior 93.8 % -> pass
+2026-11-06 21:37:26,850 INFO subject 1 / 2 S0_T1w written
+2026-11-06 21:37:40,601 INFO internal check S1_T1w: coord fwd 4.58e-05 / inv 4.58e-05 vox, moved 1.79e-07, inverse consistency 4.77e-08 mm, interior 93.8 % -> pass
+2026-11-06 21:37:40,602 INFO subject 2 / 2 S1_T1w written
+2026-11-06 21:37:40,603 INFO deform:l4: 2.6 s, TF peak 134 MiB
+2026-11-06 21:37:40,603 INFO pool: 0.0 s, TF peak 124 MiB
+2026-11-06 21:37:41,990 INFO /tmp/bgr_pred4_851wnrch/o_nii/predict.json written (status ok)
+
+[predict] level-4 deform: internal check {'S0_T1w': {'coord_fwd_max_vox': 4.58e-05, 'coord_inv_max_vox': 4.58e-05, 'moved_vs_internal_max_abs': 2e-07, 'moved_gated': True, 'inv_consistency_max_mm': 1e-07, 'inv_consistency_raw_max_mm': 0.0075078, 'interior_voxels': 6452160, 'interior_voxels_inv': 6452160, 'interior_fraction': 0.9376395, 'passed': True}, 'S1_T1w': {'coord_fwd_max_vox': 4.58e-05, 'coord_inv_max_vox': 4.58e-05, 'moved_vs_internal_max_abs': 2e-07, 'moved_gated': True, 'inv_consistency_max_mm': 0.0, 'inv_consistency_raw_max_mm': 0.0074143, 'interior_voxels': 6452160, 'interior_voxels_inv': 6452160, 'interior_fraction': 0.9376395, 'passed': True}}
+ok
+test_cpu_hides_gpus_first (tests.test_predict.TestSetupDevice) ... ok
+test_errors (tests.test_predict.TestSetupDevice) ... ok
+test_gpu_growth_or_limit (tests.test_predict.TestSetupDevice) ... ok
+
+----------------------------------------------------------------------
+Ran 48 tests in 7307.351s
+
+OK

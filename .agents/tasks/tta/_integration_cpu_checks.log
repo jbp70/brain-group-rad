@@ -1,0 +1,14 @@
+=== compile 2026-11-07T00:53:23-05:00
+[run_tests] compile (2026-11-07T00:53:23-05:00): inference/__init__.py inference/canonical.py inference/cli.py inference/levels.py inference/linear_eval.py inference/loader.py inference/predict.py inference/runner.py inference/store.py inference/streaming.py inference/tta.py evaluation/__init__.py evaluation/__main__.py evaluation/evaluate.py evaluation/fields.py evaluation/metrics.py scripts/compare_tta.py predict.py tests/test_tta.py tests/test_predict_tta.py tests/test_predict_tta_golden.py tests/test_linear_eval.py tests/test_compare_tta.py
+py_compile OK
+ast feature_version=(3, 8) OK (23 files)
+inference.tta imports without TF
+compile rc 0
+=== check_gauge_free.py (bgr_preproc38) 2026-11-07T00:53:25-05:00
+E1 affine encode/decode round trip max |diff|: 3.61e-16
+E5 4-iteration centering: v2 pair err 3.02e-14 mm, centered translation max |diff| 1.03e-07 mm
+E2 max |encode(F M F) - sigma_f * encode(M)| over 8 flips x 20: 0.00e+00
+E3 flip-dependent raw gauge, zero model error: v1 raw averaging pair err 0.183 mm; v2 gauge-free pair err 3.40e-14 mm; v2 centered max |diff| 1.42e-14
+E4 v2 TTA(flip_g x) vs F_g TTA(x) F_g, non-equivariant model, max |diff|: 5.33e-15
+ALL PASS
+check_gauge_free rc 0
