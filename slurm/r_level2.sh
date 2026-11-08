@@ -126,6 +126,15 @@
 #   for P in 0 0.5; do T=${P/./}
 #     RUN_NAME=r2syn_smoke_p$T CASCADE_FROM=$R/r4syn_smoke_p$T/ckpt/last STEPS=200 VAL_EVERY=100 WARMUP=50 PROJECT_STEPS=15000 PROJECT_VAL_EVERY=500 WD=1e-1 SYNTH_PROB=$P GPU_POLL=true MIN_TASK_STEPS=rigid:20,affine:20,deform:40 EXTRA_ARGS="--group-config B --lambda-smooth 0.5" sbatch --job-name=r2synsm$T --time=03:00:00 --mem=64G slurm/r_level2.sh
 #   done
+#
+# Fine-grid frozen integration (.agents/tasks/fine-grid-integration/plan.md D1-D4, D8; default off).
+#   FROZEN_INTEGRATION_GRID (empty default = no flag = main.py's rule, native at level 2) ->
+#   --frozen-integration-grid native|current, placed just before EXTRA_ARGS; any other value exits 2.
+#   current = the frozen level-4 SVF is upsampled to the level-2 grid and integrated there (instead
+#   of integrated at 4 mm and the displacement upsampled); native = today's behaviour. main.py
+#   records the value in config.json (args and cascade.frozen_integration_grid). A level-1 run that
+#   cascades from this run inherits it; an explicit different value at level 1 fails in main.py.
+#   The value is printed in the 'frozen integration grid' line of the log.
 set -euo pipefail
 
 PROJ="${PROJ:-/autofs/space/crater_001/users/jn85/BrainRegProjects/GroupwiseReg}"
@@ -244,6 +253,13 @@ if [ ! -f "$RESULTS/$RUN_NAME/ckpt/last/checkpoint" ]; then
 fi
 MEM_ARGS=""
 if [ "$TF_MEM_LIMIT_MB" -gt 0 ]; then MEM_ARGS="--gpu-memory-limit-mb $TF_MEM_LIMIT_MB"; fi
+# Fine-grid frozen integration (default empty: no flag, main.py's rule applies).
+FROZEN_INTEGRATION_GRID="${FROZEN_INTEGRATION_GRID:-}"
+GRID_ARGS=""
+if [ -n "$FROZEN_INTEGRATION_GRID" ]; then
+    need_choice FROZEN_INTEGRATION_GRID "$FROZEN_INTEGRATION_GRID" native current
+    GRID_ARGS="--frozen-integration-grid $FROZEN_INTEGRATION_GRID"
+fi
 
 TASKS=$(echo "$TASK_RATIO" | sed 's/:[^,]*//g')
 HAS_DEFORM=false
@@ -359,7 +375,7 @@ MAIN=(main.py --data "$DATA" --results "$RESULTS" --run-name "$RUN_NAME" --level
       --cascade-skip-linear "$SKIP_LINEAR" --cascade-skip-deform "$SKIP_DEFORM" $LIN_ARGS
       --val-pair-chunk "$VAL_PAIR_CHUNK" --val-png true
       --num-threads "${SLURM_CPUS_PER_TASK:-3}" --log-every 25 --log-backend jsonl
-      $VAL_ARGS $DEFORM_ARGS $MEM_ARGS $WIDTH_ARGS $MITIG_ARGS $SYNTH_ARGS $EXTRA_ARGS)
+      $VAL_ARGS $DEFORM_ARGS $MEM_ARGS $WIDTH_ARGS $MITIG_ARGS $SYNTH_ARGS $GRID_ARGS $EXTRA_ARGS)
 # AMP: the dynamic loss scale overflows a few times early on (m8: 10-11 of 8000), hence 0.06.
 # Per task: FAIL if > 5 % of a task's steps in any 500-step window after step 100 are non-finite.
 # shellcheck disable=SC2206
@@ -398,6 +414,7 @@ echo "memory: grad ckpt $GRAD_CKPT | pair recompute $PAIR_RECOMPUTE | lean losse
 echo "widths: filters ${FILTERS:-default} | decoder ${DECODER_WIDTHS:-default}"
 echo "fp16 act clip $FP16_ACT_CLIP ($FP16_ACT_CLIP_SCOPE) | deform decoder dtype $DEFORM_DECODER_DTYPE | bn epsilon override $BN_EPSILON_OVERRIDE (0 = off)"
 echo "synth: p $SYNTH_PROB | jitter $SYNTH_JITTER | device $SYNTH_DEVICE | label set $SYNTH_LABEL_SET | gpu poll $GPU_POLL | min task steps ${MIN_TASK_STEPS:-none}"
+echo "frozen integration grid: ${FROZEN_INTEGRATION_GRID:-not set (main.py default: native)}"
 
 POLL_PID=""
 stop_poll() {

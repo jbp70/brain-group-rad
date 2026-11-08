@@ -118,6 +118,15 @@
 #   for P in 0 0.5; do T=${P/./}
 #     RUN_NAME=r1syn_smoke_p$T CASCADE_FROM=$R/r2syn_smoke_p$T/ckpt/last STEPS=200 VAL_EVERY=100 WARMUP=50 PROJECT_STEPS=4000 PROJECT_VAL_EVERY=500 LR=3e-4 WD=1e-1 TF_MEM_LIMIT_MB=42500 SYNTH_PROB=$P GPU_POLL=true MIN_TASK_STEPS=rigid:20,affine:20,deform:40 EXTRA_ARGS="--group-config B --lambda-smooth 0.5" sbatch --job-name=r1synsm$T --time=04:00:00 --mem=128G slurm/r_level1.sh
 #   done
+#
+# Fine-grid frozen integration (.agents/tasks/fine-grid-integration/plan.md D1-D4, D8; default off).
+#   FROZEN_INTEGRATION_GRID (empty default = no flag: level 1 INHERITS the value its level-2 source
+#   was trained with, read by main.py from the source's config.json; missing = native) ->
+#   --frozen-integration-grid native|current, placed just before EXTRA_ARGS; any other value exits 2.
+#   An explicit value that differs from the level-2 source's fails in main.py (a mixed chain would
+#   feed the frozen level-2 model inputs it never saw). current = the frozen level-4 SVF is
+#   integrated at 2 mm for the level-2 pre-warp, and both frozen SVFs are integrated and composed at
+#   1 mm; native = today's behaviour. The value is printed in the 'frozen integration grid' line.
 set -euo pipefail
 
 PROJ="${PROJ:-/autofs/space/crater_001/users/jn85/BrainRegProjects/GroupwiseReg}"
@@ -239,6 +248,13 @@ if [ ! -f "$RESULTS/$RUN_NAME/ckpt/last/checkpoint" ]; then
 fi
 MEM_ARGS=""
 if [ "$TF_MEM_LIMIT_MB" -gt 0 ]; then MEM_ARGS="--gpu-memory-limit-mb $TF_MEM_LIMIT_MB"; fi
+# Fine-grid frozen integration (default empty: no flag, inherited from the level-2 source).
+FROZEN_INTEGRATION_GRID="${FROZEN_INTEGRATION_GRID:-}"
+GRID_ARGS=""
+if [ -n "$FROZEN_INTEGRATION_GRID" ]; then
+    need_choice FROZEN_INTEGRATION_GRID "$FROZEN_INTEGRATION_GRID" native current
+    GRID_ARGS="--frozen-integration-grid $FROZEN_INTEGRATION_GRID"
+fi
 
 TASKS=$(echo "$TASK_RATIO" | sed 's/:[^,]*//g')
 HAS_DEFORM=false
@@ -357,7 +373,7 @@ MAIN=(main.py --data "$DATA" --results "$RESULTS" --run-name "$RUN_NAME" --level
       --cascade-skip-linear "$SKIP_LINEAR" --cascade-skip-deform "$SKIP_DEFORM" $LIN_ARGS
       --val-pair-chunk "$VAL_PAIR_CHUNK" --val-png true
       --num-threads "${SLURM_CPUS_PER_TASK:-3}" --log-every 25 --log-backend jsonl
-      $VAL_ARGS $DEFORM_ARGS $MEM_ARGS $WIDTH_ARGS $MITIG_ARGS $SYNTH_ARGS $EXTRA_ARGS)
+      $VAL_ARGS $DEFORM_ARGS $MEM_ARGS $WIDTH_ARGS $MITIG_ARGS $SYNTH_ARGS $GRID_ARGS $EXTRA_ARGS)
 # AMP: the dynamic loss scale overflows a few times early on (m9 smoke: 8 of 200), hence 0.06.
 # Per task: FAIL if > 5 % of a task's steps in any 500-step window after step 100 are non-finite.
 # shellcheck disable=SC2206
@@ -396,6 +412,7 @@ echo "memory: grad ckpt $GRAD_CKPT | pair recompute $PAIR_RECOMPUTE | lean losse
 echo "widths: filters ${FILTERS:-default} | decoder ${DECODER_WIDTHS:-default}"
 echo "fp16 act clip $FP16_ACT_CLIP ($FP16_ACT_CLIP_SCOPE) | deform decoder dtype $DEFORM_DECODER_DTYPE | bn epsilon override $BN_EPSILON_OVERRIDE (0 = off)"
 echo "synth: p $SYNTH_PROB | jitter $SYNTH_JITTER | device $SYNTH_DEVICE | label set $SYNTH_LABEL_SET | gpu poll $GPU_POLL | min task steps ${MIN_TASK_STEPS:-none}"
+echo "frozen integration grid: ${FROZEN_INTEGRATION_GRID:-not set (inherited from the level-2 source)}"
 
 POLL_PID=""
 stop_poll() {

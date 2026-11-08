@@ -41,7 +41,8 @@ RECIPE_ENV = ("GRAD_BALANCE", "BN_RECAL_BATCHES", "BN_RECAL_FREEZE", "SKIP_PROB"
               "INTENSITY_AUG_DEVICE", "TF_MEM_LIMIT_MB", "PAIR_RECOMPUTE", "VAL_IMAGE_CHUNK", "VAL_PAIR_CHUNK",
               "BN_RECAL_VALIDATE", "FP16_ACT_CLIP", "FP16_ACT_CLIP_SCOPE", "DEFORM_DECODER_DTYPE",
               "BN_EPSILON_OVERRIDE", "L1_SOURCE", "L2_SOURCE", "SRC_RESULTS", "CONFIG_TIMEOUT", "TIME_BUDGET_S",
-              "ONLY", "BGR_DRY_RUN", "FILTERS", "DECODER_WIDTHS", "TTA", "TTA_LEVELS", "SKIP_CHECKS")
+              "ONLY", "BGR_DRY_RUN", "FILTERS", "DECODER_WIDTHS", "TTA", "TTA_LEVELS", "SKIP_CHECKS",
+              "FROZEN_INTEGRATION_GRID", "L4_SOURCE", "GROUP_ARGS", "SMOOTH", "STUB_WRITE_CKPT")
 
 
 def _read(path):
@@ -1947,6 +1948,282 @@ class TestCascadeRuns(unittest.TestCase):
         self.assertIn("code: frozen %s at %s (clone HEAD %s)" % (self.sha1, root, sha2), r.stdout)
         self.assertIn("extract: present", r.stdout)
         self.assertIn("dirty check: skipped (resume", r.stdout)
+
+
+
+
+R_LEVEL2 = os.path.join(REPO, "slurm", "r_level2.sh")
+R_LEVEL1 = os.path.join(REPO, "slurm", "r_level1.sh")
+FGI = os.path.join(REPO, "slurm", "fgi_memory.sh")
+
+
+@unittest.skipIf(BASH is None, "bash not available")
+class TestFrozenGridKnob(unittest.TestCase):
+    """fine-grid-integration FEAT-003 (plan D8): FROZEN_INTEGRATION_GRID in r_level2.sh / r_level1.sh
+    (unset / empty -> no flag, today's calls; native | current -> one flag just before EXTRA_ARGS;
+    anything else -> exit 2). Stub runs as in TestStubRuns."""
+    setUp = TestStubRuns.setUp
+    tearDown = TestStubRuns.tearDown
+    run_script = TestStubRuns.run_script
+
+    def runs(self, path, **kw):
+        env = dict(CASCADE_FROM=os.path.join(self.tmp, "ckpt"), EXTRA_ARGS="--lambda-smooth 10")
+        env.update(kw)
+        return self.run_script(path, **env)
+
+    def test_level_scripts(self):
+        from runtime import args as A
+        for path, level in ((R_LEVEL2, 2), (R_LEVEL1, 1)):
+            with self.subTest(os.path.basename(path)):
+                r, base = self.runs(path)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertEqual(len(base), 2, base)
+                self.assertNotIn("--frozen-integration-grid", "\n".join(base))
+                self.assertIn("frozen integration grid: not set", r.stdout)
+                r, empty = self.runs(path, FROZEN_INTEGRATION_GRID="")
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertEqual(empty, base)
+                r, dry = self.runs(path, BGR_DRY_RUN="1")
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertNotIn("--frozen-integration-grid", r.stdout)
+                for grid in ("current", "native"):
+                    r, calls = self.runs(path, FROZEN_INTEGRATION_GRID=grid)
+                    self.assertEqual(r.returncode, 0, r.stderr)
+                    self.assertIn("frozen integration grid: %s" % grid, r.stdout)
+                    flag = " --frozen-integration-grid %s " % grid
+                    self.assertEqual(calls[0].count(flag), 1, calls[0])
+                    self.assertEqual(calls[0].count("--frozen-integration-grid"), 1, calls[0])
+                    self.assertTrue(calls[0].endswith(flag + "--lambda-smooth 10"), calls[0])
+                    self.assertEqual(calls[0].replace(flag, " ", 1), base[0])
+                    self.assertEqual(calls[1], base[1])
+                    argv = calls[0].split()
+                    a = A.parse_args(argv[argv.index("main.py") + 1:])
+                    self.assertEqual((a.level, a.frozen_integration_grid, a.lambda_smooth), (level, grid, 10.0))
+                r, calls = self.runs(path, FROZEN_INTEGRATION_GRID="bogus")
+                self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+                self.assertIsNone(calls)
+                self.assertIn("FROZEN_INTEGRATION_GRID must be one of: native current", r.stderr)
+
+    def test_static(self):
+        for path in (R_LEVEL2, R_LEVEL1):
+            text = _read(path)
+            with self.subTest(os.path.basename(path)):
+                self.assertNotIn("\r", text)
+                self.assertTrue(all(ord(c) < 128 for c in text))
+                self.assertIn('FROZEN_INTEGRATION_GRID="${FROZEN_INTEGRATION_GRID:-}"\n', text)
+                self.assertIn("$SYNTH_ARGS $GRID_ARGS $EXTRA_ARGS)", text)
+        self.assertIn("FROZEN_INTEGRATION_GRID", re.search(r"LEVEL_ENV_KEYS=\(([^)]*)\)", _read(CASCADE)).group(1))
+        self.assertIn("EXTRA_ARGS_L2='--frozen-integration-grid current'", _read(CASCADE))
+
+
+@unittest.skipIf(BASH is None, "bash not available")
+class TestFgiMemory(unittest.TestCase):
+    """fine-grid-integration FEAT-003 (plan D7): slurm/fgi_memory.sh (real-trainer memory check of
+    --frozen-integration-grid current vs native at levels 2 and 1)."""
+    ORDER = ["l2_native", "l2_current", "l1_native", "l1_current"]
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="slurm_fgi_")
+        self.log = os.path.join(self.tmp, "calls.log")
+        bindir = os.path.join(self.tmp, "bin")
+        os.makedirs(bindir)
+        # singularity stub: logs the arguments ('|'-joined); with STUB_WRITE_CKPT=1 a main.py run
+        # (--results / --run-name) writes ckpt/last/checkpoint.
+        body = ('#!/bin/bash\nprintf "%%s|" "$@" >> "%s"\nprintf "\\n" >> "%s"\nres=""; run=""\n'
+                'while [ $# -gt 0 ]; do case "$1" in --results) res="$2";; --run-name) run="$2";; esac; shift; done\n'
+                'if [ -n "$run" ] && [ "${STUB_WRITE_CKPT:-}" = 1 ]; then\n'
+                '  mkdir -p "$res/$run/ckpt/last"; echo x > "$res/$run/ckpt/last/checkpoint"\nfi\nexit 0\n'
+                % (self.log, self.log))
+        for name, text in (("singularity", body), ("nvidia-smi", "#!/bin/sh\nexit 0\n"), ("git", "#!/bin/sh\nexit 0\n")):
+            p = os.path.join(bindir, name)
+            with open(p, "w") as f:
+                f.write(text)
+            os.chmod(p, os.stat(p).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        self.l4 = os.path.join(self.tmp, "l4src")
+        os.makedirs(self.l4)
+        env = {k: v for k, v in os.environ.items() if k not in RECIPE_ENV + ("CUDA_VISIBLE_DEVICES",)}
+        # REPO = this repo: the job runs the real r_level{2,1}.sh dry runs (all container calls are stubs).
+        env.update(PATH=bindir + os.pathsep + os.environ.get("PATH", ""), PROJ=self.tmp, REPO=REPO,
+                   DATA=os.path.join(self.tmp, "data"), SIF=os.path.join(self.tmp, "x.sif"),
+                   SCRATCH_ROOT=os.path.join(self.tmp, "scratch"), L4_SOURCE=self.l4)
+        self.env = env
+        self.out = os.path.join(self.tmp, "scratch", "fgi", "manual")
+        self.runs = os.path.join(self.out, "runs")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def run_fgi(self, **extra):
+        env = dict(self.env)
+        for k, v in extra.items():
+            if v is None:
+                env.pop(k, None)
+            else:
+                env[k] = v
+        if os.path.exists(self.log):
+            os.remove(self.log)
+        r = subprocess.run([BASH, FGI], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                           universal_newlines=True, stdin=subprocess.DEVNULL)
+        calls = _read(self.log).splitlines() if os.path.exists(self.log) else None
+        return r, calls
+
+    def configs(self, stdout):
+        out = []
+        for ln in stdout.splitlines():
+            if ln.startswith("CONFIG "):
+                name, cmd = ln[len("CONFIG "):].split(": ", 1)
+                out.append((name, cmd))
+        return out
+
+    def status_rows(self):
+        return [ln.split("\t") for ln in _read(os.path.join(self.out, "status.tsv")).splitlines()]
+
+    def test_header(self):
+        text = _read(FGI)
+        self.assertNotIn("\r", text)
+        self.assertTrue(all(ord(c) < 128 for c in text))
+        self.assertNotIn("entre", text.lower())
+        for line in ("#SBATCH --job-name=bgr-fgi-mem", "#SBATCH -A qtim", "#SBATCH -p rtx8000",
+                     "#SBATCH --gpus=1", "#SBATCH -N 1", "#SBATCH --ntasks-per-node=1",
+                     "#SBATCH --cpus-per-task=3", "#SBATCH --mem=128G", "#SBATCH --time=03:00:00",
+                     "#SBATCH --output=%s/%%x-%%j.out" % LOGS, "#SBATCH --error=%s/%%x-%%j.err" % LOGS):
+            self.assertIn(line + "\n", text)
+        self.assertEqual(len(re.findall(r"(?m)^#SBATCH ", text)), 11)
+        for k in ("set -uo pipefail\n", SIF, "</dev/null", "DO NOT submit without Jay's approval",
+                  "at most two active jobs", "mkdir -p %s" % LOGS, "sbatch slurm/fgi_memory.sh",
+                  "r4_cfgB_dice1_smooth2_lr3e-4_wd1e-1/ckpt/last", "collect_memory_runs.py", "--skip-steps 2",
+                  "timeout -k 60", "~2 h", "BGR_DRY_RUN=1"):
+            self.assertIn(k, text, k)
+
+    def test_dry_run(self):
+        import shlex
+        from runtime import args as A
+        r, calls = self.run_fgi(BGR_DRY_RUN="1")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIsNone(calls)
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "scratch")))
+        configs = self.configs(r.stdout)
+        self.assertEqual([n for n, _ in configs], self.ORDER)
+        for name, cmd in configs:
+            level, grid = name[1], name[3:]
+            with self.subTest(name):
+                words = shlex.split(cmd)
+                self.assertEqual(words[-2:], ["bash", "slurm/r_level%s.sh" % level])
+                env = dict(w.split("=", 1) for w in words[:-2])
+                src = self.l4 if level == "2" else os.path.join(self.runs, "l2_%s" % grid, "ckpt", "last")
+                want = {"RESULTS": self.runs, "RUN_NAME": name, "STEPS": "16", "VAL_EVERY": "8", "CKPT_EVERY": "0",
+                        "BN_RECAL_BATCHES": "4", "PROJECT_STEPS": "16",
+                        "EXTRA_ARGS": "--group-config B --lambda-smooth 10", "CASCADE_FROM": src}
+                if grid == "current":
+                    want["FROZEN_INTEGRATION_GRID"] = "current"
+                self.assertEqual(env, want)
+                # the env reproduces a level-script recipe that parses with the expected values
+                os.makedirs(src, exist_ok=True)
+                full = dict(self.env, **env)
+                full["BGR_DRY_RUN"] = "1"
+                d = subprocess.run([BASH, os.path.join(REPO, words[-1])], env=full, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, universal_newlines=True, stdin=subprocess.DEVNULL)
+                self.assertEqual(d.returncode, 0, d.stderr)
+                main = [ln for ln in d.stdout.splitlines() if ln.startswith("MAIN: python main.py ")]
+                self.assertEqual(len(main), 1, d.stdout)
+                a = A.parse_args(main[0].split()[3:])
+                self.assertEqual((a.level, a.run_name, a.results, a.steps, a.val_every, a.ckpt_every),
+                                 (int(level), name, self.runs, 16, 8, 0))
+                self.assertEqual((a.bn_recal_batches, a.lambda_smooth, a.group_config, a.cascade_from),
+                                 (4, 10.0, "B", src))
+                self.assertEqual(a.frozen_integration_grid, "current" if grid == "current" else None)
+        shutil.rmtree(os.path.join(self.tmp, "scratch"))
+        r, _ = self.run_fgi(BGR_DRY_RUN="1", ONLY="l2_current")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual([n for n, _ in self.configs(r.stdout)], ["l2_current"])
+        r, _ = self.run_fgi(BGR_DRY_RUN="1", ONLY="l1_current,l2_native", SMOOTH="4", GROUP_ARGS="")
+        self.assertEqual([n for n, _ in self.configs(r.stdout)], ["l2_native", "l1_current"])
+        self.assertIn("EXTRA_ARGS='--lambda-smooth 4'", r.stdout)
+
+    def test_guards(self):
+        prefix = os.path.join(self.tmp, "pfx", "last-16000")
+        os.makedirs(os.path.dirname(prefix))
+        with open(prefix + ".index", "w") as f:
+            f.write("x")
+        r, _ = self.run_fgi(BGR_DRY_RUN="1", L4_SOURCE=prefix)        # checkpoint prefix accepted
+        self.assertEqual(r.returncode, 0, r.stderr)
+        for extra in (dict(L4_SOURCE=os.path.join(self.tmp, "missing")), dict(ONLY="l2_native,l4_native"),
+                      dict(STEPS="abc"), dict(SMOOTH="x"), dict(CONFIG_TIMEOUT="0"),
+                      dict(REPO=os.path.join(self.tmp, "norepo"))):
+            for dry in ("1", None):
+                with self.subTest(extra=extra, dry=dry):
+                    r, calls = self.run_fgi(BGR_DRY_RUN=dry, **extra)
+                    self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+                    self.assertIsNone(calls)
+                    self.assertIn("ERROR", r.stderr)
+                    self.assertFalse(os.path.exists(os.path.join(self.tmp, "scratch")))
+
+    def test_stub_run_without_level2_checkpoints(self):
+        r, calls = self.run_fgi()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(len(calls), 3, calls)             # two L2 main.py runs + the collector
+        mains = calls[:2]
+        for c, name in zip(mains, self.ORDER[:2]):
+            self.assertTrue(c.startswith("exec|--nv|-B|/scratch|-B|/autofs|-B|/cluster|-B|/space|-B|/vast|%s|"
+                                         "python|main.py|" % os.path.join(self.tmp, "x.sif")), c)
+            self.assertIn("|--run-name|%s|" % name, c)
+            self.assertIn("|--level|2|", c)
+            self.assertIn("|--cascade-from|%s|" % self.l4, c)
+            self.assertEqual(c.count("--frozen-integration-grid"), 1 if name.endswith("current") else 0)
+            self.assertTrue(os.path.isfile(os.path.join(self.runs, name, "gpu_poll.csv")))
+        self.assertIn("|--frozen-integration-grid|current|--group-config|B|--lambda-smooth|10|", mains[1])
+        self.assertTrue(calls[2].startswith("exec|-B|/autofs|-B|/cluster|-B|/space|%s|python|"
+                                            "scripts/collect_memory_runs.py|" % os.path.join(self.tmp, "x.sif")),
+                        calls[2])
+        for seq in ("|--status|%s|" % os.path.join(self.out, "status.tsv"), "|--runs|%s|" % self.runs,
+                    "|--out|%s|" % os.path.join(self.out, "fgi_memory.json"), "|--skip-steps|2|", "|--job|manual|"):
+            self.assertIn(seq, calls[2])
+        rows = self.status_rows()
+        self.assertEqual(rows[0], ["name", "level", "dtype", "widths", "n", "max_pairs", "rc", "elapsed_s", "log"])
+        self.assertEqual([x[:7] for x in rows[1:]],
+                         [["l2_native", "2", "native", "d12hs", "16", "64", "0"],
+                          ["l2_current", "2", "current", "d12hs", "16", "64", "0"],
+                          ["l1_native", "1", "native", "d12hs", "4", "64", "-2"],
+                          ["l1_current", "1", "current", "d12hs", "4", "64", "-2"]])
+        for x in rows[1:]:
+            self.assertEqual(x[8], os.path.join(self.runs, x[0] + ".log"))
+        self.assertIn("=== l1_native skipped: level-2 source", r.stdout)
+        self.assertTrue(os.path.isdir(os.path.join(self.tmp, "scratch", "manual")))
+
+    def test_stub_run_full_chain(self):
+        r, calls = self.run_fgi(STUB_WRITE_CKPT="1")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(len(calls), 5, calls)
+        names = [c.split("|--run-name|")[1].split("|")[0] for c in calls[:4]]
+        self.assertEqual(names, self.ORDER)
+        for c, name in zip(calls[2:4], self.ORDER[2:]):
+            grid = name[3:]
+            self.assertIn("|--level|1|", c)
+            self.assertIn("|--cascade-from|%s|" % os.path.join(self.runs, "l2_%s" % grid, "ckpt", "last"), c)
+            self.assertEqual(c.count("--frozen-integration-grid"), 1 if grid == "current" else 0)
+        self.assertEqual([x[6] for x in self.status_rows()[1:]], ["0", "0", "0", "0"])
+        for name in self.ORDER[:2]:                        # L2 checkpoints kept (L1 sources)
+            self.assertTrue(os.path.isfile(os.path.join(self.runs, name, "ckpt", "last", "checkpoint")))
+        for name in self.ORDER[2:]:                        # L1 checkpoints deleted
+            self.assertFalse(os.path.exists(os.path.join(self.runs, name, "ckpt")))
+
+    def test_collector_exit_code(self):
+        stub = os.path.join(self.tmp, "bin", "singularity")
+        with open(stub) as f:
+            body = f.read()
+        with open(stub, "w") as f:
+            f.write(body.replace('res=""; run=""\n', 'res=""; run=""\ncase "$*" in *collect_memory_runs*) exit 3;; esac\n'))
+        r, calls = self.run_fgi(ONLY="l2_native")
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+        self.assertEqual(len(calls), 2, calls)
+        self.assertIn("collector exit code 3", r.stdout)
+
+    @unittest.skipIf(BASH is None, "bash not available")
+    def test_bash_syntax(self):
+        for path in (FGI, R_LEVEL2, R_LEVEL1, CASCADE):
+            r = subprocess.run([BASH, "-n", path], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               universal_newlines=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
 
 
 if __name__ == "__main__":
