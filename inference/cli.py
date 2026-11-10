@@ -21,6 +21,7 @@ RUN_CHUNK_DEFAULTS = {"l1": 2, "l2": 8, "l4": 32}
 # File names `run` writes into --out (design 5.2, 8).
 OUTPUT_NAMES = ("predict.json", "atlas.nii.gz", "atlas_seg.nii.gz", "tta_spread.csv")
 TTA_MODES = ("none", "flip8")   # inference.tta.MODES (kept TF-free and import-free here)
+RECENTER_BRANCHES = ("deform", "affine+deform")   # inference.recenter.RECENTER_BRANCHES
 OUTPUT_PATTERNS = ("*_fwd.nii.gz", "*_inv.nii.gz", "*_moved.nii.gz")
 # File names `linear-eval` writes into --out (TTA design 7.3, plan D9).
 LINEAR_EVAL_OUTPUTS = ("per_subject.csv", "per_pair.csv", "summary.json", "tta_spread.csv")
@@ -149,6 +150,12 @@ def build_parser():
                    help="internal consistency check of the first K subjects (0 = off; default %(default)s)")
     r.add_argument("--compress-level", type=_int_ge(0, 9), default=1, help="gzip level 0-9 (default %(default)s)")
     _tta_flags(r)
+    r.add_argument("--recenter", type=_int_ge(0), default=0, metavar="K",
+                   help="post-hoc group re-centering: K rounds of one common correction psi = exp(-w) "
+                        "applied to every subject (fwd_i o psi, psi^-1 o inv_i) so that the mean "
+                        "written forward displacement is ~0; pairwise maps unchanged; moved images, "
+                        "atlas and atlas_seg use the corrected fields. --branches deform or "
+                        "affine+deform only (0 = off, default)")
     r.add_argument("--overwrite", action="store_true", help="allow an --out directory with earlier outputs")
     e = sub.add_parser("linear-eval",
                        help="rigid / affine errors against seeded synthetic misalignments (design 7.3)")
@@ -228,6 +235,10 @@ def validate(args, parser):
     if args.device == "cpu" and args.gpu_memory_limit_mb is not None:
         parser.error("--gpu-memory-limit-mb has no meaning with --device cpu")
     if args.command == "run":
+        if args.recenter and args.branches not in RECENTER_BRANCHES:
+            parser.error("--recenter needs --branches %s (got %s: rigid / affine outputs are linear "
+                         "maps; a common non-linear correction would make them non-linear)"
+                         % (" or ".join(RECENTER_BRANCHES), args.branches))
         _validate_out_dir(args, parser, OUTPUT_NAMES, OUTPUT_PATTERNS)
     elif args.command == "linear-eval":
         args.branches = args.task               # no --branches flag (plan D9)

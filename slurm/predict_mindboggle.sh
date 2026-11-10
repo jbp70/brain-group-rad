@@ -43,6 +43,10 @@
 #   TTA           test-time augmentation of step 2 only: none (default) | flip8 (milestone 10);
 #                 checks 1a-1c always run without TTA
 #   TTA_LEVELS    --tta-levels of step 2, e.g. 1 or 2,1 (default empty: all levels; needs TTA=flip8)
+#   RECENTER      post-hoc group re-centering rounds of step 2 only (default empty: no flag, outputs
+#                 as before); an integer K adds `--recenter K` (deform / affine+deform; K = 2 is the
+#                 recommended value, .agents/tasks/predict-recenter/report.md). Original fields are
+#                 kept in $TMPDIR during the run (~16.7 GB at N 101). Checks 1a-1c never re-center
 #   SKIP_CHECKS   1 skips checks 1a-1c (default empty: run them), e.g. for the flip8 arm of
 #                 slurm/tta_mindboggle.sh, whose TTA-none arm ran them in the same job
 #   ALLOW_UNTRAINED_SKIP  1 adds --allow-untrained-skip (run a skip the chain never trained with;
@@ -81,8 +85,11 @@ ALLOW_UNTRAINED_SKIP=${ALLOW_UNTRAINED_SKIP:-}
 TTA=${TTA:-none}
 TTA_LEVELS=${TTA_LEVELS:-}
 SKIP_CHECKS=${SKIP_CHECKS:-}
+RECENTER=${RECENTER:-}
 TTA_FLAGS="--tta $TTA"
 if [ -n "$TTA_LEVELS" ]; then TTA_FLAGS="$TTA_FLAGS --tta-levels $TTA_LEVELS"; fi
+RECENTER_FLAGS=""
+if [ -n "$RECENTER" ]; then RECENTER_FLAGS="--recenter $RECENTER"; fi
 LEVEL_FLAGS=""
 if [ -n "$LEVELS" ]; then LEVEL_FLAGS="--levels $LEVELS"; fi
 if [ "$ALLOW_UNTRAINED_SKIP" = "1" ]; then LEVEL_FLAGS="$LEVEL_FLAGS --allow-untrained-skip"; fi
@@ -98,7 +105,7 @@ INV="$FIELDS/{subject_dir}_inv.nii.gz"
 MOVED="$FIELDS/{subject_dir}_moved.nii.gz"
 CONV="--components xyz --signs +++ --units mm"
 
-# $CHECK_CHUNKS (and $LEVEL_FLAGS, $TTA_FLAGS, $EXTRA, $CONV) are expanded unquoted on purpose: word splitting turns them into flags.
+# $CHECK_CHUNKS (and $LEVEL_FLAGS, $TTA_FLAGS, $RECENTER_FLAGS, $EXTRA, $CONV) are expanded unquoted on purpose: word splitting turns them into flags.
 if [ "$SKIP_CHECKS" != "1" ]; then
 echo "=== 1a check-streaming float32 ($BRANCHES, gate) ==="
 # shellcheck disable=SC2086
@@ -112,9 +119,9 @@ singularity exec --nv -B /autofs -B /scratch "$SIF" bash -c 'cd "$1" && shift &&
 else
 echo "checks 1a-1c skipped (SKIP_CHECKS=1; run in the TTA-none arm of the same job)"
 fi
-echo "=== 2 predict.py run ($BRANCHES, tta $TTA) ==="
+echo "=== 2 predict.py run ($BRANCHES, tta $TTA, recenter ${RECENTER:-off}) ==="
 # shellcheck disable=SC2086
-singularity exec --nv -B /autofs -B /scratch "$SIF" bash -c 'cd "$1" && shift && python "$@"' predict "$REPO" predict.py run --checkpoint "$CKPT" --processed-dir "$PROCESSED" --grid-reference "$GRID_REF" --branches "$BRANCHES" --out "$FIELDS" $LEVEL_FLAGS $TTA_FLAGS $EXTRA </dev/null || exit $?
+singularity exec --nv -B /autofs -B /scratch "$SIF" bash -c 'cd "$1" && shift && python "$@"' predict "$REPO" predict.py run --checkpoint "$CKPT" --processed-dir "$PROCESSED" --grid-reference "$GRID_REF" --branches "$BRANCHES" --out "$FIELDS" $LEVEL_FLAGS $TTA_FLAGS $RECENTER_FLAGS $EXTRA </dev/null || exit $?
 echo "=== 3 evaluation check-convention + template metrics ==="
 export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
 singularity exec -B /autofs -B /scratch "$SIF" bash -c 'cd "$1" && shift && python "$@"' predict "$REPO" -m evaluation check-convention --processed-dir "$PROCESSED" --fwd "$FWD" --inv "$INV" --moved "$MOVED" --out "$OUT/convention.json" </dev/null || exit $?

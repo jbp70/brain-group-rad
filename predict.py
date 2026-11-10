@@ -10,6 +10,10 @@
 .agents/tasks/tta/design.md). `linear-eval` renders the subjects with seeded synthetic rigid /
 affine misalignments and writes per_subject.csv, per_pair.csv, summary.json (+ tta_spread.csv with
 flip8) into --out (TTA design 7.3).
+`run --recenter K` (deform / affine+deform only, default 0 = off) re-centres the group after
+prediction: K rounds of one common correction psi = exp(-w) (fwd_i o psi, psi^-1 o inv_i), so the
+mean written forward displacement is ~0; moved images and the atlas use the corrected fields
+(.agents/tasks/predict-recenter/report.md).
 
 `run` writes per subject <subject_dir>_fwd.nii.gz / _inv.nii.gz (mm, evaluator convention
 --components xyz --signs +++ --units mm) and _moved.nii.gz, plus atlas.nii.gz, atlas_seg.nii.gz and

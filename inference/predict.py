@@ -44,7 +44,7 @@ PREDICT_KEYS = (
     "tta", "n_subjects", "subjects", "subject_dirs", "training_group_sizes", "mode", "device",
     "chunks", "grid", "store", "timing_s", "gpu_peak_mb", "nonfinite", "stats", "fp16_max_abs",
     "internal_check", "compress_level", "visible_devices", "convention", "outputs", "input_range",
-    "warnings", "levels", "tta_record")
+    "warnings", "levels", "tta_record", "recenter")
 TTA_SPREAD_CSV = "tta_spread.csv"
 _SHA_RE = re.compile(r"[0-9a-f]{40}")
 
@@ -548,7 +548,8 @@ def _new_record(args, configure_device):
     rec.update(status="error", command=_command(args), configure_device=bool(configure_device),
                branches=args.branches, global_transform=GLOBAL_TRANSFORM, mode=getattr(args, "mode", None),
                tta=getattr(args, "tta", None), device=args.device, convention=dict(CONVENTION),
-               compress_level=getattr(args, "compress_level", None), timing_s={}, warnings=[])
+               compress_level=getattr(args, "compress_level", None), timing_s={}, warnings=[],
+               recenter={"rounds": int(getattr(args, "recenter", 0) or 0)})
     return rec
 
 
@@ -604,9 +605,12 @@ class _Writer(object):
     """Per-chunk sink of `run`: canonical fields on the device, internal check of the first K
     subjects, moved image / warped labels (evaluator warps), NIfTI files, atlas sums."""
 
-    def __init__(self, args, subs, images, labels, aff, shape, spacing, k_check):
+    def __init__(self, args, subs, images, labels, aff, shape, spacing, k_check, recenter=None):
+        from evaluation import fields as F
         from inference import canonical as CN
         self.CN = CN
+        self.F = F
+        self.recenter = recenter        # inference.recenter.Recenterer or None (no re-centering)
         self.args = args
         self.subs, self.images, self.labels = subs, images, labels
         self.aff, self.shape, self.spacing = aff, tuple(shape), tuple(spacing)
@@ -625,6 +629,35 @@ class _Writer(object):
             cur = getattr(self, attr)
             setattr(self, attr, value if cur is None else max(cur, value))
 
+    def _emit(self, i, fwd, inv):
+        """Moved image, warped labels, fwd / inv / moved files and the atlas sums of subject i from
+        canonical voxel fields; returns (moved, non-finite counts)."""
+        CN = self.CN
+        moved, wl = CN.moved_and_labels(self.images[i], self.labels[i], fwd)
+        name = self.subs[i]["dir"]
+        counts = {"fwd": _nonfinite(fwd), "inv": _nonfinite(inv), "moved": _nonfinite(moved)}
+        self.nonfinite[name] = counts
+        fwd_mm, inv_mm = CN.to_mm(fwd, self.spacing), CN.to_mm(inv, self.spacing)
+        self._note_max("max_fwd", _finite_max_abs(fwd_mm))
+        self._note_max("max_inv", _finite_max_abs(inv_mm))
+        for kind, arr in (("fwd", fwd_mm), ("inv", inv_mm), ("moved", moved)):
+            fname = "%s_%s.nii.gz" % (name, kind)
+            CN.write_nifti(os.path.join(self.args.out, fname), arr, self.aff)
+            self.outputs.append(fname)
+        del fwd_mm, inv_mm
+        self.atlas.add(i, moved, wl)
+        return moved, counts
+
+    def emit_corrected(self, i, fwd, inv):
+        """Re-centering write callback (last round): writes subject i, returns the moved image."""
+        t = time.time()
+        moved, counts = self._emit(i, fwd, inv)
+        self.t_write += time.time() - t
+        if sum(counts.values()):
+            logger.error("subject %s: non-finite values after re-centering fwd %d, inv %d, moved %d",
+                         self.subs[i]["dir"], counts["fwd"], counts["inv"], counts["moved"])
+        return moved
+
     def sink(self, i0, i1, res):
         CN, br = self.CN, self.args.branches
         for k in range(i1 - i0):
@@ -634,19 +667,14 @@ class _Writer(object):
             fwd, inv = fwd_t.numpy()[0], inv_t.numpy()[0]
             del fwd_t, inv_t
             t = time.time()
-            moved, wl = CN.moved_and_labels(self.images[i], self.labels[i], fwd)
             name = self.subs[i]["dir"]
-            counts = {"fwd": _nonfinite(fwd), "inv": _nonfinite(inv), "moved": _nonfinite(moved)}
-            self.nonfinite[name] = counts
-            fwd_mm, inv_mm = CN.to_mm(fwd, self.spacing), CN.to_mm(inv, self.spacing)
-            self._note_max("max_fwd", _finite_max_abs(fwd_mm))
-            self._note_max("max_inv", _finite_max_abs(inv_mm))
-            for kind, arr in (("fwd", fwd_mm), ("inv", inv_mm), ("moved", moved)):
-                fname = "%s_%s.nii.gz" % (name, kind)
-                CN.write_nifti(os.path.join(self.args.out, fname), arr, self.aff)
-                self.outputs.append(fname)
-            del fwd_mm, inv_mm
-            self.atlas.add(i, moved, wl)
+            if self.recenter is None:
+                moved, counts = self._emit(i, fwd, inv)
+            else:                       # --recenter: keep the originals, write after the rounds
+                moved = self.F.warp(self.images[i], fwd, order=1)
+                counts = {"fwd": _nonfinite(fwd), "inv": _nonfinite(inv), "moved": _nonfinite(moved)}
+                self.nonfinite[name] = counts
+                self.recenter.add(i, fwd, inv, moved)
             self.t_write += time.time() - t
             if sum(counts.values()):
                 logger.error("subject %s: non-finite values fwd %d, inv %d, moved %d", name,
@@ -662,7 +690,8 @@ class _Writer(object):
                             rec["moved_vs_internal_max_abs"], "" if rec["moved_gated"] else " (not gated)",
                             rec["inv_consistency_max_mm"], 100.0 * rec["interior_fraction"],
                             "pass" if rec["passed"] else "FAIL")
-            logger.info("subject %d / %d %s written", i + 1, len(self.subs), name)
+            logger.info("subject %d / %d %s %s", i + 1, len(self.subs), name,
+                        "written" if self.recenter is None else "predicted (written after re-centering)")
 
 
 def _run_predict(args, configure_device, rec):
@@ -715,18 +744,50 @@ def _run_predict(args, configure_device, rec):
         rec["store"] = {"kind": "none (unchunked)", "dir": None, "estimate_gb": None}
         runner = RN.UnchunkedRunner(loaded, plan=plan)
     os.makedirs(args.out, exist_ok=True)
-    writer = _Writer(args, subs, images, labels, aff, shape, spacing, k_check)
+    rounds = int(getattr(args, "recenter", 0) or 0)
+    recenterer = None
+    if rounds:
+        from inference import recenter as RC
+        rc_root = args.store_dir or os.environ.get("TMPDIR") or os.path.join(args.out, "_recenter_tmp")
+        recenterer = RC.Recenterer(rounds, n, shape, spacing, rc_root)
+        rec["pipeline"] += ("; post-hoc re-centering, %d round(s): fwd_i o psi, psi^-1 o inv_i, "
+                            "psi = exp(-w)" % rounds)
+        logger.info("re-centering: %d round(s) after the model pass; original fields kept in %s (~%.1f GB)",
+                    rounds, recenterer.dir, n * 2 * 4 * 3 * float(shape[0] * shape[1] * shape[2]) / 1e9)
+    writer = _Writer(args, subs, images, labels, aff, shape, spacing, k_check, recenter=recenterer)
     logger.info("run: %d subjects, branches %s, mode %s, level-%d checkpoint step %s, trainable %s",
                 n, args.branches, args.mode, loaded.level, loaded.step, loaded.precision["trainable"])
     t = time.time()
     try:
-        with CN.compress_level(args.compress_level):
-            summary = runner.run(images, args.branches, writer.sink)
+        try:
+            with CN.compress_level(args.compress_level):
+                summary = runner.run(images, args.branches, writer.sink)
+        finally:
+            if store is not None:
+                rec["store"]["peak_store_gb"] = store.peak_nbytes() / 1e9
+                store.close()
+        timing["model_and_write"] = time.time() - t
+        if recenterer is not None:
+            t = time.time()
+            nf0 = int(sum(sum(c.values()) for c in writer.nonfinite.values()))
+            with CN.compress_level(args.compress_level):
+                if nf0:
+                    logger.error("re-centering skipped: %d non-finite values in the model outputs; "
+                                 "uncorrected fields written", nf0)
+                    recenterer.write_original(writer.emit_corrected)
+                    rec["recenter"] = {"rounds": rounds, "status": "skipped_nonfinite",
+                                       "tmp_gb": recenterer.tmp_gb()}
+                else:
+                    rec["recenter"] = recenterer.run(writer.emit_corrected, images)
+            timing["recenter"] = time.time() - t
     finally:
-        if store is not None:
-            rec["store"]["peak_store_gb"] = store.peak_nbytes() / 1e9
-            store.close()
-    timing["model_and_write"] = time.time() - t
+        if recenterer is not None:
+            recenterer.close()
+            if rc_root == os.path.join(args.out, "_recenter_tmp"):
+                try:
+                    os.rmdir(rc_root)
+                except OSError:
+                    pass
     timing["write"] = writer.t_write
     timing["internal_check"] = writer.t_check
     for key, sec in sorted(summary["timing_s"].items()):

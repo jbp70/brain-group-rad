@@ -14,7 +14,7 @@
 # Runs slurm/predict_mindboggle.sh once per entry of RUNS, sequentially on one GPU (one job instead of
 # one per checkpoint). RUNS: space-separated NAME:CKPT entries (NAME without commas or colons).
 # Every other predict_mindboggle.sh setting (BRANCHES, LEVELS, CHECK_CHUNKS, EXTRA, ...) applies to
-# all entries. A failing entry is reported and the loop continues; exit status = number of failures.
+# all entries (inherited environment; e.g. TTA=flip8, RECENTER=2, SKIP_CHECKS=1). A failing entry is reported and the loop continues; exit status = number of failures.
 # DO NOT submit without Jay's approval (cluster-access rules).
 #   RUNS="a:/path/ckpt/last b:/path2/ckpt/last" sbatch slurm/predict_mindboggle_multi.sh
 set -uo pipefail

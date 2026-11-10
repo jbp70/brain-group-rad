@@ -42,7 +42,7 @@ RECIPE_ENV = ("GRAD_BALANCE", "BN_RECAL_BATCHES", "BN_RECAL_FREEZE", "SKIP_PROB"
               "BN_RECAL_VALIDATE", "FP16_ACT_CLIP", "FP16_ACT_CLIP_SCOPE", "DEFORM_DECODER_DTYPE",
               "BN_EPSILON_OVERRIDE", "L1_SOURCE", "L2_SOURCE", "SRC_RESULTS", "CONFIG_TIMEOUT", "TIME_BUDGET_S",
               "ONLY", "BGR_DRY_RUN", "FILTERS", "DECODER_WIDTHS", "TTA", "TTA_LEVELS", "SKIP_CHECKS",
-              "FROZEN_INTEGRATION_GRID", "L4_SOURCE", "GROUP_ARGS", "SMOOTH", "STUB_WRITE_CKPT")
+              "FROZEN_INTEGRATION_GRID", "L4_SOURCE", "GROUP_ARGS", "SMOOTH", "STUB_WRITE_CKPT", "RECENTER", "RUNS")
 
 
 def _read(path):
@@ -270,8 +270,8 @@ class TestStatic(unittest.TestCase):
                       '--allow-untrained-skip"; fi\n', text)
         for ln in pred:
             self.assertEqual(ln.count(" $LEVEL_FLAGS "), 1, ln)
-        self.assertIn(' --out "$FIELDS" $LEVEL_FLAGS $TTA_FLAGS $EXTRA </dev/null || exit $?', run[0])
-        self.assertTrue(run[0].endswith('--out "$FIELDS" $LEVEL_FLAGS $TTA_FLAGS $EXTRA </dev/null || exit $?'))
+        self.assertIn(' --out "$FIELDS" $LEVEL_FLAGS $TTA_FLAGS $RECENTER_FLAGS $EXTRA </dev/null || exit $?', run[0])
+        self.assertTrue(run[0].endswith('--out "$FIELDS" $LEVEL_FLAGS $TTA_FLAGS $RECENTER_FLAGS $EXTRA </dev/null || exit $?'))
         # TTA (milestone 10, plan D7): TTA / TTA_LEVELS reach step 2 only; SKIP_CHECKS=1 skips 1a-1c.
         self.assertIn("TTA=${TTA:-none}\n", text)
         self.assertIn("TTA_LEVELS=${TTA_LEVELS:-}\n", text)
@@ -285,6 +285,14 @@ class TestStatic(unittest.TestCase):
             self.assertNotIn("TTA_FLAGS", ln)
             self.assertNotIn("--tta", ln)
         self.assertEqual(len([ln for ln in lines if "$TTA_FLAGS" in ln and ln.startswith("singularity ")]), 1)
+        # predict-recenter: RECENTER (empty = no flag) -> `--recenter K` on step 2 only.
+        self.assertIn("RECENTER=${RECENTER:-}\n", text)
+        self.assertIn('RECENTER_FLAGS=""\n', text)
+        self.assertIn('if [ -n "$RECENTER" ]; then RECENTER_FLAGS="--recenter $RECENTER"; fi\n', text)
+        self.assertIn("#   RECENTER ", text)
+        self.assertEqual(len([ln for ln in lines if "$RECENTER_FLAGS" in ln and ln.startswith("singularity ")]), 1)
+        for ln in checks:
+            self.assertNotIn("RECENTER", ln)
         ev = [ln for ln in sing if " -m evaluation " in ln]
         self.assertEqual(len(ev), 2)
         self.assertIn("check-convention", ev[0])
@@ -425,6 +433,38 @@ class TestStubRuns(unittest.TestCase):
         self.assertTrue(pred2[0].endswith(" --tta flip8 --tta-levels 1"), pred2[0])
         self.assertEqual(pred2[0].replace(" --tta flip8 --tta-levels 1", " --tta none"), pred[3])
         self.assertEqual(len([c for c in calls2 if " -m evaluation " in c]), 2)
+
+    def test_predict_recenter_flag(self):
+        """predict-recenter: RECENTER unset / empty -> today's calls; RECENTER=2 -> `--recenter 2` on
+        step 2 only (after the TTA flags), the checks unchanged; predict_mindboggle_multi.sh passes
+        RECENTER through to every entry."""
+        base = dict(OUT=os.path.join(self.tmp, "out"), EXTRA=None, CHECK_CHUNKS=None, BRANCHES=None,
+                    LEVELS=None, ALLOW_UNTRAINED_SKIP=None, TTA=None, TTA_LEVELS=None, SKIP_CHECKS=None)
+        r, calls = self.run_script(PREDICT, RECENTER=None, **base)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        r0, calls0 = self.run_script(PREDICT, RECENTER="", **base)
+        self.assertEqual(r0.returncode, 0, r0.stderr)
+        self.assertEqual(calls0, calls)
+        for c in calls:
+            self.assertNotIn("--recenter", c)
+        r2, calls2 = self.run_script(PREDICT, RECENTER="2", **base)
+        self.assertEqual(r2.returncode, 0, r2.stderr)
+        pred, pred2 = ([c for c in cs if " predict.py " in c] for cs in (calls, calls2))
+        self.assertEqual(len(pred2), 4, calls2)
+        self.assertEqual(pred2[:3], pred[:3])
+        self.assertTrue(pred2[3].endswith(" --tta none --recenter 2"), pred2[3])
+        self.assertEqual(pred2[3].replace(" --recenter 2", ""), pred[3])
+        self.assertEqual([c for c in calls2 if " predict.py " not in c], [c for c in calls if " predict.py " not in c])
+        r3, calls3 = self.run_script(PREDICT_MULTI, RECENTER="2", REPO=REPO, RUNS="a:/tmp/a b:/tmp/b",
+                                     SKIP_CHECKS="1", TTA="flip8", **{k: v for k, v in base.items()
+                                                                      if k not in ("TTA", "SKIP_CHECKS", "OUT")})
+        self.assertEqual(r3.returncode, 0, r3.stderr)
+        runs3 = [c for c in calls3 if " predict.py run " in c]
+        self.assertEqual(len(runs3), 2, calls3)
+        for c, name in zip(runs3, ("a", "b")):
+            self.assertIn("--checkpoint /tmp/%s " % name, c)
+            self.assertTrue(c.endswith(" --tta flip8 --recenter 2"), c)
+        self.assertFalse([c for c in calls3 if "check-streaming" in c], calls3)
 
     def test_train_requires_n(self):
         r, calls = self.run_script(TRAIN, **self.train_env(N=None))

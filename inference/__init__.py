@@ -19,6 +19,8 @@ Modules:
   training-flip check.
 * `linear_eval`: ``predict.py linear-eval``, rigid / affine errors against seeded synthetic
   misalignments of a processed dataset, with or without TTA (TTA design 7.3).
+* `recenter`: ``predict.py run --recenter K``, post-hoc group re-centering of the written deform
+  fields (one common psi = exp(-w) per round; report `.agents/tasks/predict-recenter/report.md`).
 * `cli`: argparse and validation of predict.py (TF-free; design 7), check-streaming chunk defaults.
 * `predict`: device setup, `run_predict`, `run_check_streaming`, predict.json, exit codes (design 3.3, 8).
 """
