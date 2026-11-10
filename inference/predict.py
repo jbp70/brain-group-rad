@@ -654,7 +654,7 @@ class _Writer(object):
         moved, counts = self._emit(i, fwd, inv)
         self.t_write += time.time() - t
         if sum(counts.values()):
-            logger.error("subject %s: non-finite values after re-centering fwd %d, inv %d, moved %d",
+            logger.error("subject %s: non-finite values in the written fields fwd %d, inv %d, moved %d",
                          self.subs[i]["dir"], counts["fwd"], counts["inv"], counts["moved"])
         return moved
 
