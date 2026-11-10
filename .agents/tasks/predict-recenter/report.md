@@ -265,4 +265,10 @@ Notes:
 ## 6. Commits
 
 - c4cf573 feat: predict.py run --recenter K (code, slurm knob, tests)
-- the follow-up docs/fix commits are listed in the final step summary.
+- 9fb0b36 docs: this report; clearer non-finite log message in the re-centering write
+- Main had not moved (3300f69), so no rebase was needed. `git merge --ff-only predict-recenter` on
+  local main: 3300f69 -> 9fb0b36. Not pushed.
+- Re-run in the main checkout at 9fb0b36 (a normal `.git` directory):
+  `tests.test_slurm_scripts.TestCascadeRuns.test_dry_run` and
+  `tests.test_predict.TestGitCommit.test_real_repository` both OK (tf_gpu), and `test_dry_run` OK
+  in bgr_preproc38. So the full suite result is 1061 tests, 0 real failures.
