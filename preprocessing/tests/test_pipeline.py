@@ -181,6 +181,47 @@ def test_miriad_row_centroid_backend(tmp_path, fake_tools, target_dir, mni_files
     assert len(fake_tools.calls()) == n_calls
 
 
+def test_centroid_backend_known_perturbation(tmp_path, fake_tools, target_dir, mni_files):
+    """centroid + perturb: the processed brain = template brain moved by the recorded affine P."""
+    from preprocessing.pipeline import perturbation_matrix, perturbation_params
+    pert = {"seed": 3, "rotation_deg": 10.0, "translation_mm": 1.5, "log_scale": float(np.log(1.08)), "shear": 0.05}
+    cfg = write_config(tmp_path / "c.yaml", target_dir, mni_files,
+                       registration={"backend": "centroid", "centroid": {"perturb": pert}}, outputs={"save_mask": True})
+    row = ds.miriad_row(str(tmp_path / "in"))
+    man = ds.write_rows(str(tmp_path / "m.csv"), [row])
+    out = str(tmp_path / "out")
+    assert _run(cfg, man, out) == 0
+    d = _sd(out, row)
+    meta = _meta(d)
+    reg = meta["registration"]
+    P = nifti.read_matrix_txt(os.path.join(d, "perturbation_world.txt"))
+    params = perturbation_params(pert, row.subject)
+    assert reg["perturbation"]["params"] == params
+    np.testing.assert_allclose(P, perturbation_matrix(params, reg["template_centroid_mm"]), atol=1e-8)
+    assert params == perturbation_params(pert, row.subject)               # reproducible per subject
+    assert params != perturbation_params(pert, row.subject + "_x")
+    np.testing.assert_allclose(nifti.read_matrix_txt(os.path.join(d, "affine_to_template_world.txt")),
+                               P @ np.asarray(reg["centring_matrix_ras"]), atol=1e-6)
+    s = np.exp(params["log_scale"])
+    assert abs(np.linalg.det(P[:3, :3]) - np.prod(s)) < 1e-9
+    # Expected brain: the template mask pulled through P^-1 (world), on the target grid.
+    mask = nifti.load_data(os.path.join(d, "mask.nii.gz"))[0] > 0
+    taff = ph.target_affine()
+    xyz = ph.world_coords(ph.TARGET_SHAPE, taff).reshape(3, -1)
+    src = np.linalg.inv(P) @ np.vstack([xyz, np.ones((1, xyz.shape[1]))])
+    expected = ph.brain_mask(src[:3].reshape((3,) + ph.TARGET_SHAPE))
+    assert dice(mask, expected) > 0.85
+    assert dice(mask, expected) > dice(mask, _template_mask()) + 0.02    # the perturbation is visible
+    np.testing.assert_allclose(_com_world(mask, taff),
+                               np.asarray(reg["template_centroid_mm"]) + params["translation_mm"], atol=0.8)
+    # Validation: unknown / negative keys rejected.
+    for bad in ({"seed": 1}, dict(pert, shear=-1.0), dict(pert, seed=1.5)):
+        bad_cfg = write_config(tmp_path / "bad.yaml", target_dir, mni_files,
+                               registration={"backend": "centroid", "centroid": {"perturb": bad}})
+        with pytest.raises(Exception):
+            load_config(bad_cfg)
+
+
 def test_centroid_backend_labels_nearest(tmp_path, fake_tools, target_dir, mni_files):
     cfg = write_config(tmp_path / "c.yaml", target_dir, mni_files, registration={"backend": "centroid"})
     row = ds.generic_row(str(tmp_path / "in"))

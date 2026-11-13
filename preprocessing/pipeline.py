@@ -144,7 +144,10 @@ class RowContext:
             return [self.w("n4.nii.gz")]
         if step == "register":
             if self.backend == "centroid":
-                return [self.o("affine_to_template_world.txt")]
+                outs = [self.o("affine_to_template_world.txt")]
+                if self.cfg["registration"]["centroid"].get("perturb"):
+                    outs.append(self.o("perturbation_world.txt"))
+                return outs
             outs = [self.o("affine_to_template.mat")]
             if self.backend == "flirt":
                 outs.append(self.o("affine_to_template_world.txt"))
@@ -343,6 +346,40 @@ def _mask_centroid_world(mask: np.ndarray, affine) -> np.ndarray:
     return (np.asarray(affine, float) @ np.r_[idx.mean(0), 1.0])[:3]
 
 
+def perturbation_params(cfg: Dict[str, Any], subject: str) -> Dict[str, Any]:
+    """Reproducible random affine parameters for one row (seed + subject id, independent of the
+    row order): rotation about an axis uniform on the sphere with angle U(-r, r) degrees,
+    translation U(-t, t) mm per axis, log-scale U(-s, s) per axis, 3 shears U(-h, h)."""
+    import hashlib
+    h = hashlib.sha256(("%d:%s" % (int(cfg["seed"]), subject)).encode("utf-8")).hexdigest()
+    rng = np.random.RandomState(int(h[:8], 16))
+    axis = rng.normal(size=3)
+    axis /= np.linalg.norm(axis)
+    return {"rotation_axis": axis.tolist(),
+            "rotation_deg": float(rng.uniform(-1, 1) * cfg["rotation_deg"]),
+            "translation_mm": (rng.uniform(-1, 1, 3) * cfg["translation_mm"]).tolist(),
+            "log_scale": (rng.uniform(-1, 1, 3) * cfg["log_scale"]).tolist(),
+            "shear_xy_xz_yz": (rng.uniform(-1, 1, 3) * cfg["shear"]).tolist()}
+
+
+def perturbation_matrix(params: Dict[str, Any], center) -> np.ndarray:
+    """4x4 world map p -> R S H (p - c) + c + t (R rotation, S = diag(exp(log_scale)), H unit
+    upper-triangular shear) about the point ``center``."""
+    k = np.asarray(params["rotation_axis"], float)
+    a = np.deg2rad(params["rotation_deg"])
+    K = np.array([[0, -k[2], k[1]], [k[2], 0, -k[0]], [-k[1], k[0], 0]])
+    R = np.eye(3) + np.sin(a) * K + (1 - np.cos(a)) * (K @ K)
+    S = np.diag(np.exp(np.asarray(params["log_scale"], float)))
+    sxy, sxz, syz = params["shear_xy_xz_yz"]
+    H = np.array([[1.0, sxy, sxz], [0, 1.0, syz], [0, 0, 1.0]])
+    A = R @ S @ H
+    c = np.asarray(center, float)
+    out = np.eye(4)
+    out[:3, :3] = A
+    out[:3, 3] = c - A @ c + np.asarray(params["translation_mm"], float)
+    return out
+
+
 def _register_centroid(c: RowContext) -> None:
     """Translation only: brain-mask centroid -> template brain-mask centroid (world, RAS mm)."""
     mask_path = c.w("native_mask.nii.gz")
@@ -354,14 +391,28 @@ def _register_centroid(c: RowContext) -> None:
     mdata, mimg = nifti.load_data(mask_path, np.uint8)
     moving_c = _mask_centroid_world(mdata > 0, mimg.affine)
     target_c = _mask_centroid_world(c.target.mask_data(), c.target.affine)
-    world = np.eye(4)
-    world[:3, 3] = target_c - moving_c
+    centring = np.eye(4)
+    centring[:3, 3] = target_c - moving_c
+    world = centring
+    pert_cfg = c.cfg["registration"]["centroid"].get("perturb")
+    reg = {"backend": "centroid", "transform": "translation",
+           "matrix_format": "world RAS mm (registration input -> template)",
+           "moving_centroid_mm": moving_c.tolist(), "template_centroid_mm": target_c.tolist(),
+           "translation_mm": (target_c - moving_c).tolist()}
+    if pert_cfg:
+        params = perturbation_params(pert_cfg, c.row.subject)
+        P = perturbation_matrix(params, target_c)
+        world = P @ centring
+        nifti.write_matrix_txt(P, c.o("perturbation_world.txt"))
+        reg.update(transform="translation + known random affine perturbation",
+                   centring_matrix_ras=centring.tolist(),
+                   perturbation={"config": dict(pert_cfg), "params": params, "about_mm": target_c.tolist(),
+                                 "matrix_world_ras": P.tolist(),
+                                 "note": "world = perturbation @ centring; the perturbation maps the "
+                                         "centred image to the processed image (RAS mm)"})
+    reg["world_matrix_ras"] = world.tolist()
     nifti.write_matrix_txt(world, world_txt)
-    c.meta["registration"] = {"backend": "centroid", "transform": "translation",
-                              "matrix_format": "world RAS mm (registration input -> template)",
-                              "world_matrix_ras": world.tolist(), "moving_centroid_mm": moving_c.tolist(),
-                              "template_centroid_mm": target_c.tolist(),
-                              "translation_mm": (target_c - moving_c).tolist()}
+    c.meta["registration"] = reg
 
 
 def step_register(c: RowContext) -> None:

@@ -42,7 +42,7 @@ SCRIPT_ENV = ("CKPT", "TASK", "NAME", "PROCESSED", "OUT", "PATIENTS", "LABEL_NAM
               "ATLAS_SEG", "CONV", "IDENTITY", "GROUPS_DIR", "PAIRS", "OVERWRITE", "WORKERS", "PROJ", "REPO",
               "SIF", "SLURM_JOB_ID", "SLURM_CPUS_PER_TASK", "STUB_FAIL", "KEYMORPH_DIR", "WEIGHTS", "ALIGNS",
               "METHOD_PREFIX", "MATRICES", "FREESURFER_HOME", "TYPE", "ITERATIONS", "PARALLEL_GROUPS",
-              "ANTS_ARGS", "KEEP_WORK", "SKIP_SELFTEST", "ANTSPATH", "TMPDIR")
+              "ANTS_ARGS", "KEEP_WORK", "SKIP_SELFTEST", "ANTSPATH", "TMPDIR", "KEEP_DENSE", "STUB_FAIL_FIT")
 
 
 def _processed(root):
@@ -261,6 +261,42 @@ class TestMatrices(unittest.TestCase):
         with self.assertRaises(KeyError):
             src.get("fwd", {"subject": "b", "dir": "b_T1w"})
 
+    def test_fields_to_matrices(self):
+        shape = (14, 16, 12)
+        rng = np.random.RandomState(5)
+        fd = os.path.join(self.tmp, "f")
+        os.makedirs(fd)
+        names, mats = ["a_T1w", "b_T1w"], []
+        for n in names:
+            m = self._rigid(rng, shape)
+            m[:3, :3] *= 1.03
+            mats.append(m)
+            for kind, mm in (("fwd", m), ("inv", np.linalg.inv(m))):
+                nib.save(nib.Nifti1Image(F.matrix_field(mm, shape), np.eye(4)), os.path.join(fd, "%s_%s.nii.gz" % (n, kind)))
+            nib.save(nib.Nifti1Image(np.zeros(shape, np.float32), np.eye(4)), os.path.join(fd, n + "_moved.nii.gz"))
+        sf = os.path.join(self.tmp, "g.txt")
+        with open(sf, "w") as f:
+            f.write("\n".join(names) + "\n")
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(G.main(["fields-to-matrices", "--fields-dir", fd, "--subjects-file", sf,
+                                     "--delete-dense"]), 0)
+        got = F.load_matrices(os.path.join(fd, "matrices.npz"))
+        for n, m in zip(names, mats):
+            np.testing.assert_allclose(got[n][0], m, atol=1e-4)
+        self.assertEqual(sorted(os.listdir(fd)), ["matrices.npz", "matrices_check.json"])
+        # a non-linear field fails the check and keeps the dense files
+        u = F.matrix_field(mats[0], shape)
+        u[3:6, 3:6, 3:6] += 2.0
+        nib.save(nib.Nifti1Image(u, np.eye(4)), os.path.join(fd, "a_T1w_fwd.nii.gz"))
+        nib.save(nib.Nifti1Image(F.matrix_field(np.linalg.inv(mats[0]), shape), np.eye(4)),
+                 os.path.join(fd, "a_T1w_inv.nii.gz"))
+        with open(sf, "w") as f:
+            f.write("a_T1w\n")
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(G.main(["fields-to-matrices", "--fields-dir", fd, "--subjects-file", sf,
+                                     "--delete-dense"]), 4)
+        self.assertTrue(os.path.isfile(os.path.join(fd, "a_T1w_fwd.nii.gz")))
+
     def test_evaluation_matrices_equal_dense(self):
         shape = (20, 22, 18)
         aff = np.eye(4)
@@ -356,6 +392,12 @@ if a and a[0] == "-u":
     a = a[1:]
 with open(%(log)r, "a") as f:
     f.write(" ".join(a) + "\n")
+if a[:3] == ["-m", "evaluation.groups", "fields-to-matrices"]:
+    d = a[a.index("--fields-dir") + 1]
+    if os.environ.get("STUB_FAIL_FIT"):
+        sys.exit(4)
+    open(os.path.join(d, "matrices.npz"), "w").close()
+    sys.exit(0)
 if a[:2] == ["-m", "evaluation.groups"]:
     sys.exit(subprocess.call([%(py)r] + a))
 def opt(k):
@@ -447,11 +489,20 @@ class TestStubRuns(unittest.TestCase):
                       % self.tmp, "--overwrite"):
                 self.assertIn(k, c)
         self.assertIn("2 predicted, 0 already done, 0 failed (of 2)", r.stdout)
+        fits = [c for c in calls if c.startswith("-m evaluation.groups fields-to-matrices")]
+        self.assertEqual(len(fits), 2)
+        self.assertIn("--fields-dir %s/miriad_188_AD_M/fields" % out, fits[0])
+        self.assertIn("--delete-dense", fits[0])
         # resume: nothing is predicted again
         r, calls = self.run_script(PREDICT, CKPT="/ck/last", TASK="rigid")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertFalse([c for c in calls if c.startswith("predict.py run")])
         self.assertIn("0 predicted, 2 already done", r.stdout)
+        # predict.json present but no matrices (e.g. the fit failed): only the conversion reruns
+        os.remove(os.path.join(out, "miriad_241_HC_M", "fields", "matrices.npz"))
+        r, calls = self.run_script(PREDICT, CKPT="/ck/last", TASK="rigid")
+        self.assertFalse([c for c in calls if c.startswith("predict.py run")])
+        self.assertEqual(len([c for c in calls if "fields-to-matrices" in c]), 1)
 
         ev_out = os.path.join(self.tmp, "results", "eval_miriad", "ours_rigid")
         r, calls = self.run_script(EVAL, METHOD="ours_rigid")
@@ -459,10 +510,9 @@ class TestStubRuns(unittest.TestCase):
         ev = [c for c in calls if c.startswith("-m evaluation run")]
         self.assertEqual(len(ev), 2)
         g = "miriad_188_AD_M"
-        for k in ("--fwd %s/%s/fields/{subject_dir}_fwd.nii.gz" % (out, g),
-                  "--inv %s/%s/fields/{subject_dir}_inv.nii.gz" % (out, g),
+        for k in ("--matrices %s/%s/fields/matrices.npz" % (out, g),
                   "--atlas %s/%s/fields/atlas.nii.gz" % (out, g), "--atlas-seg %s/%s/fields/atlas_seg.nii.gz" % (out, g),
-                  "--components xyz --signs +++ --units mm", "--label-name synthseg", "--pairs all",
+                  "--label-name synthseg", "--pairs all",
                   "--subjects-file %s/groups/%s.txt" % (out, g), "--out %s/%s" % (ev_out, g)):
             self.assertIn(k, ev[0])
         self.assertNotIn("{group}", " ".join(ev))
@@ -493,6 +543,15 @@ class TestStubRuns(unittest.TestCase):
         self.assertIn("--fwd", ev[1])
         r, calls = self.run_script(EVAL, METHOD="brainmorph_rigid", OVERWRITE="1", MATRICES="none")
         self.assertFalse([c for c in calls if "--matrices" in c])
+
+    def test_predict_fit_failure_and_keep_dense(self):
+        r, calls = self.run_script(PREDICT, CKPT="c", TASK="affine", STUB_FAIL_FIT="1")
+        self.assertEqual(r.returncode, 1)
+        out = os.path.join(self.tmp, "results", "predict_miriad", "ours_affine")
+        self.assertIn("predict.py rc 4", _read(os.path.join(out, "failed.txt")))
+        r, calls = self.run_script(PREDICT, CKPT="c", TASK="rigid", KEEP_DENSE="1", NAME="dense")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertFalse([c for c in calls if "fields-to-matrices" in c])
 
     def test_predict_failure_continues(self):
         r, calls = self.run_script(PREDICT, CKPT="c", TASK="affine", STUB_FAIL="miriad_188_AD_M")

@@ -23,10 +23,13 @@
 #   0  python -m evaluation.groups write-groups -> $OUT/groups/<patient>.txt (+ groups.csv)
 #   1  check-streaming float32, --branches $TASK, first $N_CHECK scans of the first patient with at
 #      least $N_CHECK scans: streamed == unchunked. GATE: a failure stops the job.
-#   2  per patient: predict.py run -> $OUT/<patient>/fields ({scan}_T1w_{fwd,inv,moved}.nii.gz,
-#      atlas.nii.gz, atlas_seg.nii.gz, predict.json; fields xyz +++ mm). A patient whose
-#      predict.json exists is skipped (resubmit the same command to resume). A failed patient is
-#      logged in $OUT/failed.txt and the loop goes on; the job exits 1 if any patient failed.
+#   2  per patient: predict.py run -> $OUT/<patient>/fields, then python -m evaluation.groups
+#      fields-to-matrices: the dense linear fields are fitted exactly by 4x4 matrices (check
+#      <= 0.01 vox in matrices_check.json) and deleted, so fields/ keeps matrices.npz, atlas.nii.gz,
+#      atlas_seg.nii.gz, predict.json (KEEP_DENSE=1 keeps the per-scan fwd/inv/moved NIfTIs).
+#      A patient with predict.json (and matrices.npz) is skipped (resubmit the same command to
+#      resume). A failed patient is logged in $OUT/failed.txt and the loop goes on; the job exits 1
+#      if any patient failed.
 #
 # Environment overrides (exported by sbatch):
 #   CKPT        checkpoint prefix or directory (required, e.g. <run>/ckpt/last)
@@ -62,6 +65,7 @@ CHECK_CHUNKS=${CHECK_CHUNKS:-"--chunk-l4 3 --chunk-l2 3 --chunk-l1 3"}
 GRID_REF=${GRID_REF:-$PROJ/data/target_grid/target_grid.json}
 LEVELS=${LEVELS:-}
 EXTRA=${EXTRA:-}
+KEEP_DENSE=${KEEP_DENSE:-0}
 LEVEL_FLAGS=""
 if [ -n "$LEVELS" ]; then LEVEL_FLAGS="--levels $LEVELS"; fi
 export TMPDIR=${SCRATCH_ROOT:-/scratch}/${SLURM_JOB_ID:-manual}
@@ -100,11 +104,21 @@ for g in $LIST; do
         n_fail=$((n_fail + 1)); continue
     fi
     F="$OUT/$g/fields"
-    if [ -f "$F/predict.json" ]; then n_skip=$((n_skip + 1)); continue; fi
-    echo "--- $g ($(grep -c . "$OUT/groups/$g.txt") scans) $(date +%T)"
-    # shellcheck disable=SC2086
-    "${RUN[@]}" predict.py run --checkpoint "$CKPT" --processed-dir "$PROCESSED" --subjects-file "$OUT/groups/$g.txt" --label-name "$LABEL_NAME" --grid-reference "$GRID_REF" --branches "$TASK" --out "$F" --overwrite $LEVEL_FLAGS $EXTRA </dev/null
-    rc=$?
+    if [ -f "$F/predict.json" ] && { [ "$KEEP_DENSE" = "1" ] || [ -f "$F/matrices.npz" ]; }; then
+        n_skip=$((n_skip + 1)); continue
+    fi
+    rc=0
+    if [ ! -f "$F/predict.json" ]; then
+        echo "--- $g ($(grep -c . "$OUT/groups/$g.txt") scans) $(date +%T)"
+        # shellcheck disable=SC2086
+        "${RUN[@]}" predict.py run --checkpoint "$CKPT" --processed-dir "$PROCESSED" --subjects-file "$OUT/groups/$g.txt" --label-name "$LABEL_NAME" --grid-reference "$GRID_REF" --branches "$TASK" --out "$F" --overwrite $LEVEL_FLAGS $EXTRA </dev/null
+        rc=$?
+    fi
+    if [ $rc -eq 0 ] && [ "$KEEP_DENSE" != "1" ]; then
+        # Linear outputs: keep only the 4x4 matrices (exact fit of the dense fields, checked).
+        "${RUN[@]}" -m evaluation.groups fields-to-matrices --fields-dir "$F" --subjects-file "$OUT/groups/$g.txt" --delete-dense </dev/null
+        rc=$?
+    fi
     if [ $rc -eq 0 ]; then
         n_done=$((n_done + 1))
     else

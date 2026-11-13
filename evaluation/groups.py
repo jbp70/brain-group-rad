@@ -164,6 +164,73 @@ def cmd_aggregate(a) -> int:
     return 0
 
 
+def fit_linear_field(u_vox: np.ndarray, step: int = 4) -> tuple:
+    """Least-squares 4x4 voxel map M with x + u(x) ~= M x (canonical voxel displacement
+    [X, Y, Z, 3], sampled every ``step`` voxels). Returns (M, max residual in voxels over the
+    full grid)."""
+    from . import fields as F
+    shape = u_vox.shape[:3]
+    g = np.indices(shape, dtype=np.float64)[:, ::step, ::step, ::step].reshape(3, -1).T
+    y = g + u_vox[::step, ::step, ::step].reshape(-1, 3).astype(np.float64)
+    X = np.c_[g, np.ones(len(g))]
+    beta, *_ = np.linalg.lstsq(X, y, rcond=None)      # y = X beta, beta [4, 3]
+    M = np.eye(4)
+    M[:3, :] = beta.T
+    res = float(np.abs(F.matrix_field(M, shape) - u_vox).max())
+    return M, res
+
+
+def cmd_fields_to_matrices(a) -> int:
+    """predict.py rigid / affine outputs (dense fwd / inv per scan) -> matrices.npz; with --delete-dense
+    the per-scan *_fwd / *_inv / *_moved files are removed once the fits are exact."""
+    import nibabel as nib
+    from . import fields as F
+    with open(a.subjects_file) as f:
+        names = [x.strip() for x in f if x.strip()]
+    rows, fv, worst = [], [], 0.0
+    aff = None
+    for n in names:
+        fwd_p = os.path.join(a.fields_dir, n + "_fwd.nii.gz")
+        inv_p = os.path.join(a.fields_dir, n + "_inv.nii.gz")
+        img = nib.load(fwd_p)
+        aff = img.affine
+        sp = np.sqrt((aff[:3, :3] ** 2).sum(0))
+        shape = img.shape[:3]
+        conv = F.Convention("xyz", "+++", "mm")
+        u_f = F.load_field(fwd_p, shape, sp, conv)
+        u_i = F.load_field(inv_p, shape, sp, conv)
+        Mf, rf = fit_linear_field(u_f)
+        Mi, ri = fit_linear_field(u_i)
+        corners = np.array([[i, j, k, 1.0] for i in (0, shape[0] - 1) for j in (0, shape[1] - 1)
+                            for k in (0, shape[2] - 1)]).T
+        inv_dev = float(np.abs((np.linalg.inv(Mf) - Mi) @ corners).max())
+        rows.append({"subject": n, "fwd_residual_max_vox": rf, "inv_residual_max_vox": ri,
+                     "inv_vs_fwd_inverse_max_vox": inv_dev})
+        worst = max(worst, rf, ri, inv_dev)
+        fv.append(Mf)
+    fv = np.stack(fv)
+    iv = np.linalg.inv(fv)
+    A, Ai = aff, np.linalg.inv(aff)
+    np.savez(os.path.join(a.fields_dir, "matrices.npz"), subjects=np.array(names), fwd_vox=fv, inv_vox=iv,
+             fwd_world=A @ fv @ Ai, inv_world=A @ iv @ Ai,
+             note="least-squares fit of predict.py's dense linear fields; fwd: atlas -> subject point map "
+                  "(x_subject = M x_atlas), inv = fwd^-1; vox = processed-grid voxel coords")
+    ok = worst <= a.tol_vox
+    with open(os.path.join(a.fields_dir, "matrices_check.json"), "w") as f:
+        json.dump({"tol_vox": a.tol_vox, "max_vox": worst, "pass": ok, "subjects": rows}, f, indent=1)
+    print("%d scans: max fit residual / inverse mismatch %.2e vox (tol %.1e) -> %s"
+          % (len(names), worst, a.tol_vox, "PASS" if ok else "FAIL"))
+    if not ok:
+        return 4
+    if a.delete_dense:
+        for n in names:
+            for kind in ("fwd", "inv", "moved"):
+                p = os.path.join(a.fields_dir, "%s_%s.nii.gz" % (n, kind))
+                if os.path.isfile(p):
+                    os.remove(p)
+    return 0
+
+
 HIGHER_IS_BETTER = ("lncc", "ncc", "dice")
 
 
@@ -329,6 +396,14 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--expected", type=int, default=None, help="warn if the number of groups differs")
     g.add_argument("--all-metrics", action="store_true", help="keep every metric of summary.json")
     g.set_defaults(func=cmd_aggregate)
+    m = sub.add_parser("fields-to-matrices",
+                       help="dense linear fwd/inv fields of one group -> matrices.npz (+ optional deletion)")
+    m.add_argument("--fields-dir", required=True, help="folder with <scan>_fwd.nii.gz / _inv.nii.gz")
+    m.add_argument("--subjects-file", required=True, help="scan folder names, one per line")
+    m.add_argument("--tol-vox", type=float, default=0.01,
+                   help="max allowed fit residual / inverse mismatch in voxels (default %(default)s)")
+    m.add_argument("--delete-dense", action="store_true", help="remove *_fwd/_inv/_moved.nii.gz after a passing fit")
+    m.set_defaults(func=cmd_fields_to_matrices)
     c = sub.add_parser("compare", help="side-by-side table of several methods (paired per patient)")
     c.add_argument("--root", required=True, help="evaluation root with <method>/_aggregate/per_group.csv")
     c.add_argument("--methods", nargs="+", required=True)

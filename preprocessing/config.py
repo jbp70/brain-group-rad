@@ -105,7 +105,12 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         # onto the template brain-mask centroid (keeps the native head orientation and size, and
         # keeps the brain inside the target field of view). image_order: scipy spline order for the
         # image (1 = linear, like the in_template_space path); masks/labels use nearest.
-        "centroid": {"image_order": 1},
+        # perturb (optional): after the centroid translation, a known random affine per row about
+        # the template brain centroid (evaluation of linear registration with a ground truth).
+        # Half-widths of uniform ranges: rotation_deg (angle about a random axis), translation_mm
+        # (per axis), log_scale (per axis), shear (3 upper-triangular terms); seed + subject id
+        # give a reproducible draw per row. null = off.
+        "centroid": {"image_order": 1, "perturb": None},
     },
     "resample": {"antialias": True, "target_spacing_mm": 1.0, "min_spacing_ratio": 0.95},
     "synthseg": {"parc": True, "robust": True, "cpu": False, "threads": 8, "vol": True,
@@ -180,6 +185,17 @@ def validate(cfg: Dict[str, Any]) -> None:
     order = reg["centroid"]["image_order"]
     _require(isinstance(order, int) and not isinstance(order, bool) and 0 <= order <= 5,
              "registration.centroid.image_order must be an int in 0..5")
+    pert = reg["centroid"]["perturb"]
+    if pert is not None:
+        keys = ("seed", "rotation_deg", "translation_mm", "log_scale", "shear")
+        _require(isinstance(pert, dict) and set(pert) == set(keys),
+                 "registration.centroid.perturb must be null or a mapping with exactly %s" % (keys,))
+        _require(isinstance(pert["seed"], int) and not isinstance(pert["seed"], bool),
+                 "registration.centroid.perturb.seed must be an int")
+        for k in keys[1:]:
+            v = pert[k]
+            _require(isinstance(v, (int, float)) and not isinstance(v, bool) and v >= 0,
+                     "registration.centroid.perturb.%s must be a number >= 0" % k)
     for key in ("synthstrip", "synthseg"):
         _require(isinstance(cfg[key]["extra_args"], list), "%s.extra_args must be a list" % key)
     _require(isinstance(reg["flirt"]["extra_args"], list), "registration.flirt.extra_args must be a list")

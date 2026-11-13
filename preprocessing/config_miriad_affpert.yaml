@@ -1,0 +1,19 @@
+# MIRIAD with a KNOWN random affine per scan (evaluation of groupwise rigid / affine registration
+# with a ground truth for the affine part). Same steps as config_miriad.yaml (SynthStrip + N4 +
+# brain-centroid translation, ONE resampling from the native scan), plus per scan a random
+# affine about the template brain centroid: rotation up to 10 deg (random axis), translation up
+# to 5 mm per axis, scale up to +-8 % per axis (log), shear up to 0.05 (3 terms). All within the
+# affine training ranges (rotation 45 deg, translation 15 mm, scale +-10 %, shear 0.05).
+# Draws are reproducible from seed + scan id; each scan's matrix is in
+# <scan>_T1w/perturbation_world.txt and meta.json registration.perturbation.
+# FOV check on 59 MIRIAD scans (these ranges): brain lost outside the grid mean ~0, max 0.26 %
+# (meta mask_volume_lost_frac; warning > 0.1 %). Translation 10 mm lost up to ~1 % (x margin is small).
+# Manifest: as for miriad but --name miriad_affpert (outputs in <out-root>/miriad_affpert/).
+target_dir: /autofs/space/crater_001/users/jn85/BrainRegProjects/GroupwiseReg/data/target_grid
+
+registration:
+  backend: centroid
+  centroid:
+    perturb: {seed: 2026, rotation_deg: 10.0, translation_mm: 5.0, log_scale: 0.0769610411, shear: 0.05}
+
+outputs: {keep_work: false, save_mask: false, save_qc_png: false}

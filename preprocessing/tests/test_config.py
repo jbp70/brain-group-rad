@@ -73,6 +73,10 @@ def test_deep_merge_and_validation(tmp_path):
 def test_centroid_backend_and_miriad_config(tmp_path):
     cfg = load_config(os.path.join(os.path.dirname(EXAMPLE), "config_miriad.yaml"))
     assert cfg["registration"]["backend"] == "centroid" and cfg["registration"]["centroid"]["image_order"] == 1
+    assert cfg["registration"]["centroid"]["perturb"] is None
+    cfg = load_config(os.path.join(os.path.dirname(EXAMPLE), "config_miriad_affpert.yaml"))
+    p = cfg["registration"]["centroid"]["perturb"]
+    assert p["rotation_deg"] == 10.0 and p["translation_mm"] == 5.0 and abs(p["log_scale"] - 0.07696) < 1e-4
     for bad in (2.5, True, 7):
         p = tmp_path / "c.yaml"
         p.write_text(yaml.safe_dump({"registration": {"backend": "centroid", "centroid": {"image_order": bad}}}))
