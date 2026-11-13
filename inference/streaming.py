@@ -11,7 +11,8 @@ next block's group mean. Results equal the model's own call up to float rounding
 Per-block primitive (design 4.2): a group block on a chunk is
 ``block.conv_with_group_mean(block.pre(x, False), mean, inner_clip=block.split_group)`` (the stem
 has an identity ``pre`` and is never split, so only the outer fp16 clip applies, as in its concat
-path); a non-group block (config B encoder) is ``clip_fp16(block.conv(block.pre(x, False)), C)``.
+path); a non-group block (config B / none encoder, E / none decoder) is
+``clip_fp16(block.conv(block.pre(x, False)), C)``; its pass accumulates no group sum.
 Casts are the model's: ``tf.cast(images, model.compute_dtype)``, the decoder's
 ``tf.cast(x, block.compute_dtype)`` / ``tf.cast(skip, x.dtype)`` per stage and
 ``svf_norm_act.compute_dtype`` before the head.
@@ -84,15 +85,17 @@ def max_elements_per_image(level, model_cfg, tasks, split_group_conv):
 
     Counted at ``data_loading.params.LEVEL_SHAPE[level]``: every block input after pooling, the
     group concat (2 x input channels; only when not split, except the stem, which always
-    concatenates [x, mean] = 2 channels in config A), every block output; for the deform task also
-    each decoder stage's concat(up(x), skip), its group concat when not split, its output, and the
-    3-channel deform fields. Encoder in config A has group blocks, config B none; the decoder
-    always has them. Ties keep the first tensor in execution order.
+    concatenates [x, mean] = 2 channels when grouped), every block output; for the deform task also
+    each decoder stage's concat(up(x), skip), its group concat when grouped and not split, its
+    output, and the 3-channel deform fields. The encoder has group blocks in configs A / E
+    (`ModelConfig.group_encoder`), the decoder in A / B (`group_decoders`). Ties keep the first
+    tensor in execution order.
     """
     level = P.check_level(level)
     tasks = _task_tuple(tasks)
     geo = level_geometry(level, model_cfg)
-    group_enc = model_cfg.group_config == "A"
+    group_enc = model_cfg.group_encoder()
+    group_dec = model_cfg.group_decoders()
     split = bool(split_group_conv)
     s0, c0 = geo["stem"]
     v0 = _voxels(s0)
@@ -122,7 +125,7 @@ def max_elements_per_image(level, model_cfg, tasks, split_group_conv):
             spatial, channels = geo[name]
             concat = (geo[prev][1] + geo[DECODER_SKIPS[name]][1]) * _voxels(spatial)
             items.append((name + " skip concat", concat))
-            if not split:
+            if group_dec and not split:
                 items.append((name + " group concat", 2 * concat))
             items.append((name + " output", channels * _voxels(spatial)))
             prev = name
@@ -291,6 +294,8 @@ class StreamedLevel(object):
     def _next_sum(self, nxt, y, prev):
         """Group-sum part of the block after an encoder block (None if it has no group)."""
         if nxt == "d5":
+            if not self._dec.d5.group:
+                return None
             return _pre_sum(self._dec.d5, self._stage_in("d5", y, prev))
         if nxt is not None and self._enc[nxt].group:
             return _pre_sum(self._enc[nxt], y)
@@ -352,7 +357,9 @@ class StreamedLevel(object):
 
         def body(prev, skip, mean, nskip):
             y = _apply_block(block, self._stage_in(name, prev, skip), mean)
-            out = {"y": y, "sum": _pre_sum(nblock, self._stage_in(nxt, y, nskip))}
+            out = {"y": y}
+            if nblock.group:
+                out["sum"] = _pre_sum(nblock, self._stage_in(nxt, y, nskip))
             if self._rec(block):
                 out["max"] = _max_abs(y)
             return out
@@ -363,8 +370,10 @@ class StreamedLevel(object):
 
         def body(prev, skip, mean, x_in, mean_x):
             y = _apply_block(block, self._stage_in("d2", prev, skip), mean)
-            stem = self._stem(x_in, mean_x)
-            out = {"y": y, "sum": _pre_sum(d1, self._stage_in("d1", y, stem))}
+            out = {"y": y}
+            if d1.group:
+                stem = self._stem(x_in, mean_x)
+                out["sum"] = _pre_sum(d1, self._stage_in("d1", y, stem))
             if self._rec(block):
                 out["max"] = _max_abs(y)
             return out
@@ -522,24 +531,26 @@ class StreamedLevel(object):
                 out = f(self._get(prev, i0, i1), self._get(skip, i0, i1), mean,
                         self._get(nskip, i0, i1))
                 self._put(name, n, i0, out["y"])
-                acc.add(out["sum"])
+                if "sum" in out:
+                    acc.add(out["sum"])
                 if "max" in out:
                     self._note(stats, name, out["max"])
             stats["chunks"]["P%d" % p] = list(bounds)
             self._free(*freed)
-            mean = acc.mean(n, getattr(dec, nxt).compute_dtype)
+            mean = acc.mean(n, getattr(dec, nxt).compute_dtype) if acc.s is not None else None
         # P10: d2 (+ S_d1 with the stem recomputed)
         acc, f = _Sum(), self._f_d2()
         for i0, i1 in bounds:
             out = f(self._get("d3", i0, i1), self._get("l2", i0, i1), mean,
                     self._get("x_in", i0, i1), mean_x)
             self._put("d2", n, i0, out["y"])
-            acc.add(out["sum"])
+            if "sum" in out:
+                acc.add(out["sum"])
             if "max" in out:
                 self._note(stats, "d2", out["max"])
         stats["chunks"]["P10"] = list(bounds)
         self._free("l2", "d3")
-        mean = acc.mean(n, dec.d1.compute_dtype)
+        mean = acc.mean(n, dec.d1.compute_dtype) if acc.s is not None else None
         # P11: d1 (stem recomputed) -> v_raw
         acc, f = _Sum(), self._f_d1()
         for i0, i1 in bounds:

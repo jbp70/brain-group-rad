@@ -179,7 +179,7 @@ class TestGroupBehaviour(NetTestCase):
         return m, x
 
     def test_permutation_equivariance(self):
-        for cfg in ("A", "B"):
+        for cfg in ("A", "B", "none", "E"):
             m, x = self._model(cfg, n=5)
             perm = np.array([3, 0, 4, 1, 2])
             for task in ("rigid", "affine"):
@@ -193,6 +193,10 @@ class TestGroupBehaviour(NetTestCase):
                     np.testing.assert_allclose(got[:, :3, :3], ref[:, :3, :3], atol=1e-5,
                                                err_msg="%s %s" % (cfg, task))
                     t_tol = 1e-5 * max(1.0, float(np.abs(ref[:, :3, 3]).max()))
+                    if cfg in ("none", "E"):
+                        # their random heads give translations < 1 mm, where the relative floor
+                        # is 1e-5 mm; measured 1.02e-5 mm (E rigid). Use the A / B scale, 1e-4 mm.
+                        t_tol = max(t_tol, 1e-4)
                     np.testing.assert_allclose(got[:, :3, 3], ref[:, :3, 3], rtol=0, atol=t_tol,
                                                err_msg="%s %s" % (cfg, task))
                     np.testing.assert_array_equal(got[:, 3], ref[:, 3])
@@ -202,24 +206,74 @@ class TestGroupBehaviour(NetTestCase):
 
     def test_group_information_flow(self):
         rng = np.random.default_rng(9)
-        for cfg in ("A", "B"):
+        for cfg in ("A", "B", "none", "E"):
             m, x = self._model(cfg, n=4, seed=1)
             x2 = x.numpy().copy()
             x2[2] = npr.smooth_phantom(x2.shape[1:4], rng)[..., None]
-            o1 = m(x, task="affine", training=False)
-            o2 = m(tf.constant(x2), task="affine", training=False)
+            for task in ("affine", "rigid"):
+                o1 = m(x, task=task, training=False)
+                o2 = m(tf.constant(x2), task=task, training=False)
+                others = [0, 1, 3]
+                d_enc = np.abs(o1["bottleneck"].numpy()[others]
+                               - o2["bottleneck"].numpy()[others]).max()
+                d_skip = max(np.abs(s1.numpy()[others] - s2.numpy()[others]).max()
+                             for s1, s2 in zip(o1["skips"], o2["skips"]))
+                d_out = np.abs(o1["A_raw"].numpy()[others] - o2["A_raw"].numpy()[others]).max()
+                d_cen = np.abs(o1["A"].numpy()[others] - o2["A"].numpy()[others]).max()
+                msg = "%s %s" % (cfg, task)
+                if cfg in ("A", "E"):
+                    self.assertGreater(d_enc, 1e-3, msg)
+                    self.assertGreater(d_skip, 1e-3, msg)
+                else:
+                    self.assertEqual(d_enc, 0.0, msg)           # per-image encoder in B / none
+                    self.assertEqual(d_skip, 0.0, msg)
+                if cfg == "none":
+                    # No group block anywhere: the raw outputs are per image; only the
+                    # centering couples the group.
+                    self.assertLess(d_out, 1e-6, msg)
+                    self.assertGreater(d_cen, 1e-4, msg)
+                else:
+                    self.assertGreater(d_out, 1e-4, msg)        # encoder or decoder group blocks
+
+    def test_deform_group_information_flow(self):
+        """Deform task: v_raw of the other images changes with image 2 except in config none
+        (no group block), while the centered v always does (SVF centering)."""
+        rng = np.random.default_rng(3)
+        for cfg in ("none", "E", "B"):
+            tf.random.set_seed(2)
+            x = images(4, 4, seed=2)
+            m = G.GroupRegLevelModel(4, ModelConfig(group_config=cfg, deform_decoder=True,
+                                                    **NARROW)).build_model()
+            head = m.deform_decoder.svf_head
+            head.kernel.assign((rng.normal(size=head.kernel.shape) * 0.02).astype(np.float32))
+            x2 = x.numpy().copy()
+            x2[2] = npr.smooth_phantom(x2.shape[1:4], rng)[..., None]
+            o1 = m(x, task="deform", training=False)
+            o2 = m(tf.constant(x2), task="deform", training=False)
             others = [0, 1, 3]
-            d_enc = np.abs(o1["bottleneck"].numpy()[others] - o2["bottleneck"].numpy()[others]).max()
-            d_skip = max(np.abs(s1.numpy()[others] - s2.numpy()[others]).max()
-                         for s1, s2 in zip(o1["skips"], o2["skips"]))
-            d_out = np.abs(o1["A_raw"].numpy()[others] - o2["A_raw"].numpy()[others]).max()
-            if cfg == "A":
-                self.assertGreater(d_enc, 1e-3)
-                self.assertGreater(d_skip, 1e-3)
+            d_raw = np.abs(o1["v_raw"].numpy()[others] - o2["v_raw"].numpy()[others]).max()
+            d_v = np.abs(o1["v"].numpy()[others] - o2["v"].numpy()[others]).max()
+            self.assertGreater(float(np.abs(o1["v_raw"].numpy()).max()), 1e-3, cfg)
+            if cfg == "none":
+                self.assertLess(d_raw, 1e-6, cfg)
             else:
-                self.assertEqual(d_enc, 0.0)                    # per-image encoder in config B
-                self.assertEqual(d_skip, 0.0)
-            self.assertGreater(d_out, 1e-4, cfg)                 # decoder group blocks
+                self.assertGreater(d_raw, 1e-5, cfg)
+            self.assertGreater(d_v, 1e-5, cfg)
+            free_memory()
+
+    def test_block_group_flags(self):
+        """Where the group blocks are per config (ablation-prereqs linear-heads.md table)."""
+        expect = {"A": (True, True), "B": (False, True), "E": (True, False),
+                  "none": (False, False)}
+        for cfg, (enc, dec) in expect.items():
+            c = ModelConfig(group_config=cfg, deform_decoder=True, **NARROW)
+            self.assertEqual((c.group_encoder(), c.group_decoders()), (enc, dec), cfg)
+            m = G.GroupRegLevelModel(4, c)
+            self.assertEqual([b.group for b in m.encoder.blocks()], [enc] * 6, cfg)
+            self.assertEqual([b.group for b in m.linear_decoder.reductions],
+                             [dec] * len(c.reductions), cfg)
+            self.assertEqual([b.group for b in m.linear_decoder.dense_blocks], [False, dec], cfg)
+            self.assertEqual([b.group for b in m.deform_decoder.blocks()], [dec] * 5, cfg)
 
 
 class TestGradients(NetTestCase):
@@ -269,7 +323,8 @@ class TestGradients(NetTestCase):
                     # full-width residual L5 conv (3x3, 512 -> 256 at 10x14x12) takes ~2 min.
                     ModelConfig(group_config="A", block="residual",
                                 filters=(8, 16, 16, 24, 32, 48)),
-                    ModelConfig(group_config="B", dense_group_concat_first=True)):
+                    ModelConfig(group_config="B", dense_group_concat_first=True),
+                    ModelConfig(group_config="none"), ModelConfig(group_config="E")):
             for task in ("affine", "rigid"):
                 with self.subTest(cfg=cfg.group_config, block=cfg.block, task=task):
                     nv, nk = self._check(cfg, task)
@@ -389,6 +444,26 @@ class TestParameterCounts(NetTestCase):
                          rows[("A", False)]["group_overhead/encoder"])
         self.assertEqual(d["trainable"], d["encoder"] + d["linear_decoder"])
 
+    def test_counts_none_and_e(self):
+        """Configs none / E (ablation-prereqs): fewer parameters, no overhead where ungrouped."""
+        rows = {}
+        for cfg_name in ("A", "B", "none", "E"):
+            c = ModelConfig(group_config=cfg_name, deform_decoder=True, **NARROW)
+            rows[cfg_name] = G.GroupRegLevelModel(4, c).build_model().count_params_by_part()
+        tot = {k: r["trainable"] for k, r in rows.items()}
+        self.assertLess(tot["none"], tot["E"])
+        self.assertLess(tot["E"], tot["A"])
+        self.assertLess(tot["none"], tot["B"])
+        for part in ("encoder", "linear_decoder", "deform_decoder"):
+            self.assertEqual(rows["none"]["group_overhead/" + part], 0, part)
+        self.assertEqual(rows["E"]["group_overhead/linear_decoder"], 0)
+        self.assertEqual(rows["E"]["group_overhead/deform_decoder"], 0)
+        self.assertEqual(rows["E"]["encoder"], rows["A"]["encoder"])
+        self.assertEqual(rows["none"]["encoder"], rows["B"]["encoder"])
+        self.assertEqual(rows["none"]["linear_decoder"], rows["E"]["linear_decoder"])
+        self.assertEqual(rows["E"]["linear_decoder"] + rows["A"]["group_overhead/linear_decoder"],
+                         rows["A"]["linear_decoder"])
+
 
 class TestModelConfig(unittest.TestCase):
     def test_defaults_and_round_trip(self):
@@ -409,6 +484,30 @@ class TestModelConfig(unittest.TestCase):
                 ModelConfig(**bad)
         with self.assertRaises(ValueError):
             ModelConfig.from_dict({"nope": 1})
+
+    def test_group_configs_none_and_e(self):
+        """ablation-prereqs: 'none' / 'E' valid and round-trip; dense_group_concat_first needs
+        grouped decoders; A / B helper booleans equal the pre-ablation switches."""
+        self.assertEqual((ModelConfig().group_encoder(), ModelConfig().group_decoders()),
+                         (True, True))
+        self.assertEqual((ModelConfig(group_config="B").group_encoder(),
+                          ModelConfig(group_config="B").group_decoders()), (False, True))
+        for name, enc, dec in (("none", False, False), ("E", True, False)):
+            c = ModelConfig(group_config=name, deform_decoder=True)
+            self.assertEqual((c.group_encoder(), c.group_decoders()), (enc, dec))
+            d = c.to_dict()
+            self.assertEqual(d["group_config"], name)
+            self.assertNotIn("group_encoder", d)                 # methods, not fields
+            self.assertEqual(ModelConfig.from_dict(d), c)
+            with self.assertRaises(ValueError) as cm:
+                ModelConfig(group_config=name, dense_group_concat_first=True)
+            self.assertIn("dense_group_concat_first", str(cm.exception))
+        for name in ("A", "B"):
+            self.assertTrue(ModelConfig(group_config=name,
+                                        dense_group_concat_first=True).dense_group_concat_first)
+        for bad in ("C", "None", "e", ""):
+            with self.assertRaises(ValueError):
+                ModelConfig(group_config=bad)
 
     def test_deform_fields(self):
         c = ModelConfig()

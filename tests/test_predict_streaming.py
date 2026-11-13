@@ -207,6 +207,21 @@ class TestMaxElements(unittest.TestCase):
         with self.assertRaises(ValueError):
             ST.max_elements_per_image(1, cfg, ("pairwise",), True)
 
+    def test_config_none_and_e(self):
+        """ablation-prereqs: ungrouped decoders have no group concat (none, E); the encoder of E
+        is grouped like A's. d1 skip concat = (d2 32 + stem 32) x 6881280 at level 1."""
+        none, e = ModelConfig(group_config="none"), ModelConfig(group_config="E")
+        for cfg in (none, e):
+            for split in (False, True):
+                self.assertEqual(ST.max_elements_per_image(1, cfg, ("deform",), split),
+                                 (440401920, "d1 skip concat"), (cfg.group_config, split))
+        self.assertEqual(ST.max_elements_per_image(4, none, ("rigid",), False),
+                         (13762560, "l3 output"))           # like B: no encoder group concat
+        self.assertEqual(ST.max_elements_per_image(4, e, ("rigid",), False),
+                         (27525120, "l4 group concat"))     # like A
+        self.assertEqual(ST.max_elements_per_image(4, e, ("deform",), False),
+                         (27525120, "l4 group concat"))     # d3 skip concat 24084480 is smaller
+
 
 N = 3
 B_STREAM_FIELD, B_STREAM_A = 1e-4, 1e-5          # S_stream (design 1.3 AC 0)
@@ -355,6 +370,12 @@ class TestStreamedLevel(unittest.TestCase):
                     ("config B split off", dict(group_config="B", split=False), False, 1.0),
                     ("fp16 clip 100", dict(policy="mixed_float16", clip=100.0), True, 100.0),
                     ("fp16 float32_fine", dict(policy="mixed_float16", dd="float32_fine"), True,
+                     1.0),
+                    # ablation-prereqs: no group blocks / encoder-only group blocks
+                    ("config none", dict(group_config="none"), False, 1.0),
+                    ("config E", dict(group_config="E"), False, 1.0),
+                    ("config E split off", dict(group_config="E", split=False), False, 1.0),
+                    ("config none fp16", dict(policy="mixed_float16", group_config="none"), True,
                      1.0))
         for label, kw, fp16, scale in variants:
             m = _model(2, **kw)
@@ -378,6 +399,14 @@ class TestStreamedLevel(unittest.TestCase):
             if kw.get("dd") == "float32_fine":
                 self.assertEqual(m.deform_decoder.d1.compute_dtype, "float32")
                 self.assertEqual(m.deform_decoder.d3.compute_dtype, "float16")
+            free_memory()
+
+    def test_config_none_e_level4(self):
+        """ablation-prereqs: configs none / E at level 4, float32, chunks 1, 2, N, all tasks."""
+        for g in ("none", "E"):
+            m = _model(4, group_config=g)
+            self._check_model("L4 config %s" % g, m, _images(4), (1, 2, N),
+                              ("deform", "rigid", "affine"), fp16=False)
             free_memory()
 
     def test_disk_store_fp16_level4(self):

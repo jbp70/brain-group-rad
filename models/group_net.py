@@ -6,16 +6,25 @@ the multi-level cascade (milestone 8) plug into the hooks marked below.
 
 Input: one group per batch, ``images [N, X, Y, Z, 1]`` at one pyramid level (N may be dynamic).
 
+Group-block placement (``ModelConfig.group_config``; `ModelConfig.group_encoder` /
+`group_decoders`; ablation-prereqs linear-heads.md):
+
+    config   stem + L2-L6   linear decoder (reductions, dense_1)   deform decoder D5-D1
+    A        group          group                                  group
+    B        -              group                                  group      (final model)
+    E        group          -                                      -
+    none     -              -                                      -
+
 Encoder (identical trainable parameters at every level, so weights copy across levels):
 
-    stem   Conv3D(f0, 3), no norm/act before it    (group conv in config A)
+    stem   Conv3D(f0, 3), no norm/act before it    (group conv in configs A, E)
     pool   AveragePooling3D(2), parameter-free     (level 1 only)
-    L2     block f1                                (group block in A)
+    L2     block f1                                (group block in A, E)
     pool   AveragePooling3D(2), parameter-free     (levels 2 and 1)
     L3     block f2
     L4-L6  blocks f3-f5, stride 2                   -> bottleneck 5x7x6 at every level
 
-Linear decoder (group blocks in both configs; all of it is after the bottleneck):
+Linear decoder (group blocks in configs A, B; all of it is after the bottleneck):
 1x1 reductions (192, 96, 48, 24) -> flatten (5040) -> dense 2048 (group concat only with
 ``dense_group_concat_first``) -> dense 512 (group) -> norm -> act -> dropout -> heads (float32)
 (dense-path norm = ``dense_norm``, LayerNorm by default; the pre-head act is dropped with
@@ -24,7 +33,7 @@ rotation+translation Dense(13) (zero kernel, identity bias) and scale/shear Dens
 Rigid: A_raw = [R | t]; affine: A_raw = [R K | t]. A = GroupCentering(A_raw).
 
 Deformable decoder (design 4.5-4.6, milestone 6; built only with ``deform_decoder=True``):
-U-Net stages D5..D1, each [trilinear x2 up] -> concat(skip) -> one group block (both configs),
+U-Net stages D5..D1, each [trilinear x2 up] -> concat(skip) -> one block (group in A, B),
 upsamples parameter-free (D5-D3 always, D2 at levels 2/1, D1 at level 1), so the decoder has the
 same variables at every level. SVF head: norm -> act -> Conv3D(3, 3) zero-init, float32 ->
 v_raw (level voxels, central space). Task 'deform': v = center_velocities(v_raw) and
@@ -77,9 +86,9 @@ class GroupEncoder(tf.keras.layers.Layer):
     """Shared encoder for one pyramid level (design 4.3). Returns (bottleneck, skips).
 
     ``skips`` = [stem, L2, L3, L4, L5, L6] outputs (L6 is the bottleneck), for the deformable
-    decoder. Config A: the stem and L2-L6 are group blocks. Config B: no group interaction in
-    the encoder, so each image's features depend on that image only (in inference mode; with
-    training-mode BatchNorm the batch statistics still couple the group).
+    decoder. Configs A, E: the stem and L2-L6 are group blocks. Configs B, none: no group
+    interaction in the encoder, so each image's features depend on that image only (in inference
+    mode; with training-mode BatchNorm the batch statistics still couple the group).
     """
 
     def __init__(self, level, config=None, **kwargs):
@@ -87,7 +96,7 @@ class GroupEncoder(tf.keras.layers.Layer):
         self.level = P.check_level(level)
         self.config = config or ModelConfig()
         cfg = self.config
-        g = cfg.group_config == "A"
+        g = cfg.group_encoder()
         f = cfg.filters
         self.stem = L.GroupConvBlock(f[0], kernel_size=cfg.kernel_size, group=g,
                                      pre_activation=False, negative_slope=cfg.negative_slope,
@@ -136,12 +145,13 @@ class LinearDecoder(tf.keras.layers.Layer):
         super().__init__(**kwargs)
         self.config = config or ModelConfig()
         cfg = self.config
-        self.reductions = [_conv_block(cfg, r, 1, True, "reduction_%d" % i, kernel_size=1,
+        g = cfg.group_decoders()
+        self.reductions = [_conv_block(cfg, r, 1, g, "reduction_%d" % i, kernel_size=1,
                                        residual_ok=False)
                            for i, r in enumerate(cfg.reductions)]
         self.flatten = tf.keras.layers.Flatten(name="flatten")
         self.dense_blocks = [
-            L.GroupDenseBlock(u, group=(i > 0 or cfg.dense_group_concat_first),
+            L.GroupDenseBlock(u, group=(i > 0 or cfg.dense_group_concat_first) and g,
                               norm=cfg.dense_norm, negative_slope=cfg.negative_slope,
                               bn_momentum=cfg.bn_momentum, bn_epsilon=cfg.bn_epsilon,
                               seed=cfg.seed, name="dense_%d" % i)
@@ -196,8 +206,9 @@ class LinearDecoder(tf.keras.layers.Layer):
 class DeformDecoder(tf.keras.layers.Layer):
     """U-Net decoder + SVF head (design 4.5). call(skips, training) -> (v_raw, dec_feat).
 
-    Input L6 (skips[5]); stage d5..d1 = [TrilinearUpsample2x] -> concat(skip) -> group block
-    (pre-activation norm -> act -> concat(group mean) -> conv, in both configs A and B), skips
+    Input L6 (skips[5]); stage d5..d1 = [TrilinearUpsample2x] -> concat(skip) -> block
+    (pre-activation norm -> act -> concat(group mean) -> conv in configs A and B; no group
+    concat in E and none), skips
     L5, L4, L3, L2, stem. Upsamples: d5, d4, d3 at every level; d2 at levels 2 and 1 (mirrors
     the encoder's pool3); d1 at level 1 (mirrors pool2). All upsamples are parameter-free, so the
     variables are identical at every level. The SVF head is NormAct -> Conv3D(3, 3, 'same') with
@@ -232,7 +243,8 @@ class DeformDecoder(tf.keras.layers.Layer):
             with scope:
                 setattr(self, "up_" + name,
                         L.TrilinearUpsample2x(name="up_" + name) if has_up[name] else None)
-                setattr(self, name, _conv_block(cfg, width, 1, True, name, residual_ok=False))
+                setattr(self, name, _conv_block(cfg, width, 1, cfg.group_decoders(), name,
+                                                residual_ok=False))
         scope = (precision.policy_scope("float32") if float32_stages
                  else contextlib.nullcontext())
         with scope:

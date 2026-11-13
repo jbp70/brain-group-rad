@@ -586,5 +586,47 @@ class TestStepTimes(_Base):
         self.assertEqual(p["step_s_range"], [0.5 * p["step_s"], 1.5 * p["step_s"]])
 
 
+class TestGroupConfigs(_Base):
+    """ablation-prereqs: group flags per --group-config (A, B, E, none); A / B unchanged."""
+    D12HS = dict(deform_decoder=True, filters=(16, 64, 128, 192, 256, 384),
+                 decoder_widths=(128, 96, 64, 16, 8))
+    # Peaks (GiB) for A / B computed with the code before ablation-prereqs (main 8e12596), and
+    # the new E / none: L2 deform N16 full ckpt AMP lean+split frozen4, L1 deform N4 chain42,
+    # L4 rigid N32.
+    PINS = {"A": (41.94741765638642, 32.66297501474911, 10.681755003018868),
+            "B": (41.84714139481835, 32.54446670562321, 9.462378019407453),
+            "E": (41.574845421330245, 32.557098092141686, 10.623525318189156),
+            "none": (41.474569159762176, 32.438589783015786, 9.40414833457774)}
+
+    def _cfg(self, g):
+        return MM.resolve_config(dict(self.D12HS, group_config=g))
+
+    def test_architecture_flags(self):
+        for g, (enc, dec) in (("A", (True, True)), ("B", (False, True)), ("E", (True, False)),
+                              ("none", (False, False))):
+            arch = MM.architecture(self._cfg(g), 1)
+            self.assertEqual([st["group"] for st in arch["encoder"]], [enc] * 6, g)
+            self.assertEqual([st["group"] for st in arch["decoder"]], [dec] * 5, g)
+
+    def test_inventory_and_peaks(self):
+        for g in ("A", "B", "E", "none"):
+            mc = dict(self.D12HS, group_config=g)
+            w2 = MM.Workload(2, "deform", 16, mc, "full", True, 7, cascade="frozen4",
+                             lean_sampler=True, split_group_conv=True)
+            w1 = MM.Workload(1, "deform", 4, mc, "full", True, 7, cascade="chain42",
+                             lean_sampler=True, split_group_conv=True)
+            w4 = MM.Workload(4, "rigid", 32, mc, "none", True, 7)
+            got = tuple(MM.predict(w, self.co)["peak_gib"] for w in (w2, w1, w4))
+            for a, b in zip(got, self.PINS[g]):
+                self.assertAlmostEqual(a, b, places=9, msg=g)
+            if g == "none":
+                for tensors in MM.tensor_inventory(w2.replace(split_group_conv=False)):
+                    self.assertFalse([t["desc"] for t in tensors if "group concat" in t["desc"]])
+        p = {g: v[0] for g, v in self.PINS.items()}
+        self.assertLess(p["none"], p["E"])
+        self.assertLess(p["E"], p["A"])
+        self.assertLess(p["none"], p["B"])
+
+
 if __name__ == "__main__":
     unittest.main()

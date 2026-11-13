@@ -63,6 +63,18 @@ class TestArgs(unittest.TestCase):
         self.assertEqual(a.optimizer, "adam")
         self.assertEqual(A.ranges_from_args(a)["rigid"], dict(P.DEFAULT_LINEAR_RANGES["rigid"]))
         json.dumps(A.args_to_dict(a))
+        # ablation-prereqs: group configs none (no group blocks) and E (encoder only).
+        for name in ("none", "E"):
+            a = A.parse_args(["--data", "x", "--group-config", name] + NARROW_ARGS)
+            cfg = A.model_config_from_args(a)
+            self.assertEqual(cfg.group_config, name)
+            self.assertEqual(type(cfg).from_dict(json.loads(json.dumps(cfg.to_dict()))), cfg)
+            a = A.parse_args(["--data", "x", "--group-config", name,
+                              "--dense-group-concat-first", "true"] + NARROW_ARGS)
+            with self.assertRaises(ValueError):
+                A.model_config_from_args(a)
+        with self.assertRaises(SystemExit):
+            A.parse_args(["--data", "x", "--group-config", "C"])
 
     def test_loss_scale_and_head_activation_flags(self):
         a = A.parse_args(["--data", "x"])

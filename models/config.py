@@ -7,7 +7,7 @@ loss weights, p_skip, ...) live in the runtime config, not here.
 import dataclasses
 from typing import Optional, Tuple
 
-GROUP_CONFIGS = ("A", "B")
+GROUP_CONFIGS = ("A", "B", "none", "E")
 BLOCKS = ("single", "residual")
 CONV_NORMS = ("batch", "instance", "none")
 DENSE_NORMS = ("layer", "batch", "none")
@@ -18,13 +18,18 @@ HEAD_ACTIVATIONS = ("relu", "none")
 class ModelConfig:
     # Encoder widths: stem (L1), L2, L3, L4, L5, L6 (rigid project `init_small`).
     filters: Tuple[int, ...] = (32, 64, 128, 192, 256, 384)
-    # 1x1 reductions after L6 (group blocks in both configs; design 4.4).
+    # 1x1 reductions after L6 (group blocks in configs A and B; design 4.4).
     reductions: Tuple[int, ...] = (192, 96, 48, 24)
     # Dense widths after flattening the 5x7x6x24 bottleneck.
     dense: Tuple[int, ...] = (2048, 512)
     # Standard dropout before the heads (training only).
     dropout: float = 0.15
-    # 'A': group blocks everywhere (stem, encoder, decoders). 'B': only after the bottleneck.
+    # Where the group blocks (concat of the group mean) are (`group_encoder` / `group_decoders`;
+    # ablation-prereqs, .agents/tasks/ablation-prereqs/linear-heads.md):
+    #   'A'    stem + encoder L2-L6 and both decoders (everywhere, MultiMorph-style)
+    #   'B'    both decoders only (linear reductions + dense_1, deform D5-D1; final model)
+    #   'E'    stem + encoder only (linear and deform decoders ungrouped)
+    #   'none' no group blocks; the group couples only via centering, losses, train-mode BN.
     group_config: str = "A"
     # Group concat at the first dense layer too (doubles it: 10.3 M -> 20.6 M; design v3.2).
     dense_group_concat_first: bool = False
@@ -83,6 +88,15 @@ class ModelConfig:
         f = self.filters
         return (f[4] // 2, f[3] // 2, f[2] // 2, f[1] // 2, f[0] // 2)
 
+    def group_encoder(self):
+        """True if the stem and encoder L2-L6 are group blocks (configs A, E)."""
+        return self.group_config in ("A", "E")
+
+    def group_decoders(self):
+        """True if the linear-decoder reductions + dense_1 and the deform decoder stages are
+        group blocks (configs A, B)."""
+        return self.group_config in ("A", "B")
+
     def validate(self):
         if len(self.filters) != 6:
             raise ValueError("filters needs 6 entries (stem, L2..L6), got {}".format(self.filters))
@@ -94,6 +108,9 @@ class ModelConfig:
                 raise ValueError("{} entries must be integers >= 1, got {}".format(name, vals))
         if self.group_config not in GROUP_CONFIGS:
             raise ValueError("group_config must be one of {}".format(GROUP_CONFIGS))
+        if self.dense_group_concat_first and not self.group_decoders():
+            raise ValueError("dense_group_concat_first needs grouped decoders (group_config A "
+                             "or B), got group_config {!r}".format(self.group_config))
         if self.block not in BLOCKS:
             raise ValueError("block must be one of {}".format(BLOCKS))
         if self.norm not in CONV_NORMS:

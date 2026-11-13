@@ -49,6 +49,10 @@ class TestCountParams(unittest.TestCase):
         self.check(ModelConfig(deform_decoder=True, **TINY), "tiny")
         self.check(ModelConfig(**NARROW), "narrow-lin")
         self.check(ModelConfig(block="residual", group_config="B", **NARROW), "res-B")
+        # ablation-prereqs: no group blocks / encoder-only group blocks.
+        self.check(ModelConfig(deform_decoder=True, group_config="none", **NARROW), "none")
+        self.check(ModelConfig(deform_decoder=True, group_config="E", **NARROW), "E")
+        self.check(ModelConfig(block="residual", group_config="E", **NARROW), "res-E")
 
 
 if __name__ == "__main__":

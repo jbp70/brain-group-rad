@@ -43,6 +43,12 @@ labels and the fixed pool overhead are absorbed in the per-image-voxel coefficie
 prefetch 1 only; the scaling to other levels / group sizes is an assumption). `predict(...,
 dali_gib=...)` subtracts it from the budgets; the default 0 keeps the TF-only calibration
 records, the fit and the hold-out gate unchanged.
+
+Group configs and norms (ablation-prereqs): `architecture` sets each stage's ``group`` flag from
+`ModelConfig.group_encoder` / `group_decoders` (A, B, E, none); the coefficients were fitted on A/B
+records only, so E / none predictions are extrapolations (fewer group-concat tensors). The model is
+norm-agnostic: ``--norm instance`` float32 moment / normalisation temporaries (layers.
+InstanceNormWithAffine under mixed_float16) are not modelled; measure them in a smoke.
 """
 import collections
 import json
@@ -279,7 +285,8 @@ def architecture(cfg, level):
     Returns dict(encoder=[...], decoder=[...], head_c=w1); each stage
     dict(name, c_in, c_out, h_in, h_out, group, pre_act) (+ skip, skip_c, skip_h for decoder)."""
     f = cfg.filters
-    g = cfg.group_config == "A"
+    g = cfg.group_encoder()
+    gd = cfg.group_decoders()
     h2, h3 = _halvings(level)
     enc = [dict(name="stem", c_in=1, c_out=f[0], h_in=0, h_out=0, group=g, pre_act=False),
            dict(name="l2", c_in=f[0], c_out=f[1], h_in=h2, h_out=h2, group=g, pre_act=True),
@@ -294,7 +301,7 @@ def architecture(cfg, level):
         for name, wi, skip in zip(("d5", "d4", "d3", "d2", "d1"), w, ("l5", "l4", "l3", "l2", "stem")):
             s = [e for e in enc if e["name"] == skip][0]
             dec.append(dict(name=name, c_in=x + s["c_out"], c_out=wi, h_in=s["h_out"], h_out=s["h_out"],
-                            group=True, pre_act=True, skip=skip, skip_c=s["c_out"], skip_h=s["h_out"]))
+                            group=gd, pre_act=True, skip=skip, skip_c=s["c_out"], skip_h=s["h_out"]))
             x = wi
     return {"encoder": enc, "decoder": dec, "head_c": (dec[-1]["c_out"] if dec else 0)}
 

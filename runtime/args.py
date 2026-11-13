@@ -96,7 +96,7 @@ import math
 import re
 
 from data_loading import params as P
-from models.config import ModelConfig
+from models.config import GROUP_CONFIGS, ModelConfig
 
 SYNTH_LABEL_SET_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
@@ -622,7 +622,10 @@ def build_parser():
     g.add_argument("--prefetch", type=int, default=1)
     g.add_argument("--shuffle-mode", default="epoch", choices=["epoch", "buffer"])
     g = p.add_argument_group("model (models.config.ModelConfig)")
-    g.add_argument("--group-config", default=_MC.group_config, choices=["A", "B"])
+    g.add_argument("--group-config", default=_MC.group_config, choices=list(GROUP_CONFIGS),
+                   help="where the group blocks are: A everywhere (stem/encoder + both decoders), "
+                   "B both decoders only, E stem/encoder only, none nowhere (group coupling only "
+                   "via centering, losses and train-mode BN); default A")
     g.add_argument("--block", default=_MC.block, choices=["single", "residual"])
     g.add_argument("--norm", default=_MC.norm, choices=["batch", "instance", "none"])
     g.add_argument("--dense-norm", default=_MC.dense_norm, choices=["layer", "batch", "none"],

@@ -96,6 +96,15 @@ class TestSplitBlock(unittest.TestCase):
         m_b = GroupRegLevelModel(4, cfg_b, split_group_conv=True)
         self.assertFalse(m_b.encoder.l3.split_group)                    # config B: no group in the encoder
         self.assertTrue(m_b.linear_decoder.reductions[0].split_group)
+        # ablation-prereqs: config none has no group block to split; E only the encoder L2-L6.
+        m_n = GroupRegLevelModel(4, narrow_config(group_config="none", deform_decoder=True))
+        self.assertEqual(L.set_split_group_conv(m_n, True), 0)
+        m_e = GroupRegLevelModel(4, narrow_config(group_config="E", deform_decoder=True))
+        self.assertEqual(L.set_split_group_conv(m_e, True), 5)
+        for name in ("l2", "l3", "l4", "l5", "l6"):
+            self.assertTrue(getattr(m_e.encoder, name).split_group, name)
+        self.assertFalse(any(b.split_group for b in m_e.linear_decoder.reductions))
+        self.assertFalse(any(b.split_group for b in m_e.deform_decoder.blocks()))
 
 
 class TestSplitModel(unittest.TestCase):

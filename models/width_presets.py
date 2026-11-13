@@ -135,7 +135,8 @@ def count_params(model_config, deform_decoder=None):
     """
     cfg = _as_config(model_config)
     with_deform = cfg.deform_decoder if deform_decoder is None else bool(deform_decoder)
-    g = cfg.group_config == "A"
+    g = cfg.group_encoder()
+    gd = cfg.group_decoders()
     f = cfg.filters
     k = cfg.kernel_size
     # Encoder: stem (no pre-activation) then L2..L6 (L4-L6 stride 2).
@@ -145,27 +146,27 @@ def count_params(model_config, deform_decoder=None):
         enc += _encoder_block(cfg, f[i - 1], f[i], g)
         if cfg.block == "residual" and (f[i - 1] != f[i] or strides[i - 1] != 1):
             enc += _conv(f[i - 1], f[i], 1)
-    # Linear decoder: 1x1 group reductions, flatten, dense blocks, pre-head norm, two heads.
+    # Linear decoder: 1x1 reductions (group in A/B), flatten, dense blocks, pre-head norm, heads.
     lin = 0
     cin = f[5]
     for r in cfg.reductions:
-        lin += _group_block(cin, r, 1, True, cfg.norm)
+        lin += _group_block(cin, r, 1, gd, cfg.norm)
         cin = r
     d_in = BOTTLENECK_VOXELS * cin
     for i, units in enumerate(cfg.dense):
-        group = i > 0 or cfg.dense_group_concat_first
+        group = (i > 0 or cfg.dense_group_concat_first) and gd
         lin += _norm_params(cfg.dense_norm, d_in) + d_in * (2 if group else 1) * units + units
         d_in = units
     lin += _norm_params(cfg.dense_norm, d_in)
     lin += d_in * RIGID_HEAD_UNITS + RIGID_HEAD_UNITS + d_in * SCALE_SHEAR_HEAD_UNITS + SCALE_SHEAR_HEAD_UNITS
-    # Deform decoder: D5..D1 group blocks on concat(upsampled, skip), SVF head.
+    # Deform decoder: D5..D1 blocks (group in A/B) on concat(upsampled, skip), SVF head.
     dfm = 0
     if with_deform:
         widths = cfg.resolved_decoder_widths()
         skips = (f[4], f[3], f[2], f[1], f[0])
         x = f[5]
         for w, s in zip(widths, skips):
-            dfm += _group_block(x + s, w, k, True, cfg.norm)
+            dfm += _group_block(x + s, w, k, gd, cfg.norm)
             x = w
         dfm += _norm_params(cfg.norm, x) + _conv(x, 3, 3)
     out = collections.OrderedDict()

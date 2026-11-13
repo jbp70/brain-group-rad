@@ -74,6 +74,21 @@ class TestPresets(unittest.TestCase):
         self.assertEqual(W.count_params(ModelConfig(), deform_decoder=True)["total"],
                          W.count_params("default", deform_decoder=True)["total"])
 
+    def test_count_params_group_configs(self):
+        """ablation-prereqs: none / E drop the group-mean kernel halves where ungrouped."""
+        d12hs = dict(filters=(16, 64, 128, 192, 256, 384), decoder_widths=(128, 96, 64, 16, 8))
+        c = {g: W.count_params(dict(deform_decoder=True, group_config=g, **d12hs))
+             for g in ("A", "B", "none", "E")}
+        self.assertLess(c["none"]["total"], c["E"]["total"])
+        self.assertLess(c["E"]["total"], c["A"]["total"])
+        self.assertLess(c["none"]["total"], c["B"]["total"])
+        self.assertEqual(c["E"]["encoder"], c["A"]["encoder"])
+        self.assertEqual(c["none"]["encoder"], c["B"]["encoder"])
+        for part in ("linear_decoder", "deform_decoder"):
+            self.assertEqual(c["E"][part], c["none"][part], part)
+            self.assertEqual(c["A"][part], c["B"][part], part)
+            self.assertLess(c["none"][part], c["B"][part], part)
+
     def test_no_tensorflow(self):
         # Under the full suite other test modules import TF first, so check the imports of the
         # two modules themselves (bgr_preproc38 has no TF at all).
