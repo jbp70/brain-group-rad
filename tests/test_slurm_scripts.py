@@ -42,7 +42,10 @@ RECIPE_ENV = ("GRAD_BALANCE", "BN_RECAL_BATCHES", "BN_RECAL_FREEZE", "SKIP_PROB"
               "BN_RECAL_VALIDATE", "FP16_ACT_CLIP", "FP16_ACT_CLIP_SCOPE", "DEFORM_DECODER_DTYPE",
               "BN_EPSILON_OVERRIDE", "L1_SOURCE", "L2_SOURCE", "SRC_RESULTS", "CONFIG_TIMEOUT", "TIME_BUDGET_S",
               "ONLY", "BGR_DRY_RUN", "FILTERS", "DECODER_WIDTHS", "TTA", "TTA_LEVELS", "SKIP_CHECKS",
-              "FROZEN_INTEGRATION_GRID", "L4_SOURCE", "GROUP_ARGS", "SMOOTH", "STUB_WRITE_CKPT", "RECENTER", "RUNS")
+              "FROZEN_INTEGRATION_GRID", "L4_SOURCE", "GROUP_ARGS", "SMOOTH", "STUB_WRITE_CKPT", "RECENTER", "RUNS",
+              "NORM", "GROUP_CONFIG", "DEFORM_START", "DEFORM_RAMP", "CURRICULUM", "CURRICULUM_RAMP", "G_START",
+              "G_RAMP", "G_ROT", "G_TRANS", "LR", "WD", "OPTIMIZER", "TASK_RATIO", "MAX_PAIRS", "LOWRES_METHOD",
+              "VAL_GROUP_SIZE", "GPU_POLL", "MIN_TASK_STEPS", "PROJECT_STEPS", "PROJECT_VAL_EVERY")
 
 
 def _read(path):
@@ -1543,7 +1546,7 @@ CASCADE_ENV = ("S4", "S2", "S1", "SYNTH_PROB", "RUN_NAME_L4", "RUN_NAME_L2", "RU
                "VAL_EVERY", "WARMUP_L4", "DEFORM_START_L4", "DEFORM_RAMP_L4", "CURRICULUM_RAMP_L4", "G_START_L4",
                "G_RAMP_L4", "VAL_GROUP_SIZE_L4", "TF_MEM_LIMIT_MB_L1", "GPU_POLL", "START_LEVEL",
                "CASCADE_FROM_START", "L4_SCRIPT", "L2_SCRIPT", "L1_SCRIPT", "STUB_FAIL_LEVEL", "STUB_BAD_LEVEL",
-               "CODE_COMMIT", "ALLOW_DIRTY", "FORCE_RECIPE_CHANGE", "GIT_DIR", "GIT_WORK_TREE")
+               "CODE_COMMIT", "ALLOW_DIRTY", "FORCE_RECIPE_CHANGE", "GIT_DIR", "GIT_WORK_TREE", "NORM")
 # Env of the level scripts that r_cascade.sh passes through unchanged (all others are unset per level).
 CASCADE_PASSTHROUGH = {"PROJ", "REPO", "DATA", "RESULTS", "SIF", "SCRATCH_ROOT", "SLURM_JOB_ID",
                        "SLURM_CPUS_PER_TASK", "CUDA_VISIBLE_DEVICES"}
@@ -2264,6 +2267,289 @@ class TestFgiMemory(unittest.TestCase):
             r = subprocess.run([BASH, "-n", path], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                universal_newlines=True)
             self.assertEqual(r.returncode, 0, r.stderr)
+
+
+R_SCRATCH = os.path.join(REPO, "slurm", "r_level1_scratch.sh")
+
+
+@unittest.skipIf(BASH is None, "bash not available")
+class TestLevel1Scratch(unittest.TestCase):
+    """ablation-prereqs FEAT-003 (plan D6 / D7): slurm/r_level1_scratch.sh, the level-1 model trained
+    from scratch (no cascade source) for ablation A1. Stub runs as in TestStubRuns."""
+    setUp = TestStubRuns.setUp
+    tearDown = TestStubRuns.tearDown
+    run_script = TestStubRuns.run_script
+
+    def dry_main(self, **kw):
+        """Dry run -> (result, parsed main.py args or None, MAIN argv, CHECK line)."""
+        from runtime import args as A
+        r, calls = self.run_script(R_SCRATCH, BGR_DRY_RUN="1", **kw)
+        self.assertIsNone(calls)                                   # no container call
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "results")))
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "scratch")))
+        if r.returncode != 0:
+            return r, None, None, None
+        main = [ln for ln in r.stdout.splitlines() if ln.startswith("MAIN: python main.py ")]
+        check = [ln for ln in r.stdout.splitlines() if ln.startswith("CHECK: python ")]
+        self.assertEqual((len(main), len(check)), (1, 1), r.stdout)
+        argv = main[0].split()[3:]
+        return r, A.parse_args(argv), argv, check[0]
+
+    def test_static(self):
+        text = _read(R_SCRATCH)
+        self.assertNotIn("\r", text)
+        self.assertTrue(all(ord(c) < 128 for c in text))
+        self.assertNotIn("entre", text.lower())
+        for line in ("#SBATCH --job-name=bgr-r1scr", "#SBATCH -A qtim", "#SBATCH -p rtx8000",
+                     "#SBATCH --gpus=1", "#SBATCH -N 1", "#SBATCH --ntasks-per-node=1",
+                     "#SBATCH --cpus-per-task=3", "#SBATCH --mem=128G", "#SBATCH --time=48:00:00",
+                     "#SBATCH --output=%s/%%x-%%j.out" % LOGS, "#SBATCH --error=%s/%%x-%%j.err" % LOGS):
+            self.assertIn(line + "\n", text)
+        self.assertEqual(len(re.findall(r"(?m)^#SBATCH ", text)), 11)
+        for k in ("set -euo pipefail\n", "63.85 h", "229860", "STEPS = floor(229860 / (mean_step_s + v / VAL_EVERY))",
+                  "10623341 13:54:14", "10624169 27:20:44", "10627751 22:36:02", "DO NOT submit without Jay's approval",
+                  "at most two active jobs", "mkdir -p %s" % LOGS, "sbatch --job-name=r1scr_smk --time=05:00:00 --mem=128G slurm/r_level1_scratch.sh",
+                  "sbatch --job-name=r1scr --time=48:00:00 --mem=128G slurm/r_level1_scratch.sh", "</dev/null"):
+            self.assertIn(k, text, k)
+        code = "\n".join(ln for ln in text.splitlines() if not ln.startswith("#"))
+        self.assertNotIn("--cascade-from", code)
+        self.assertNotIn("--bn-recal", code)
+
+    def test_requires_steps(self):
+        for bad in (dict(), dict(STEPS=""), dict(STEPS="abc"), dict(STEPS="0"), dict(STEPS="016000")):
+            for dry in ("1", None):
+                with self.subTest(bad=bad, dry=dry):
+                    r, calls = self.run_script(R_SCRATCH, BGR_DRY_RUN=dry, **bad)
+                    self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+                    self.assertIsNone(calls)
+                    self.assertIn("STEPS", r.stderr)
+        r, _ = self.run_script(R_SCRATCH)
+        self.assertIn("set STEPS", r.stderr)
+
+    def test_default_recipe(self):
+        r, a, argv, check = self.dry_main(STEPS="16000", RUN_NAME="r1_scratch")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual((a.level, a.run_name, a.steps, a.group_size, a.deform_group_size, a.task_ratio),
+                         (1, "r1_scratch", 16000, 8, 4, "rigid:1,affine:1,deform:2"))
+        self.assertEqual((a.warmup_steps, a.task_start_step, a.task_start_ramp_steps, a.curriculum,
+                          a.curriculum_ramp_steps, a.global_transform, a.global_start_step, a.global_ramp_steps),
+                         (1000, "deform:3000", 500, True, 3000, True, 3000, 3000))
+        self.assertEqual((a.global_rot_max_deg, a.global_trans_max_mm), (45.0, 10.0))
+        self.assertEqual((a.optimizer, a.lr, a.weight_decay, a.schedule, a.min_lr_factor), ("adamw", 3e-4, 0.1, "cosine", 1e-3))
+        self.assertEqual((a.group_config, a.norm, a.lambda_smooth, a.deform_decoder_dtype, a.gpu_memory_limit_mb),
+                         ("B", "batch", 15.0, "float32_fine", 42500))
+        self.assertEqual((a.lambda_dice_template, a.lambda_pdice, a.lambda_ncc_template, a.lambda_ncc_pair),
+                         (1.0, 1.0, 1.0, 1.0))
+        self.assertEqual((tuple(a.filters), tuple(a.decoder_widths)), ((16, 64, 128, 192, 256, 384), (128, 96, 64, 16, 8)))
+        self.assertEqual((a.cascade_from, a.bn_recal_batches, a.init_weights), (None, 0, None))
+        self.assertEqual((a.amp, a.split_group_conv, a.intensity_aug_device, a.lowres_method), (True, True, "tf", "tent"))
+        self.assertEqual((a.gradient_checkpointing, a.lean_sampler, a.pair_recompute, a.lean_losses),
+                         ("full", True, True, True))
+        self.assertEqual((a.min_pairs, a.max_pairs, a.val_image_chunk, a.val_pair_chunk, a.task_grad_norm),
+                         ("n", 64, 1, 1, 12.0))
+        self.assertIsNone(a.val_group_size)
+        joined = " ".join(argv)
+        for k in ("--cascade-from", "--bn-recal", "--cascade-skip", "--init-weights", "--norm", "--synth-"):
+            self.assertNotIn(k, joined, k)
+        self.assertIn("--group-config B", joined)
+        for k in ("--expect-init-weights none", "--grad-balance-rule true --grad-balance-from-step 3100",
+                  "--memory-budget-mb 36864", "--max-nonfinite-frac 0.06", "--max-window-nonfinite-frac 0.05",
+                  "--expect-enc-grad true", "--project-steps 16000", "--project-val-every 500", "--steps 16000"):
+            self.assertIn(k, check, k)
+        self.assertNotIn("--expect-cascade", check)
+        self.assertNotIn("--expect-bn-recal", check)
+        # the schedule follows STEPS (integer division) and every value is overridable
+        r, a, _, check = self.dry_main(STEPS="19300")
+        self.assertEqual((a.warmup_steps, a.task_start_step, a.task_start_ramp_steps, a.curriculum_ramp_steps,
+                          a.global_start_step, a.global_ramp_steps), (1206, "deform:3618", 603, 3618, 3618, 3618))
+        self.assertIn("--grad-balance-from-step 3718", check)
+        r, a, _, _ = self.dry_main(STEPS="300", WARMUP="50", DEFORM_START="100", DEFORM_RAMP="50",
+                                   CURRICULUM_RAMP="100", G_START="100", G_RAMP="100", PROJECT_STEPS="19000")
+        self.assertEqual((a.warmup_steps, a.task_start_step, a.task_start_ramp_steps, a.curriculum_ramp_steps,
+                          a.global_start_step, a.global_ramp_steps), (50, "deform:100", 50, 100, 100, 100))
+
+    def test_group_config_and_norm(self):
+        r, a, argv, _ = self.dry_main(STEPS="16000", NORM="instance")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual((a.norm, a.group_config, a.bn_recal_batches), ("instance", "B", 0))
+        self.assertEqual(" ".join(argv).count("--norm instance"), 1)
+        for gc in ("A", "B", "none", "E"):
+            with self.subTest(gc):
+                r, a, _, _ = self.dry_main(STEPS="16000", GROUP_CONFIG=gc)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertEqual((a.group_config, a.norm), (gc, "batch"))
+        r, a, _, _ = self.dry_main(STEPS="16000", GROUP_CONFIG="none", NORM="instance", SMOOTH="10")
+        self.assertEqual((a.group_config, a.norm, a.lambda_smooth), ("none", "instance", 10.0))
+        for bad in (dict(GROUP_CONFIG="C"), dict(GROUP_CONFIG=""), dict(NORM="layer"), dict(NORM="none"),
+                    dict(SMOOTH="x")):
+            with self.subTest(bad=bad):
+                r, a, _, _ = self.dry_main(STEPS="16000", **bad)
+                if bad.get("GROUP_CONFIG") == "":
+                    # empty = unset -> default B
+                    self.assertEqual(r.returncode, 0, r.stderr)
+                    continue
+                self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+                self.assertIn("ERROR", r.stderr)
+
+    def test_stub_run(self):
+        r, calls = self.run_script(R_SCRATCH, STEPS="300", RUN_NAME="r1s", SLURM_JOB_ID="77")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(len(calls), 2, calls)
+        self.assertTrue(calls[0].startswith("exec --nv -B /scratch -B /autofs -B /cluster -B /space -B /vast %s "
+                                            "python main.py " % os.path.join(self.tmp, "x.sif")), calls[0])
+        self.assertIn("--level 1 ", calls[0])
+        self.assertIn("--run-name r1s ", calls[0])
+        self.assertTrue(calls[1].startswith("exec -B /autofs -B /cluster -B /space %s python tests/gpu/check_mixed_run.py %s "
+                                            % (os.path.join(self.tmp, "x.sif"), os.path.join(self.tmp, "results", "r1s"))),
+                        calls[1])
+        self.assertIn("level 1 FROM SCRATCH", r.stdout)
+        self.assertTrue(os.path.isdir(os.path.join(self.tmp, "scratch", "77")))
+
+
+@unittest.skipIf(BASH is None or GIT is None, "bash or git not available")
+class TestCascadeAblationKnobs(unittest.TestCase):
+    """ablation-prereqs FEAT-003 (plan D8 / D9): r_cascade.sh NORM (instance -> --norm instance at
+    every level, BN_RECAL_BATCHES=0 at levels 2 / 1) and the recorded group_args / norm (old state
+    files without the keys resume as '--group-config B' / batch)."""
+    setUp = TestCascadeRuns.setUp
+    tearDown = TestCascadeRuns.tearDown
+    git = TestCascadeRuns.git
+    write_stubs = TestCascadeRuns.write_stubs
+    commit_stubs = TestCascadeRuns.commit_stubs
+    code_root = TestCascadeRuns.code_root
+    state = TestCascadeRuns.state
+    run_cascade = TestCascadeRuns.run_cascade
+    calls = TestCascadeRuns.calls
+
+    def dry_levels(self, **extra):
+        """Cascade dry run (temp clone) -> (result, {k: ENV line}, {k: CMD env dict}); level_main then
+        runs this repo's REAL level scripts with those env values (independent of the clone)."""
+        import shlex
+        r = self.run_cascade(stubs=False, BGR_DRY_RUN="1", **extra)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        env, cmd = {}, {}
+        for ln in r.stdout.splitlines():
+            for k in (4, 2, 1):
+                if ln.startswith("ENV L%d: " % k):
+                    env[k] = ln + " "
+                if ln.startswith("CMD L%d: " % k):
+                    words = shlex.split(ln[len("CMD L%d: " % k):])
+                    self.assertEqual(words[-2], "bash")
+                    cmd[k] = dict(w.split("=", 1) for w in words[:-2])
+        self.assertEqual(sorted(env), [1, 2, 4], r.stdout)
+        return r, env, cmd
+
+    def level_main(self, k, cmd_env):
+        """Run the REAL r_level<k>.sh dry with a level's env from the cascade; parsed main.py args."""
+        from runtime import args as A
+        src = cmd_env.get("CASCADE_FROM")
+        if src:
+            os.makedirs(src, exist_ok=True)                    # the fresh-run source guard
+        e = {kk: v for kk, v in os.environ.items() if kk not in CASCADE_ENV + RECIPE_ENV}
+        e.update(cmd_env)
+        e.update(BGR_DRY_RUN="1", DATA=os.path.join(self.tmp, "data"))
+        d = subprocess.run([BASH, os.path.join(REPO, "slurm", "r_level%d.sh" % k)], env=e, stdout=subprocess.PIPE,
+                           stderr=subprocess.PIPE, universal_newlines=True, stdin=subprocess.DEVNULL)
+        self.assertEqual(d.returncode, 0, (k, d.stdout, d.stderr))
+        main = [ln for ln in d.stdout.splitlines() if ln.startswith("MAIN: python main.py ")]
+        self.assertEqual(len(main), 1, d.stdout)
+        return A.parse_args(main[0].split()[3:])
+
+    def test_default_unchanged(self):
+        r, env, cmd = self.dry_levels()
+        self.assertIn("group args '--group-config B' | norm batch |", r.stdout)
+        for k, s in ((4, "0.5"), (2, "2"), (1, "3")):
+            self.assertNotIn("BN_RECAL_BATCHES", env[k])
+            self.assertNotIn("--norm", env[k])
+            self.assertEqual(cmd[k]["EXTRA_ARGS"], "--group-config B --lambda-smooth %s" % s)
+        self.assertEqual(self.level_main(2, cmd[2]).bn_recal_batches, 64)
+        a = self.level_main(1, cmd[1])
+        self.assertEqual((a.bn_recal_batches, a.bn_recal_freeze, a.norm), (64, True, "batch"))
+
+    def test_norm_instance(self):
+        r, env, cmd = self.dry_levels(NORM="instance", GROUP_ARGS="--group-config E",
+                                      EXTRA_ARGS_L2="--frozen-integration-grid current")
+        self.assertIn("group args '--group-config E' | norm instance |", r.stdout)
+        self.assertNotIn("BN_RECAL_BATCHES", env[4])
+        for k in (2, 1):
+            self.assertIn("BN_RECAL_BATCHES=0 ", env[k])
+            self.assertEqual(cmd[k]["BN_RECAL_BATCHES"], "0")
+        self.assertEqual(cmd[4]["EXTRA_ARGS"], "--group-config E --lambda-smooth 0.5 --norm instance")
+        self.assertEqual(cmd[2]["EXTRA_ARGS"],
+                         "--group-config E --lambda-smooth 2 --norm instance --frozen-integration-grid current")
+        self.assertEqual(cmd[1]["EXTRA_ARGS"], "--group-config E --lambda-smooth 3 --norm instance")
+        for k, s in ((4, 0.5), (2, 2.0), (1, 3.0)):
+            with self.subTest(level=k):
+                a = self.level_main(k, cmd[k])                  # parses: no BN recal error
+                self.assertEqual((a.level, a.norm, a.group_config, a.lambda_smooth), (k, "instance", "E", s))
+                if k != 4:
+                    self.assertEqual(a.bn_recal_batches, 0)
+        for gc in ("none", "A"):
+            r, env, cmd = self.dry_levels(GROUP_ARGS="--group-config %s" % gc)
+            for k in (4, 2, 1):
+                self.assertTrue(cmd[k]["EXTRA_ARGS"].startswith("--group-config %s --lambda-smooth" % gc))
+                self.assertEqual(self.level_main(k, cmd[k]).group_config, gc)
+        r = self.run_cascade(BGR_DRY_RUN="1", NORM="layer")
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertIn("NORM must be batch or instance", r.stderr)
+
+    def test_state_records_and_resume(self):
+        r = self.run_cascade(stubs=False, STUB_FAIL_LEVEL="2", NORM="instance", GROUP_ARGS="--group-config E")
+        self.assertEqual(r.returncode, 7, r.stdout + r.stderr)
+        self.assertIn("--norm instance", self.calls()[0])
+        st = self.state()
+        self.assertEqual((st["group_args"], st["norm"]), ("--group-config E", "instance"))
+        os.remove(self.log)
+        for bad in (dict(NORM="instance"), dict(GROUP_ARGS="--group-config E"), dict(NORM="instance", GROUP_ARGS="")):
+            r = self.run_cascade(stubs=False, **bad)          # the other key falls back to its default
+            self.assertEqual(r.returncode, 2, (bad, r.stdout))
+            self.assertIn("FORCE_RECIPE_CHANGE", r.stderr)
+        self.assertIn("group_args recorded '--group-config E' now '--group-config B'",
+                      self.run_cascade(stubs=False, NORM="instance").stderr)
+        self.assertEqual(self.calls(), [])
+        r = self.run_cascade(stubs=False, NORM="instance", GROUP_ARGS="--group-config E")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        calls = self.calls()
+        self.assertEqual([c.split()[0] for c in calls], ["L2", "L1"])
+        for c in calls:
+            self.assertIn("EXTRA_ARGS=--group-config E --lambda-smooth", c)
+            self.assertIn("--norm instance", c)
+        # forced change rewrites the recorded values
+        shutil.rmtree(self.results)
+        os.remove(self.log)
+        self.assertEqual(self.run_cascade(stubs=False, STUB_FAIL_LEVEL="2").returncode, 7)
+        r = self.run_cascade(stubs=False, GROUP_ARGS="--group-config none", FORCE_RECIPE_CHANGE="1")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("WARNING: FORCE_RECIPE_CHANGE=1", r.stderr)
+        self.assertEqual((self.state()["group_args"], self.state()["norm"]), ("--group-config none", "batch"))
+
+    def test_old_state_without_keys_resumes(self):
+        r = self.run_cascade(stubs=False, STUB_FAIL_LEVEL="2")
+        self.assertEqual(r.returncode, 7, r.stdout + r.stderr)
+        path = os.path.join(self.results, "cascade_chains", "r4_cfgB_synth05.json")
+        lines = [ln for ln in _read(path).splitlines(True) if '"group_args"' not in ln and '"norm"' not in ln]
+        self.assertEqual(len(lines), len(_read(path).splitlines()) - 2)
+        with open(path, "w") as f:
+            f.write("".join(lines))
+        self.state()                                             # still valid JSON
+        os.remove(self.log)
+        for bad in (dict(GROUP_ARGS="--group-config E"), dict(NORM="instance"), dict(GROUP_ARGS="")):
+            r = self.run_cascade(stubs=False, **bad)
+            self.assertEqual(r.returncode, 2, (bad, r.stdout))
+        r = self.run_cascade(stubs=False)                         # old defaults -> resumes unchanged
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual([c.split()[0] for c in self.calls()], ["L2", "L1"])
+        self.assertEqual((self.state()["group_args"], self.state()["norm"]), ("--group-config B", "batch"))
+
+    def test_empty_group_args_recorded(self):
+        r = self.run_cascade(stubs=False, STUB_FAIL_LEVEL="2", GROUP_ARGS="")
+        self.assertEqual(r.returncode, 7, r.stdout + r.stderr)
+        self.assertEqual(self.state()["group_args"], "")
+        os.remove(self.log)
+        self.assertEqual(self.run_cascade(stubs=False).returncode, 2)                 # default B != ''
+        r = self.run_cascade(stubs=False, GROUP_ARGS="")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("EXTRA_ARGS=--lambda-smooth 2", self.calls()[0])
 
 
 if __name__ == "__main__":

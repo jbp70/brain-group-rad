@@ -42,11 +42,13 @@
 # clone is non-empty (uncommitted changes to tracked files would silently not be part of the
 # frozen copy); ALLOW_DIRTY=1 freezes HEAD anyway (without those changes) and prints a WARNING.
 # Chain state file: $RESULTS/cascade_chains/<RUN_NAME_L4>.json (commit, code root, run names,
-# S4/S2/S1, SYNTH_PROB, start level, created date / job, last job).
+# S4/S2/S1, SYNTH_PROB, GROUP_ARGS, NORM, start level, created date / job, last job).
 # Resume (state file present): the RECORDED commit and code root are reused, never the clone's new
 # HEAD; a missing or partial code root (scratch cleaned) is re-extracted from the clone with
 # `git archive <recorded sha>` (needs that commit in the clone). If S4 / S2 / S1 / SYNTH_PROB /
-# RUN_NAME_L4/L2/L1 differ from the recorded values -> exit 2 (no recipe mixing mid-chain), unless
+# GROUP_ARGS / NORM / RUN_NAME_L4/L2/L1 differ from the recorded values -> exit 2 (no recipe mixing
+# mid-chain; a state file written before group_args / norm were recorded counts as
+# '--group-config B' / batch, so those chains resume unchanged), unless
 # FORCE_RECIPE_CHANGE=1 (then the state file is rewritten with the new values; the old one is kept
 # as <RUN_NAME_L4>.json.prev-<date>). No state file but runs of this chain exist -> exit 2 unless
 # CODE_COMMIT is set.
@@ -62,7 +64,14 @@
 #   SYNTH_PROB      [0.5] synthetic-contrast probability at every level (0 = real-only chain)
 #   RUN_NAME_L4 / RUN_NAME_L2 / RUN_NAME_L1  [r4_cfgB_synth05 / r2_cfgB_synth05 / r1_cfgB_synth05]
 #                   (RUN_NAME_L4 is also the chain id: state file and code root)
-#   GROUP_ARGS      ['--group-config B'] appended to every level's EXTRA_ARGS (set but empty = none)
+#   GROUP_ARGS      ['--group-config B'] appended to every level's EXTRA_ARGS (set but empty = none);
+#                   group-block placement: A = everywhere, B = decoders only (final), E = stem /
+#                   encoder only, none = no group blocks (.agents/tasks/ablation-prereqs/report.md)
+#   NORM            [batch] batch | instance. instance appends '--norm instance' to every level's
+#                   EXTRA_ARGS (after GROUP_ARGS --lambda-smooth, before EXTRA_ARGS_L<k>) and sets
+#                   BN_RECAL_BATCHES=0 at levels 2 and 1 (main.py rejects BN recalibration without
+#                   batch norm; the level-1 --bn-recal-freeze true is then a no-op). batch = no
+#                   flag, no change (today's commands).
 #   EXTRA_ARGS_L4 / EXTRA_ARGS_L2 / EXTRA_ARGS_L1  [empty] appended after GROUP_ARGS --lambda-smooth
 #                   (fine-grid chain: EXTRA_ARGS_L2='--frozen-integration-grid current'; level 1 inherits it)
 #   STEPS_L4 / STEPS_L2 / STEPS_L1  [16000 / 15000 / 4000]
@@ -112,6 +121,11 @@
 #   start at level 2 from an existing level-4 run:
 #     env S4=<S4> S2=<S2> S1=<S1> START_LEVEL=2 CASCADE_FROM_START=<results>/<L4 run>/ckpt/last sbatch slurm/r_cascade.sh
 #   check first (prints everything, runs nothing): add BGR_DRY_RUN=1 and run with bash instead of sbatch.
+#   paper ablations (.agents/tasks/ablation-prereqs/report.md; final real-only recipe, ~64 h each):
+#     group blocks (X = none | E | A):
+#       env S4=2.5 S2=10 S1=15 SYNTH_PROB=0 STEPS_L2=16000 STEPS_L1=6000 EXTRA_ARGS_L2='--frozen-integration-grid current' GROUP_ARGS='--group-config X' RUN_NAME_L4=r4_abl_gX RUN_NAME_L2=r2_abl_gX RUN_NAME_L1=r1_abl_gX sbatch --job-name=bgr-abl-gX slurm/r_cascade.sh
+#     instance norm (config B):
+#       env S4=2.5 S2=10 S1=15 SYNTH_PROB=0 STEPS_L2=16000 STEPS_L1=6000 EXTRA_ARGS_L2='--frozen-integration-grid current' GROUP_ARGS='--group-config B' NORM=instance RUN_NAME_L4=r4_abl_in RUN_NAME_L2=r2_abl_in RUN_NAME_L1=r1_abl_in sbatch --job-name=bgr-abl-in slurm/r_cascade.sh
 set -uo pipefail
 
 PROJ="${PROJ:-/autofs/space/crater_001/users/jn85/BrainRegProjects/GroupwiseReg}"
@@ -126,6 +140,7 @@ RUN_NAME_L4="${RUN_NAME_L4:-r4_cfgB_synth05}"
 RUN_NAME_L2="${RUN_NAME_L2:-r2_cfgB_synth05}"
 RUN_NAME_L1="${RUN_NAME_L1:-r1_cfgB_synth05}"
 GROUP_ARGS="${GROUP_ARGS---group-config B}"
+NORM="${NORM:-batch}"
 EXTRA_ARGS_L4="${EXTRA_ARGS_L4:-}"
 EXTRA_ARGS_L2="${EXTRA_ARGS_L2:-}"
 EXTRA_ARGS_L1="${EXTRA_ARGS_L1:-}"
@@ -185,6 +200,7 @@ for v in LR WD; do need_float "$v" "${!v}"; done
 for v in STEPS_L4 STEPS_L2 STEPS_L1 VAL_EVERY VAL_GROUP_SIZE_L4 TF_MEM_LIMIT_MB_L1; do need_pos_int "$v" "${!v}"; done
 for v in WARMUP_L4 DEFORM_START_L4 DEFORM_RAMP_L4 CURRICULUM_RAMP_L4 G_START_L4 G_RAMP_L4; do need_uint "$v" "${!v}"; done
 case "$GPU_POLL" in true|false) ;; *) die "GPU_POLL must be true or false, got '$GPU_POLL'" ;; esac
+case "$NORM" in batch|instance) ;; *) die "NORM must be batch or instance, got '$NORM'" ;; esac
 case "$START_LEVEL" in 4|2|1) ;; *) die "START_LEVEL must be 4, 2 or 1, got '$START_LEVEL'" ;; esac
 for v in ALLOW_DIRTY FORCE_RECIPE_CHANGE; do
     case "${!v}" in ''|0|1) ;; *) die "$v must be empty, 0 or 1, got '${!v}'" ;; esac
@@ -249,6 +265,7 @@ level_env() {
     local k="$1" steps extra
     steps="$(steps_of "$k")"
     extra="$GROUP_ARGS --lambda-smooth $(smooth_of "$k")"
+    if [ "$NORM" = instance ]; then extra="$extra --norm instance"; fi
     local ev="EXTRA_ARGS_L$k"
     if [ -n "${!ev}" ]; then extra="$extra ${!ev}"; fi
     extra="${extra# }"
@@ -261,6 +278,8 @@ level_env() {
         2) LEVEL_ENV+=("CASCADE_FROM=$(source_of 2)") ;;
         1) LEVEL_ENV+=("CASCADE_FROM=$(source_of 1)" "TF_MEM_LIMIT_MB=$TF_MEM_LIMIT_MB_L1") ;;
     esac
+    # instance norm: no BN layers, so no BN recalibration (the level scripts default to 64)
+    if [ "$NORM" = instance ] && [ "$k" != 4 ]; then LEVEL_ENV+=("BN_RECAL_BATCHES=0"); fi
     LEVEL_ENV+=("SYNTH_PROB=$SYNTH_PROB" "GPU_POLL=$GPU_POLL" "EXTRA_ARGS=$extra")
 }
 SAFE_RE='^[A-Za-z0-9._/:,+=-]+$'
@@ -282,6 +301,7 @@ STAMP=".cascade_extract_ok"
 SHA_RE='^[0-9a-f]{40}$'
 resolve_commit() { git -C "$REPO" rev-parse --verify --quiet "$1^{commit}" 2>/dev/null; }
 state_get() { sed -n 's/^  "'"$1"'": "\(.*\)",\{0,1\}$/\1/p' "$CHAIN_STATE" | head -n 1; }
+state_has() { grep -q '^  "'"$1"'": ' "$CHAIN_STATE"; }
 CLONE_HEAD="$(git -C "$REPO" rev-parse --verify --quiet 'HEAD^{commit}' 2>/dev/null || echo unknown)"
 WARNINGS=()
 DIRTY_FAIL=""
@@ -308,6 +328,15 @@ if [ -f "$CHAIN_STATE" ]; then
         key="${kv%%=*}"; val="${kv#*=}"; rec="$(state_get "$key")"
         if [ "$rec" != "$val" ]; then MISMATCH="$MISMATCH $key recorded '$rec' now '$val';"; fi
     done
+    # group_args / norm: recorded since the ablation-prereqs change; a state file without the key
+    # was written by a chain that ran the old defaults (an empty recorded GROUP_ARGS stays empty).
+    check_rec() {   # check_rec <key> <current value> <value assumed when the key is missing>
+        local rec
+        if state_has "$1"; then rec="$(state_get "$1")"; else rec="$3"; fi
+        if [ "$rec" != "$2" ]; then MISMATCH="$MISMATCH $1 recorded '$rec' now '$2';"; fi
+    }
+    check_rec group_args "$GROUP_ARGS" "--group-config B"
+    check_rec norm "$NORM" batch
     if [ -n "$MISMATCH" ]; then
         if [ "$FORCE_RECIPE_CHANGE" = 1 ]; then
             WARNINGS+=("FORCE_RECIPE_CHANGE=1: recipe differs from $CHAIN_STATE:$MISMATCH continuing with the new values")
@@ -406,7 +435,7 @@ echo "code source: $CODE_MODE ($CODE_WHY) | chain state $CHAIN_STATE"
 echo "dirty check: $DIRTY_MSG"
 echo "extract: $EXTRACT_MSG"
 for w in "${WARNINGS[@]+"${WARNINGS[@]}"}"; do echo "WARNING: $w" >&2; echo "WARNING: $w"; done
-echo "levels ${LEVELS[*]} | S4 $S4 S2 $S2 S1 $S1 | synth p $SYNTH_PROB | lr $LR wd $WD | group args '$GROUP_ARGS' | results $RESULTS"
+echo "levels ${LEVELS[*]} | S4 $S4 S2 $S2 S1 $S1 | synth p $SYNTH_PROB | lr $LR wd $WD | group args '$GROUP_ARGS' | norm $NORM | results $RESULTS"
 echo "unset before each level: ${LEVEL_ENV_KEYS[*]}"
 
 if [ "$BGR_DRY_RUN" = "1" ]; then
@@ -468,6 +497,8 @@ write_state() {
         printf '  "s2": "%s",\n' "$S2"
         printf '  "s1": "%s",\n' "$S1"
         printf '  "synth_prob": "%s",\n' "$SYNTH_PROB"
+        printf '  "group_args": "%s",\n' "$GROUP_ARGS"
+        printf '  "norm": "%s",\n' "$NORM"
         printf '  "start_level": "%s",\n' "$START_LEVEL"
         printf '  "allow_dirty": "%s",\n' "${REC_ALLOW_DIRTY:-${ALLOW_DIRTY:-0}}"
         printf '  "created_date": "%s",\n' "${REC_CREATED_DATE:-$now}"
