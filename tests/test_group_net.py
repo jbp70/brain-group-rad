@@ -187,16 +187,15 @@ class TestGroupBehaviour(NetTestCase):
                 op = m(tf.gather(x, perm), task=task, training=False)
                 a_raw, a = o["A_raw"].numpy(), o["A"].numpy()
                 self.assertGreater(np.abs(a_raw - np.eye(4)).max(), 0.05)   # non-trivial
-                # float32 rounding: 1e-5 absolute on the rotation block; translations are mm of
-                # magnitude ~10, so 1e-5 relative to the group's largest translation (~1e-4 mm)
+                # float32 rounding: 1e-5 absolute on the rotation block; translations: 1e-5
+                # relative to the group's largest translation, at least 1e-4 mm. The random heads
+                # give translations of ~0.5-2 mm here, where the relative bound alone is ~1e-5 mm
+                # and float32 rounding reached it (E rigid 1.02e-5 mm; A rigid 2.03e-5 vs 1.97e-5
+                # in one full-suite run, passing on rerun).
                 for got, ref in ((op["A_raw"].numpy(), a_raw[perm]), (op["A"].numpy(), a[perm])):
                     np.testing.assert_allclose(got[:, :3, :3], ref[:, :3, :3], atol=1e-5,
                                                err_msg="%s %s" % (cfg, task))
-                    t_tol = 1e-5 * max(1.0, float(np.abs(ref[:, :3, 3]).max()))
-                    if cfg in ("none", "E"):
-                        # their random heads give translations < 1 mm, where the relative floor
-                        # is 1e-5 mm; measured 1.02e-5 mm (E rigid). Use the A / B scale, 1e-4 mm.
-                        t_tol = max(t_tol, 1e-4)
+                    t_tol = max(1e-5 * float(np.abs(ref[:, :3, 3]).max()), 1e-4)
                     np.testing.assert_allclose(got[:, :3, 3], ref[:, :3, 3], rtol=0, atol=t_tol,
                                                err_msg="%s %s" % (cfg, task))
                     np.testing.assert_array_equal(got[:, 3], ref[:, 3])
