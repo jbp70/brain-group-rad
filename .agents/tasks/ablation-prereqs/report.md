@@ -144,7 +144,7 @@ The reference (B, batch norm) is the existing final chain: L4 `r4_cfgB_smooth2.5
 
 - FEAT-001 / FEAT-002: see their commits (targeted suites incl. goldens `[golden] max |diff| 0`, `[golden deform] max |diff| 0`, `[golden tta-off] 70 hashes compared, 0 differ`).
 - FEAT-003: `bash -n slurm/r_cascade.sh slurm/r_level1_scratch.sh` OK; `python -m unittest tests.test_slurm_scripts` in bgr_preproc38 (no TF import): 88 tests, all new tests pass. `TestCascadeRuns.test_dry_run` fails ONLY inside the worktree under WSL because the worktree's `.git` file holds a Windows path (`git rev-parse HEAD` fails in WSL, "REPO ... is not a git clone"); it passes in a real clone (re-run in a WSL clone of the branch, see the commit message).
-- Full suite: pending (workflow step after this one).
+- Full suite (integration, commit 2410ac2, `tests/run_tests_wsl.sh` in the worktree): suite status 0, 1099 tests (5 skipped), 0 failing module invocations; TF-free stage 240 tests OK without TF; unittest wall time 29 829 s (8.3 h). Goldens: `[golden] max |diff| 0 (tolerance 0)`, `[golden deform] max |diff| 0 (tolerance 0)`, `[golden tta-off] 70 hashes compared, 0 differ`. Two fixes on the way: the worktree's `.git` file now uses a relative gitdir, so WSL git works there and `TestCascadeRuns.test_dry_run` passes in the worktree (local metadata, not committed); and the first full run's only failure, a float32 rounding miss in `test_permutation_equivariance` (config A rigid translation 2.03e-5 mm vs a 1.97e-5 mm bound), led to a 1e-4 mm translation floor for every config (test-only change, commit 2410ac2).
 
 ## 9. Open decisions for Jay
 

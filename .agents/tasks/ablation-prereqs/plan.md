@@ -65,8 +65,9 @@ Worktree: `d:\Research\Brain_Registration_Projects\brain-group-rad\.worktrees\ab
       Files: .agents/tasks/ablation-prereqs/report.md.
       Verify: commands in the report pass the dry runs (`BGR_DRY_RUN=1 bash ...` locally in WSL with RESULTS pointing to a temp dir for r_level1_scratch.sh; r_cascade.sh dry run needs a git clone: run it with REPO=the worktree).
 
-- [ ] 10. Full suite + goldens.
+- [x] 10. Full suite + goldens.
       Run the full suite in the background: `wsl -d Ubuntu bash /mnt/d/Research/Brain_Registration_Projects/brain-group-rad/.worktrees/ablation-prereqs/tests/run_tests_wsl.sh > <log> 2>&1` (~7 h). Expected: suite status 0; golden lines `[golden] max |diff| 0`, `[golden tta-off] ... 0 differ`.
+      RESULT (integration, commit 2410ac2): suite status 0, 1099 unittest tests (5 skipped) in 61 module invocations, 0 failing; stage 1 (py3.8 compile/ast, `bash -n` incl. r_level1_scratch.sh, TF-free tests 240 OK without TF); unittest wall time 29 829 s (8.3 h). Goldens: `[golden] max |diff| 0 (tolerance 0)`, `[golden deform] max |diff| 0 (tolerance 0)`, `[golden tta-off] 70 hashes compared, 0 differ`. Log `full_suite.log` (first run `full_suite.run1.log`). Seams fixed on the way: (1) worktree `.git` file held an absolute Windows gitdir, so WSL git failed and `TestCascadeRuns.test_dry_run` exited 2 ("not a git clone"); the `.git` file now holds the relative `gitdir: ../../.git/worktrees/ablation-prereqs` (works in Windows and WSL git; local worktree metadata, not committed). (2) First full run (25 961 s): only `TestGroupBehaviour.test_permutation_equivariance` failed (config A rigid translation 2.03e-5 mm vs relative bound 1.97e-5 mm; float32 rounding, passed on 3 reruns) -> the 1e-4 mm translation floor FEAT-001 used for none/E now applies to all configs (commit 2410ac2, test only).
 
 ## Digest
 
