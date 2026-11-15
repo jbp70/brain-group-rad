@@ -23,5 +23,10 @@ registration:
     convergence: "[1000x500x250x100,1e-6,10]"
     shrink_factors: "8x4x2x1"
     smoothing_sigmas: "3x2x1x0vox"
+    # Image resampling kernel (antsApplyTransforms -n; labels always GenericLabel). Linear
+    # visibly smoothed the images (one extra interpolation of the organisers' LUMIR array);
+    # windowed sinc keeps them sharp. Slight undershoot at the brain edge is clipped to 0 by the
+    # normalisation.
+    image_interp: LanczosWindowedSinc
 
 outputs: {keep_work: false, save_mask: false, save_qc_png: false}
