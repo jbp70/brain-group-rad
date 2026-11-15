@@ -152,3 +152,10 @@ The reference (B, batch norm) is the existing final chain: L4 `r4_cfgB_smooth2.5
 2. Order and GPU budget: five long jobs of ~64 h each (none, E, A, IN chains and the scratch run) against the 2-job limit, about 7 days of wall time with two jobs running at once. Which first? Suggested: IN and none first (the two cleanest ablation claims), then E, A and the scratch run.
 3. If the IN L1 smoke exceeds ~41500 MB: the fallback MIN_PAIRS=1 is a level-script env that r_cascade.sh unsets; the chain would need a small change (or level 1 run by hand with r_level1.sh). Decide after the smoke.
 4. Whether to run all per-level smokes (section 7.2) or only the IN L1 and the scratch L1 smokes before the long chains.
+
+## 10. Merge
+
+- Branch `ablation-prereqs` rebased onto main 4c85946 (two new commits there: LUMIR ANTs preprocessing config + manifest script, no training code). After the rebase `python -m unittest tests.test_slurm_scripts` (bgr_preproc38): 88 tests OK.
+- main fast-forwarded 4c85946 -> d069780 in the user's checkout and pushed to origin (yes). This Merge note is a follow-up docs commit on top.
+- On the cluster: `git pull` in the clone before any command of section 7 (don't pull while a chain runs from the clone; r_cascade.sh runs from its frozen copy anyway).
+- Worktree `.worktrees/ablation-prereqs` kept: it still holds the untracked raw logs `full_suite.log` and `full_suite.run1.log` (~600 KB each, not committed), so `git worktree remove` without force would refuse.
