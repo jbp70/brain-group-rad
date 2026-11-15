@@ -10,8 +10,18 @@
 # MNI152 1 mm; the residual affine of the current LUMIR alignment), meta.json, qc.json.
 target_dir: /autofs/space/crater_001/users/jn85/BrainRegProjects/GroupwiseReg/data/target_grid
 
+# 4-level schedule (antsRegistrationSyN.sh values). The 3-level default of config.py
+# (1000x500x250, 4x2x1, 2x1x0vox) makes ANTs 2.4.4 segfault (signal 11) at the start of the
+# Affine stage after the Rigid stage, on every LUMIR case tried (glacier, 2026-11-14; any thread
+# count, --float 0/1, collapse 0/1, seed, sampling). 4 levels: no crash, ~1 min per case on 6 threads.
 registration:
   backend: ants
-  ants: {transform: Affine, random_seed: 42, use_masks: false}
+  ants:
+    transform: Affine
+    random_seed: 42
+    use_masks: false
+    convergence: "[1000x500x250x100,1e-6,10]"
+    shrink_factors: "8x4x2x1"
+    smoothing_sigmas: "3x2x1x0vox"
 
 outputs: {keep_work: false, save_mask: false, save_qc_png: false}
