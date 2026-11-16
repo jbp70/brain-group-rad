@@ -494,9 +494,73 @@ class BatchNormWithSeparateAffine(tf.keras.layers.Layer):
         return clip_fp16(self.affine(self.bn(x, training=bn_training)), self.fp16_act_clip)
 
 
-class InstanceNormWithAffine(tf.keras.layers.Layer):
-    """Per-image, per-channel normalization over the spatial axes (float32 math) + `AffineParams`.
+FUSED_BN_MIN_EPSILON = 1.001e-5     # tf.compat.v1.nn.fused_batch_norm / Keras BN raise smaller ones to this
 
+
+def _gpu_visible():
+    try:
+        return bool(tf.config.list_logical_devices("GPU"))
+    except RuntimeError:
+        return False
+
+
+def instance_norm_fused(x, epsilon=1e-5, data_format=None):
+    """Instance normalisation of x [N, s1, .., sk, C] (k >= 1) with the fused BatchNorm kernel
+    (FusedBatchNormV3 in training mode), in the dtype of x (ablation-oom-fixes, failure 1).
+
+    Each (image, channel) pair becomes one channel of a single-sample batch, so the kernel's
+    per-channel batch statistics are the per-image spatial statistics of instance norm:
+    ``data_format`` 'NCHW' (GPU default): x -> transpose [N, C, s..] -> reshape [1, N C, S, 1];
+    'NHWC' (CPU default; the CPU kernel has no NCHW): x -> transpose [s.., N, C] -> reshape
+    [1, S, 1, N C]. None = 'NCHW' iff a GPU is visible. The kernel reads float16 x, accumulates
+    the mean and the biased variance in float32 (no float16 x^2, variance >= 0) and writes y in
+    x's dtype; its gradient is the full batch-norm (here: instance-norm) gradient and needs only
+    the saved input plus float32 [N C] statistics. So every full-size tensor stays in x's dtype:
+    the transposed input and output (the same layout copies the Keras BN of the batch path makes
+    inside FusedBatchNormV3 for NDHWC float16 on the GPU), no float32 copy. Epsilon below
+    FUSED_BN_MIN_EPSILON is raised to it, as the fused Keras BN does (1e-5 -> 1.001e-5).
+    Needs a static channel count; N and the spatial sizes may be dynamic.
+    """
+    rank = x.shape.rank
+    if rank is None or rank < 3:
+        raise ValueError("instance norm needs spatial axes, got {}".format(x.shape))
+    if data_format is None:
+        data_format = "NCHW" if _gpu_visible() else "NHWC"
+    if data_format not in ("NCHW", "NHWC"):
+        raise ValueError("data_format must be 'NCHW' or 'NHWC', got {!r}".format(data_format))
+    c = x.shape[-1]
+    if c is None:
+        raise ValueError("instance_norm_fused needs a static channel count, got {}".format(x.shape))
+    c = int(c)
+    spatial = list(range(1, rank - 1))
+    if data_format == "NCHW":
+        perm = [0, rank - 1] + spatial                   # [N, C, s..]
+    else:
+        perm = spatial + [0, rank - 1]                   # [s.., N, C]
+    inv = [perm.index(i) for i in range(rank)]
+    xt = tf.transpose(x, perm)
+    shape_t = tf.shape(xt)
+    nc = tf.shape(x)[0] * c
+    if data_format == "NCHW":
+        x4 = tf.reshape(xt, tf.stack([1, nc, -1, 1]))
+    else:
+        x4 = tf.reshape(xt, tf.stack([1, -1, 1, nc]))
+    ones = tf.ones(tf.reshape(nc, [1]), tf.float32)
+    zeros = tf.zeros(tf.reshape(nc, [1]), tf.float32)
+    y4, _, _ = tf.compat.v1.nn.fused_batch_norm(
+        x4, ones, zeros, epsilon=max(float(epsilon), FUSED_BN_MIN_EPSILON),
+        data_format=data_format, is_training=True)
+    return tf.transpose(tf.reshape(y4, shape_t), inv)
+
+
+class InstanceNormWithAffine(tf.keras.layers.Layer):
+    """Per-image, per-channel normalization over the spatial axes + `AffineParams`.
+
+    float32 input (float32 models, frozen cascade stages, float32 decoder stages): moments and
+    normalisation in float32 as before (bit-identical). float16 input (mixed_float16): the fused
+    kernel path `instance_norm_fused` (float32 statistics, float16 full-size tensors), because the
+    float32 path kept two full-size float32 copies of every normalised activation for the
+    backward pass and ran out of memory at level 4, N 128 (ablation-oom-fixes, failure 1).
     Needs rank >= 3 (spatial axes); no statistics to freeze. tensorflow_addons is not required.
     """
 
@@ -504,11 +568,18 @@ class InstanceNormWithAffine(tf.keras.layers.Layer):
         super().__init__(**kwargs)
         self.epsilon = float(epsilon)
         self.affine = AffineParams(name="affine")
+        # Python attribute read at trace time (set with `set_instance_norm_fused`): True = the
+        # fused path for float32 input too. GroupRegLevelModel sets it under mixed_float16, so the
+        # float32 decoder stages of --deform-decoder-dtype float32 / float32_fine are lean too;
+        # float32 models keep the float32-moment path (default False).
+        self.fused_float32 = False
 
     def call(self, x, training=None):
         rank = x.shape.rank
         if rank is None or rank < 3:
             raise ValueError("instance norm needs spatial axes, got {}".format(x.shape))
+        if x.dtype == tf.float16 or (self.fused_float32 and x.dtype == tf.float32):
+            return self.affine(instance_norm_fused(x, self.epsilon))
         xf = tf.cast(x, tf.float32)
         mean, var = tf.nn.moments(xf, axes=list(range(1, rank - 1)), keepdims=True)
         y = (xf - mean) * tf.math.rsqrt(var + self.epsilon)
@@ -613,6 +684,17 @@ def set_bn_epsilon(layer, eps):
     for m in batch_norm_layers(layer):
         m.bn.epsilon = float(eps)
         count += 1
+    return count
+
+
+def set_instance_norm_fused(layer, on=True):
+    """Set ``fused_float32`` on every `InstanceNormWithAffine` inside `layer` (float32 input
+    then takes the fused path too; read at trace time). Returns the count."""
+    count = 0
+    for m in [layer] + list(layer.submodules):
+        if isinstance(m, InstanceNormWithAffine):
+            m.fused_float32 = bool(on)
+            count += 1
     return count
 
 

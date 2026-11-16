@@ -203,6 +203,21 @@ class TestNonfiniteWindows(CheckMixedRunCase):
         ok, res = cmr.check(d, self.TASKS, 1525, max_window_nonfinite_frac=0.05)
         self.assertTrue(ok, self.failed(res))
         self.assertIn("3 windows", self.details(res)["nonfinite_window_deform"][1])
+        # ablation-oom-fixes: a 200-step smoke's only bucket (101-200) holds 52 rigid / 48 deform
+        # steps; 2 skips of 48 (4.2 %) pass, 3 of 48 fail; a 150-step smoke's bucket (101-150)
+        # holds 24 deform steps < max(20, ceil(2 / 0.05)) = 40: two skips (8.3 %) are not judged
+        self.assertEqual(cmr.min_window_task_steps(0.05), 40)
+        self.assertEqual(cmr.min_window_task_steps(0.12), 20)
+        d = self.make("smk2", steps=200, bad_deform=lambda s: 1 if s in (125, 150) else 0)
+        ok, res = cmr.check(d, self.TASKS, 200, max_window_nonfinite_frac=0.05)
+        self.assertTrue(ok, self.failed(res))
+        d = self.make("smk3", steps=200, bad_deform=lambda s: 1 if s in (125, 150, 175) else 0)
+        ok, res = cmr.check(d, self.TASKS, 200, max_window_nonfinite_frac=0.05)
+        self.assertEqual(self.failed(res), ["nonfinite_window_deform"])
+        d = self.make("smk_short", steps=150, bad_deform=lambda s: 1 if s in (125, 150) else 0)
+        ok, res = cmr.check(d, self.TASKS, 150, max_window_nonfinite_frac=0.05)
+        self.assertTrue(ok, self.failed(res))
+        self.assertIn("0 windows", self.details(res)["nonfinite_window_deform"][1])
         # a different window length / start reach the check
         d = self.make("w", bad_deform=lambda s: 4 if 500 < s <= 1000 else 0)
         ok, _ = cmr.check(d, self.TASKS, 1500, max_window_nonfinite_frac=0.05, nonfinite_from_step=1000)

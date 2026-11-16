@@ -38,9 +38,15 @@
 # STEPS is REQUIRED (no default): the cosine schedule and the fractions above depend on it, so pick
 # it once from the smoke and keep it for every resubmission. GPU-hours budget (sacct, 2026-11-12):
 # L4 10623341 13:54:14 + L2 10624169 27:20:44 + L1 10627751 22:36:02 = 63.85 h = 229860 s on the
-# RTX 8000. Step rule (smoke's 'INFO step_time' mean step s, validation pass v s, ~462 s at level 1):
-#   STEPS = floor(229860 / (mean_step_s + v / VAL_EVERY))   (minus a few hundred steps for startup)
-#   e.g. 11 s mean step, VAL_EVERY 500 -> ~19300 steps.
+# RTX 8000. Step rule (two phases: the first 3/16 of the run is linear-only, rigid:affine 1:1, the
+# rest the 1:1:2 mix): with t_lin = mean step s of the linear-only phase and t_mix = mean step s of
+# the mixed phase (from the smoke's log windows, time/compute_ms + time/data_ms, report
+# .agents/tasks/ablation-oom-fixes/report.md section 5) and v = one validation pass s (~462 s at
+# level 1; the run validates STEPS / VAL_EVERY times, val_time = STEPS / VAL_EVERY x v):
+#   STEPS = (229860 - val_time) / (3/16 t_lin + 13/16 t_mix)
+#         = floor(229860 / (3/16 t_lin + 13/16 t_mix + v / VAL_EVERY))   (minus ~1 % for startup)
+#   e.g. diagnostic smokes 10639615 / 10639614 (rtx-04): t_lin 0.34 s, t_mix ~9.0 s, v ~300-410 s,
+#   VAL_EVERY 500 -> 229860 / (0.06 + 7.31 + 0.8) -> ~28000 steps (to be re-measured in the smoke).
 # The run needs ~64 h > the 48 h limit: resubmit the IDENTICAL line (same RUN_NAME and STEPS);
 # --resume (default true) restores ckpt/last (every CKPT_EVERY 250 steps) and the RNGs, so at most
 # 250 steps are lost per resubmission.
@@ -50,6 +56,12 @@
 # TF_MEM_LIMIT_MB 42500; from scratch there are no frozen stages (less memory). If the smoke's
 # 'INFO gpu_peak' exceeds 41500 MB, fall back to MIN_PAIRS=1. Host RAM: MaxRSS ~94 GB at level 1,
 # hence --mem=128G (64G was OOM-killed during validation, jobs 10541478 / 10541479).
+# DEFORM_WARMUP_STEP (true | false, default TRUE here) -> --deform-warmup-step true: one discarded
+# deform train step at startup (and on every resume) before the linear-only phase, so the allocator
+# is laid out for the deform step first. Without it the smoke 10639201 OOMed at its first deform
+# step after the step-100 validation (one-hot [4,19,160,224,192] float32), while deform from step 0
+# (10639614, 38119 MiB) and deform from 100 without a validation before it (10639615) fit
+# (.agents/tasks/ablation-oom-fixes/report.md).
 #
 # After main.py, tests/gpu/check_mixed_run.py checks the run dir (--expect-init-weights none, the
 # grad-balance verdict from DEFORM_START + 100) and prints the INFO gpu_peak / step_time lines
@@ -140,6 +152,7 @@ VAL_PAIR_CHUNK="${VAL_PAIR_CHUNK:-1}"
 VAL_GROUP_SIZE="${VAL_GROUP_SIZE:-}"
 PROJECT_STEPS="${PROJECT_STEPS:-$STEPS}"
 PROJECT_VAL_EVERY="${PROJECT_VAL_EVERY:-$VAL_EVERY}"
+DEFORM_WARMUP_STEP="${DEFORM_WARMUP_STEP:-true}"
 EXTRA_ARGS="${EXTRA_ARGS:-}"
 
 RATIO_RE='^(rigid|affine|deform):[0-9]+(,(rigid|affine|deform):[0-9]+)*$'
@@ -158,6 +171,7 @@ need_choice MIN_PAIRS "$MIN_PAIRS" 1 n
 need_choice CURRICULUM "$CURRICULUM" true false
 need_choice GROUP_CONFIG "$GROUP_CONFIG" A B none E
 need_choice NORM "$NORM" batch instance
+need_choice DEFORM_WARMUP_STEP "$DEFORM_WARMUP_STEP" true false
 WIDTH6_RE='^[1-9][0-9]*(,[1-9][0-9]*){5}$'
 WIDTH5_RE='^[1-9][0-9]*(,[1-9][0-9]*){4}$'
 WIDTH_ARGS=""
@@ -247,6 +261,7 @@ if [ "$HAS_DEFORM" = true ]; then
         DEFORM_ARGS="$DEFORM_ARGS $DEFORM_LOSSES"
     fi
     DEFORM_ARGS="$DEFORM_ARGS --val-image-chunk $VAL_IMAGE_CHUNK"
+    if [ "$DEFORM_WARMUP_STEP" = true ]; then DEFORM_ARGS="$DEFORM_ARGS --deform-warmup-step true"; fi
 else
     DEFORM_ARGS="--gradient-checkpointing none"
     echo "NOTE: linear-only ratio, deform-only flags dropped"
@@ -322,7 +337,7 @@ echo "run $RUN_NAME | level 1 FROM SCRATCH (no cascade) | ratio $TASK_RATIO | st
 echo "model: group config $GROUP_CONFIG | norm $NORM | smoothness $SMOOTH | widths: filters ${FILTERS:-default} | decoder ${DECODER_WIDTHS:-default}"
 echo "optimizer $OPTIMIZER | lr $LR | wd $WD | grad balance $GRAD_BALANCE ($BAL_ARGS) | lowres $LOWRES_METHOD | min pairs $MIN_PAIRS | max pairs $MAX_PAIRS"
 echo "deform start $DEFORM_START (ramp $DEFORM_RAMP) | curriculum $CURRICULUM ($CURRICULUM_RAMP) | G $G_ROT deg / $G_TRANS mm from $G_START (ramp $G_RAMP)"
-echo "memory: grad ckpt $GRAD_CKPT | pair recompute $PAIR_RECOMPUTE | lean losses $LEAN_LOSSES | tf memory limit ${TF_MEM_LIMIT_MB} MB (0 = growth) | val image chunk $VAL_IMAGE_CHUNK | val pair chunk $VAL_PAIR_CHUNK"
+echo "memory: grad ckpt $GRAD_CKPT | pair recompute $PAIR_RECOMPUTE | lean losses $LEAN_LOSSES | tf memory limit ${TF_MEM_LIMIT_MB} MB (0 = growth) | val image chunk $VAL_IMAGE_CHUNK | val pair chunk $VAL_PAIR_CHUNK | deform warm-up step $DEFORM_WARMUP_STEP"
 echo "fp16 act clip $FP16_ACT_CLIP ($FP16_ACT_CLIP_SCOPE) | deform decoder dtype $DEFORM_DECODER_DTYPE | bn epsilon override $BN_EPSILON_OVERRIDE (0 = off) | gpu poll $GPU_POLL"
 
 POLL_PID=""

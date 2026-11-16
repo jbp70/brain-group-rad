@@ -608,6 +608,24 @@ def synth_recal_slot(b, p):
     return math.floor((int(b) + 1) * p) > math.floor(int(b) * p)
 
 
+class _ReplayFirst:
+    """Iterator that yields ``first`` once, then the items of ``rest`` (deform warm-up: the batch
+    drawn for the discarded step goes back in front of its source)."""
+
+    def __init__(self, first, rest):
+        self._first = first
+        self._rest = rest
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self._first is not None:
+            first, self._first = self._first, None
+            return first
+        return next(self._rest)
+
+
 def _peak_gpu_mb():
     try:
         if tf.config.list_physical_devices("GPU"):
@@ -1242,6 +1260,70 @@ class Trainer:
             res["lso_skipped"] = bool(out["lso_skipped"].numpy())
         res["n_vars_updated"] = int(out["n_vars_updated"].numpy())
         return res
+
+    def _warmup_state_variables(self):
+        """Every variable a train step can change (deform warm-up snapshot): the model's
+        variables (weights, BN moving statistics), the optimizer's slots, iteration counter and
+        learning rate, the LossScaleOptimizer's loss scale and growth counter, ``self.step``, the
+        post-processing RNG states and the LSO skip flags. Unique, stable order."""
+        out, seen = [], set()
+
+        def add(vs):
+            for v in vs:
+                if isinstance(v, tf.Variable) and v.ref() not in seen:
+                    seen.add(v.ref())
+                    out.append(v)
+
+        add(self.model.variables)
+        inner = O.inner_optimizer(self.optimizer)
+        add(inner.variables())
+        add([getattr(inner, "iterations", None), getattr(inner, "_learning_rate", None)])
+        if inner is not self.optimizer:          # LossScaleOptimizer: dynamic loss-scale state
+            ls = getattr(self.optimizer, "_loss_scale", None)
+            add([getattr(ls, "current_loss_scale", None), getattr(ls, "counter", None)])
+        add([self.step])
+        add([g.state for g in self.checkpoint_variables().values()])
+        add(self._lso_skip.values())
+        return out
+
+    def deform_warmup_step(self):
+        """One deform train step whose effects are discarded (ablation-oom-fixes, failure 2;
+        --deform-warmup-step). Call once after construction / resume / BN recalibration and
+        before `fit`: the first deform step then runs on a fresh allocator, so TF's BFC pool is
+        carved for the deform shapes first, as in a run whose deform task starts at step 0 (a
+        from-scratch level-1 run OOMed at its first deform step after a linear-only phase and a
+        validation pass, smoke 10639201; diagnostics 10639614 / 10639615).
+
+        It draws the next deform batch, keeps a host copy, runs the SAME traced deform step
+        (`train_step`, so it is also the deform trace: trace once per task holds), then
+        restores every variable of `_warmup_state_variables` from a host snapshot taken before
+        the step (weights, BN statistics, optimizer slots / iterations / lr, loss scale and its
+        counter, ``self.step``, post-processing RNGs, LSO skip flags) and puts the batch back in
+        front of the deform source, so the first real deform step gets the same batch (the data
+        stream as seen by `fit` is unchanged). Nothing is appended to the history, logged, or
+        counted as non-finite (whether or not the warm-up step was finite). Only the process's
+        GPU allocator state and the GPU peak statistic (``gpu_peak_mb`` is a process maximum,
+        so it includes this step from the first log window on) are left changed.
+        Returns {'finite', 'loss', 'elapsed_s', 'gpu_peak_mb'} of the discarded step."""
+        if DEFORM not in self.sources:
+            raise ValueError("deform warm-up step needs a deform source, got tasks %s" % sorted(self.sources))
+        t0 = time.perf_counter()
+        src = self.sources[DEFORM]
+        batch = tuple(np.array(b) for b in next(src))     # host copy of the next deform batch
+        state = self._warmup_state_variables()
+        saved = [np.array(v.numpy()) for v in state]
+        if self._skip_mode == "stage":
+            skip = tuple(False for _ in self._frozen_levels)
+        else:
+            skip = False
+        try:
+            res = self.train_step(DEFORM, batch, skip=skip, lso_skip=False)
+        finally:
+            for v, s in zip(state, saved):
+                v.assign(s)
+            self.sources[DEFORM] = _ReplayFirst(batch, src)
+        return {"finite": bool(res["finite"]), "loss": float(res["loss"]),
+                "elapsed_s": time.perf_counter() - t0, "gpu_peak_mb": _peak_gpu_mb()}
 
     # ------------------------------------------------------------------ validation
     def _val_fn(self, task, nv, train_mode=False):

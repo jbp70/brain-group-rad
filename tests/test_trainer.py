@@ -1415,6 +1415,114 @@ class TestDelayedTaskStart(DeformCase):
         self.assertEqual(tr.trace_counts.get("deform"), 1)
 
 
+class _CycleSource:
+    """Yields the given batches in turn (distinct consecutive deform batches, so a shifted data
+    stream would change the training result)."""
+
+    def __init__(self, batches):
+        self.batches, self.calls = [tuple(b) for b in batches], 0
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        b = self.batches[self.calls % len(self.batches)]
+        self.calls += 1
+        return b
+
+
+class TestDeformWarmupStep(DeformCase):
+    """ablation-oom-fixes failure 2 (--deform-warmup-step): one discarded deform step before fit
+    leaves every state a step can change as it was, and fit afterwards reproduces the run without
+    the warm-up bit for bit (op determinism on), incl. the data stream and the trace counts."""
+
+    RATIO = {"rigid": 1.0, "affine": 1.0, "deform": 2.0}
+    START, STEPS = 4, 10
+
+    def make_run(self, amp, seed):
+        cfg = config(task_ratio=dict(self.RATIO), seed=seed, steps=self.STEPS, amp=amp, flip_prob=0.5,
+                     task_start_steps={"deform": self.START}, task_start_ramp_steps=2)
+        dgroups = [fd.synthetic_deform_group(4, N, seed=s)["batch"] for s in (0, 1, 2)]
+        sources = {t: fd.FixedGroupSource(g["batch"]) for t, g in self.groups.items()}
+        sources["deform"] = _CycleSource(dgroups)
+        tr = self.make_deform(cfg, sources=sources, amp=amp)
+        head = tr.model.deform_decoder.svf_head       # non-zero SVF head: real deform updates
+        head.kernel.assign(np.random.default_rng(0).normal(0, 1e-3, head.kernel.shape).astype(np.float32))
+        return tr, sources["deform"]
+
+    @staticmethod
+    def state(tr):
+        vs = tr._warmup_state_variables()
+        return [(v.name, np.array(v.numpy())) for v in vs]
+
+    def assert_same_state(self, a, b, same_names=True):
+        self.assertEqual(len(a), len(b))
+        if same_names:                     # across trainers the Keras scopes are uniquified
+            self.assertEqual([n for n, _ in a], [n for n, _ in b])
+        for (n, x), (_, y) in zip(a, b):
+            self.assertEqual(x.shape, y.shape, n)
+            self.assertTrue(np.array_equal(x, y), n)
+
+    def run_case(self, amp):
+        seed = next(sd for sd in range(1000)
+                    if TaskSchedule(self.RATIO, sd, {"deform": self.START}).draw(self.START) == "deform"
+                    and "deform" in {TaskSchedule(self.RATIO, sd, {"deform": self.START}).draw(i)
+                                     for i in range(self.START + 1, self.STEPS)})
+        with _OpDeterminism():
+            ref, _ = self.make_run(amp, seed)
+            ref.fit()
+            tr, src = self.make_run(amp, seed)
+            refs = {v.ref() for v in tr._warmup_state_variables()}
+            inner = O.inner_optimizer(tr.optimizer)
+            want = ([tr.step, inner.iterations] + list(tr.model.non_trainable_variables)
+                    + [g.state for g in tr.checkpoint_variables().values()])
+            if amp:
+                want += [tr.optimizer._loss_scale.current_loss_scale, tr.optimizer.dynamic_counter]
+            self.assertTrue(all(v.ref() in refs for v in want))
+            self.assertTrue(tr.model.non_trainable_variables)    # BN moving statistics
+            before = self.state(tr)
+            wu = tr.deform_warmup_step()
+            self.assertEqual(set(wu), {"finite", "loss", "elapsed_s", "gpu_peak_mb"})
+            self.assertTrue(np.isfinite(wu["loss"]))
+            self.assert_same_state(before, self.state(tr))        # everything restored
+            self.assertEqual(tr.trace_counts, {"rigid": 0, "affine": 0, "deform": 1})
+            self.assertEqual((tr.history, tr.nonfinite_total, int(tr.step.numpy())), ([], 0, 0))
+            self.assertEqual(src.calls, 1)                        # drawn once, replayed to fit
+            tr.fit()
+        self.assertEqual(src.calls, sum(h["task"] == "deform" for h in tr.history))
+        self.assertEqual(tr.trace_counts, {"rigid": 1, "affine": 1, "deform": 1})
+        self.assertEqual([(h["task"], h["loss"], h["finite"]) for h in tr.history],
+                         [(h["task"], h["loss"], h["finite"]) for h in ref.history])
+        self.assertIn("deform", [h["task"] for h in tr.history])
+        # weights, BN statistics, optimizer slots / iterations / lr, LSO, step, RNGs
+        self.assert_same_state(self.state(ref), self.state(tr), same_names=False)
+        self.assertEqual(tr.nonfinite_total, ref.nonfinite_total)
+        self.assertEqual(int(O.inner_optimizer(tr.optimizer).iterations.numpy()),
+                         int(O.inner_optimizer(ref.optimizer).iterations.numpy()))
+
+    def test_discarded_fp32(self):
+        self.run_case(False)
+
+    def test_discarded_amp(self):
+        self.run_case(True)
+
+    def test_needs_deform_source(self):
+        tr = self.make(config(task_ratio={"rigid": 1.0}))
+        with self.assertRaises(ValueError):
+            tr.deform_warmup_step()
+
+    def test_parser(self):
+        from runtime import args as A
+        base = ["--data", "x", "--level", "1"]
+        self.assertFalse(A.parse_args(base).deform_warmup_step)
+        self.assertTrue(A.parse_args(base + ["--task-ratio", "rigid:1,affine:1,deform:2",
+                                             "--deform-warmup-step", "true"]).deform_warmup_step)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), self.assertRaises(SystemExit):
+            A.parse_args(base + ["--task-ratio", "rigid:1,affine:1", "--deform-warmup-step", "true"])
+        self.assertIn("--deform-warmup-step needs 'deform' in --task-ratio", err.getvalue())
+
+
 class TestTaskLossWeightDeform(DeformCase):
     def test_deform_weight(self):
         def make(w, clipnorm=None, like=None):

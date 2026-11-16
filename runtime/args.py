@@ -71,6 +71,9 @@ Pattern from the rigid project's ``runtime/args.py`` (argparse + ``str2bool``). 
   Dice / LNCC one pair at a time under tf.recompute_grad (needs 'deform' in --task-ratio).
   Level-1 option only: it unrolls one serialized block per pair; at level 4 with N 48 (226 pairs)
   graph construction ran ~2 h at 99 % CPU (cluster job 10519650).
+* --deform-warmup-step false (default: no extra step); true = main.py runs one discarded deform
+  train step before training (`runtime.run.Trainer.deform_warmup_step`, on every start incl.
+  resume; needs 'deform' in --task-ratio; ablation-oom-fixes failure 2).
 * delayed task start (retrain-prereqs design section 5.2): --task-start-step 'task:step' (default
   None = every task from step 0, today) and --task-start-ramp-steps W (default 0 = no LR ramp).
 * non-finite robustness (`.agents/tasks/nonfinite-fixes/plan.md`): --nonfinite-patience-task 20
@@ -450,6 +453,14 @@ def build_parser():
                    "time in forward and backward (same values and gradients); deform task only. "
                    "Level-1 option only: it unrolls one serialized block per pair, and at level 4 "
                    "with N 48 (226 pairs) graph construction ran ~2 h (cluster job 10519650)")
+    g.add_argument("--deform-warmup-step", type=str2bool, default=False,
+                   help="memory knob (ablation-oom-fixes): before training (after resume / BN "
+                   "recalibration, also on every resume) run ONE deform train step on the next "
+                   "deform batch and discard it completely (weights, BN statistics, optimizer, "
+                   "loss scale, step, RNGs restored; the batch is replayed to the first real deform "
+                   "step), so the GPU allocator is laid out for the deform step first. For runs "
+                   "whose deform task starts after a linear-only phase (from-scratch level 1 OOMed "
+                   "at its first deform step after a validation pass). Needs 'deform' in --task-ratio")
     g.add_argument("--split-group-conv", type=str2bool, default=False,
                    help="memory knob (milestone 9): group blocks compute conv(x) + conv(group mean) "
                    "instead of conv(concat(x, mean)); same variables and checkpoints")
@@ -735,7 +746,7 @@ def parse_args(argv=None):
     if not deform:
         if args.gradient_checkpointing == "full":
             parser.error("--gradient-checkpointing full needs 'deform' in --task-ratio")
-        for flag in ("lean_sampler", "lean_losses", "pair_recompute"):
+        for flag in ("lean_sampler", "lean_losses", "pair_recompute", "deform_warmup_step"):
             if getattr(args, flag):
                 parser.error("--%s needs 'deform' in --task-ratio" % flag.replace("_", "-"))
     if len(args.filters) != 6 or any(w < 1 for w in args.filters):

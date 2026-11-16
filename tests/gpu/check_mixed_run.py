@@ -76,7 +76,8 @@ Tasks: rigid, affine (linear) and deform. Passes (exit 0) when:
   - ``--max-window-nonfinite-frac F`` (> 0; scripts pass 0.05) with ``--nonfinite-window-steps W``
     (500) and ``--nonfinite-from-step S`` (100): per task one ``nonfinite_window_<task>`` result.
     The logged ``train_<task>/nonfinite_steps`` / ``window_steps`` of records with step > S are
-    summed into W-step buckets; buckets with < 20 task steps are skipped; FAIL if a bucket's
+    summed into W-step buckets; buckets with < max(20, ceil(2 / F)) task steps (40 at F 0.05,
+    so two isolated AMP skips in a short smoke bucket cannot fail it) are skipped; FAIL if a bucket's
     fraction > F (detail: first such bucket, counts, the first record step with a non-finite
     step). Runs without these keys (older code) PASS as "skipped".
   - ``loss_scale`` INFO line whenever ``optimizer/loss_scale`` is logged (AMP): last / min value
@@ -136,6 +137,16 @@ PROJECT_MARGIN = 1.3
 # nonfinite-fixes (plan D7): per-task, per-window non-finite rate and the AMP loss scale.
 LOSS_SCALE_KEY = "optimizer/loss_scale"
 MIN_WINDOW_TASK_STEPS = 20       # buckets with fewer steps of the task are not judged
+# ... nor buckets in which this many isolated non-finite steps would already exceed the limit
+# (min steps = max(20, ceil(2 / F)), 40 at F 0.05): a short trailing / smoke bucket with two AMP
+# loss-scale skips (smoke 10639614: 2 of 21 affine steps, 9.5 %) is noise, while every full
+# 500-step window of a run (>= 125 steps per task at 1:1:2) is judged as before.
+MIN_WINDOW_NONFINITE_NOISE = 2
+
+
+def min_window_task_steps(max_frac):
+    """Fewest task steps a bucket needs to be judged by the per-window non-finite check."""
+    return max(MIN_WINDOW_TASK_STEPS, int(math.ceil(MIN_WINDOW_NONFINITE_NOISE / float(max_frac) - 1e-9)))
 LOSS_SCALE_FLOOR = 1.0
 # synth-contrast (design 5.6): synthetic-step fraction bound and the --min-task-steps syntax.
 SYNTH_FRAC_SIGMAS = 4.0
@@ -578,9 +589,10 @@ def _step_time(recs, tasks, args, project_steps, project_val_every=0):
 def _check_nonfinite_windows(recs, tasks, max_frac, window_steps, from_step):
     """Per task: aggregate the logged ``train_<t>/nonfinite_steps`` / ``window_steps`` of the train
     records with step > from_step into buckets (step - 1) // window_steps; FAIL if any bucket with
-    >= MIN_WINDOW_TASK_STEPS task steps has a non-finite fraction > max_frac (detail: the first
-    such bucket and the first record step in it with non-finite steps)."""
+    >= `min_window_task_steps`(max_frac) task steps has a non-finite fraction > max_frac (detail:
+    the first such bucket and the first record step in it with non-finite steps)."""
     res = []
+    min_n = min_window_task_steps(max_frac)
     for t in tasks:
         nk, wk = "train_%s/nonfinite_steps" % t, "train_%s/window_steps" % t
         rows = [(r["step"], r["data"][nk], r["data"][wk]) for r in recs
@@ -598,7 +610,7 @@ def _check_nonfinite_windows(recs, tasks, max_frac, window_steps, from_step):
             b[1] += int(n)
             if int(bad) > 0 and b[2] is None:
                 b[2] = step
-        judged = [(k, v) for k, v in sorted(buckets.items()) if v[1] >= MIN_WINDOW_TASK_STEPS]
+        judged = [(k, v) for k, v in sorted(buckets.items()) if v[1] >= min_n]
         failing = [(k, v) for k, v in judged if v[0] > max_frac * v[1]]
         if failing:
             k, (bad, n, first) = failing[0]

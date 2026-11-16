@@ -334,6 +334,11 @@ class GroupRegLevelModel(tf.keras.Model):
       bn_epsilon_override E (0 = off): `layers.set_bn_epsilon` on every BatchNormWithSeparateAffine
         of this model (LayerNorm / InstanceNorm untouched; config.bn_epsilon unchanged).
 
+    Instance norm (``config.norm == 'instance'``) under a float16 global policy: every
+    `layers.InstanceNormWithAffine` uses the fused kernel path (`layers.instance_norm_fused`),
+    also the float32 decoder stages (`layers.set_instance_norm_fused`); under a float32 global
+    policy (float32 models, frozen cascade stages) the float32-moment path as before.
+
     Hooks: the linear cascade (design 4.7, milestone 8) warps the inputs by the previous level's
     A^-1 and composes Center(R A_prev) outside this single-level model; the deformable cascade
     composes fields with `models.diffeo.compose_cascade`.
@@ -402,6 +407,11 @@ class GroupRegLevelModel(tf.keras.Model):
                                 else self, fp16_act_clip)
         if bn_epsilon_override > 0:
             L.set_bn_epsilon(self, bn_epsilon_override)
+        if global_compute != "float32" and self.config.norm == "instance":
+            # Mixed precision: the float32 decoder stages of 'float32' / 'float32_fine' take the
+            # lean fused instance norm too (ablation-oom-fixes); float32 models keep the
+            # float32-moment path.
+            L.set_instance_norm_fused(self, True)
 
     def call(self, images, task="rigid", training=None, return_warped=False):
         if task == DEFORM_TASK:

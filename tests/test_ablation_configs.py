@@ -278,6 +278,128 @@ def _assert_no_bn(test, model):
         test.assertIsInstance(model.deform_decoder.d1.norm, L.InstanceNormWithAffine)
 
 
+def _in_reference(x, dy, eps):
+    """float64 instance norm of x [N, s.., C] over the spatial axes and its input gradient for the
+    upstream gradient dy (closed form)."""
+    x, dy = np.asarray(x, np.float64), np.asarray(dy, np.float64)
+    ax = tuple(range(1, x.ndim - 1))
+    m = x.mean(ax, keepdims=True)
+    rstd = 1.0 / np.sqrt(x.var(ax, keepdims=True) + eps)
+    y = (x - m) * rstd
+    dx = rstd * (dy - dy.mean(ax, keepdims=True) - y * (dy * y).mean(ax, keepdims=True))
+    return y, dx
+
+
+class TestInstanceNormFused(unittest.TestCase):
+    """ablation-oom-fixes failure 1: `layers.instance_norm_fused` (float16 full-size tensors,
+    float32 statistics in the fused kernel) and when InstanceNormWithAffine uses it."""
+
+    def tearDown(self):
+        tf.keras.mixed_precision.set_global_policy("float32")
+        free_memory()
+
+    def test_fused_matches_reference(self):
+        rng = np.random.default_rng(0)
+        x = rng.normal(3.0, 40.0, size=(3, 6, 5, 7, 4))
+        x[0, ..., 1] *= 100.0          # |x| up to ~1.5e4: x^2 would overflow float16 (65504)
+        x = x.astype(np.float16).astype(np.float32)
+        dy = rng.normal(size=x.shape).astype(np.float32)
+        yr, gr = _in_reference(x, dy, L.FUSED_BN_MIN_EPSILON)
+        for fmt in ("NCHW", "NHWC"):
+            for dt, ytol, gtol in ((tf.float32, 1e-5, 1e-6), (tf.float16, 3e-3, 2e-4)):
+                with self.subTest(fmt=fmt, dtype=dt.name):
+                    xt = tf.cast(tf.constant(x), dt)
+                    with tf.GradientTape() as tape:
+                        tape.watch(xt)
+                        y = L.instance_norm_fused(xt, 1e-5, fmt)
+                        obj = tf.reduce_sum(tf.cast(y, tf.float32) * dy)
+                    g = tape.gradient(obj, xt)
+                    self.assertEqual((y.dtype, g.dtype), (dt, dt))
+                    y, g = y.numpy().astype(np.float64), g.numpy().astype(np.float64)
+                    self.assertTrue(np.isfinite(y).all() and np.isfinite(g).all())
+                    self.assertLess(np.abs(y - yr).max(), ytol * max(1.0, np.abs(yr).max()))
+                    self.assertLess(np.abs(g - gr).max(), gtol * max(1.0, np.abs(gr).max()) + gtol)
+        # rank 4 ([N, X, Y, C]) and a dynamic N inside a tf.function
+        x4 = rng.normal(size=(2, 5, 6, 3)).astype(np.float32)
+        y4r, _ = _in_reference(x4, np.zeros_like(x4), L.FUSED_BN_MIN_EPSILON)
+        f = tf.function(lambda v: L.instance_norm_fused(v),
+                        input_signature=[tf.TensorSpec([None, 5, 6, 3], tf.float16)])
+        self.assertLess(np.abs(f(tf.cast(x4, tf.float16)).numpy().astype(np.float64) - y4r).max(), 3e-3)
+        with self.assertRaises(ValueError):
+            L.instance_norm_fused(tf.zeros((2, 3)))
+        with self.assertRaises(ValueError):
+            L.instance_norm_fused(tf.zeros((2, 3, 4)), data_format="NCDHW")
+
+    def test_float32_path_unchanged(self):
+        """float32 input keeps main's float32-moment ops bit for bit (fused_float32 False)."""
+        x = np.random.default_rng(1).normal(2.0, 5.0, size=(2, 6, 5, 4, 3)).astype(np.float32)
+        lay = L.InstanceNormWithAffine()
+        self.assertFalse(lay.fused_float32)
+        xt = tf.constant(x)
+        mean, var = tf.nn.moments(xt, axes=[1, 2, 3], keepdims=True)
+        want = (xt - mean) * tf.math.rsqrt(var + 1e-5)
+        got = lay(xt)
+        self.assertTrue(np.array_equal(got.numpy(), (want * lay.affine.gamma + lay.affine.beta).numpy()))
+        self.assertEqual(L.set_instance_norm_fused(lay, True), 1)
+        fused = lay(xt).numpy()                                     # other kernel, eps 1.001e-5
+        self.assertLess(np.abs(fused - got.numpy()).max(), 1e-5)
+
+    def test_model_flags(self):
+        """mixed_float16 IN model: every IN layer fused (float32_fine d2 / d1 / svf_norm_act too);
+        float32 IN model and BN models: none."""
+        cfg = tiny_config(seed=1, deform_decoder=True, **IN_KW)
+        m32 = GroupRegLevelModel(4, cfg, deform_decoder_dtype="float32_fine")
+        ins = [m for m in m32.submodules if isinstance(m, L.InstanceNormWithAffine)]
+        self.assertTrue(ins)
+        self.assertFalse(any(m.fused_float32 for m in ins))
+        with policy_scope("mixed_float16"):
+            m16 = GroupRegLevelModel(4, cfg, deform_decoder_dtype="float32_fine").build_model(2)
+            ins = [m for m in m16.submodules if isinstance(m, L.InstanceNormWithAffine)]
+            self.assertTrue(all(m.fused_float32 for m in ins))
+            self.assertEqual(m16.deform_decoder.d1.norm.compute_dtype, "float32")
+            self.assertEqual(m16.encoder.l3.norm.compute_dtype, "float16")
+            out = m16(tf.zeros((2,) + m16.input_shape_level + (1,)), task="deform", training=True)
+            self.assertTrue(np.isfinite(out["v"].numpy()).all())
+            mb = GroupRegLevelModel(4, tiny_config(seed=1, deform_decoder=True))
+            self.assertEqual(L.set_instance_norm_fused(mb, True), 0)
+
+    def test_checkpointing_full_gradients(self):
+        """--gradient-checkpointing full recomputes the fused IN exactly: gradients equal 'none'
+        within 1e-4 relative under mixed_float16 (the BN test of tests/test_checkpointing.py)."""
+        from tests.test_cascade import _GrapplerOff
+        from tests.test_checkpointing import rel
+        from tests.test_trainer import _OpDeterminism
+        tf.keras.mixed_precision.set_global_policy("mixed_float16")
+        n = 3
+        grp = fd.synthetic_deform_group(4, n, seed=0)
+        x = tf.constant(grp["images"])
+        w = tf.constant(np.random.default_rng(0).normal(size=grp["images"].shape[:4] + (3,)).astype(np.float32))
+        cfg = tiny_config(dropout=0.0, seed=1, deform_decoder=True, **IN_KW)
+
+        def grads(model):
+            @tf.function
+            def f():
+                with tf.GradientTape() as tape:
+                    out = model(x, task="deform", training=True)
+                    loss = (tf.reduce_sum(out["u"] * w) + 0.5 * tf.reduce_sum(out["u_inv"] * w)
+                            + 1e-3 * tf.reduce_sum(tf.cast(out["dec_feat"], tf.float32)))
+                gs = tape.gradient(loss, model.trainable_variables)
+                return [g for g in gs if g is not None]
+            return [g.numpy() for g in f()]
+
+        with _GrapplerOff(), _OpDeterminism():
+            a = GroupRegLevelModel(4, cfg, gradient_checkpointing="none").build_model(n)
+            randomize(a, 3, 0.02)
+            b = GroupRegLevelModel(4, cfg, gradient_checkpointing="full").build_model(n)
+            b.copy_weights_from(a)
+            g_none, g_full = grads(a), grads(b)
+        self.assertEqual(len(g_none), len(g_full))
+        self.assertGreater(len(g_none), 10)
+        e = rel(g_full, g_none)
+        _say("IN fused, ckpt full vs none (AMP): gradient rel %.2e" % e)
+        self.assertLessEqual(e, 1e-4)
+
+
 class TestInstanceNormTraining(unittest.TestCase):
     """--norm instance training steps with the final recipe's knobs (plan item 6 a / b)."""
 

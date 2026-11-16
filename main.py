@@ -496,6 +496,16 @@ def main(argv=None):
             print(opt_line)
         for line in _pair_notes(args):
             print(line)
+    if args.deform_warmup_step:
+        # ablation-oom-fixes failure 2: one discarded deform step before any linear step or
+        # validation pass (after the resume / BN recalibration rebuilds; again on every resume,
+        # since the allocator is fresh). Not logged to metrics.jsonl (the state is restored).
+        wu = trainer.deform_warmup_step()
+        if not args.quiet:
+            peak = wu["gpu_peak_mb"]
+            print("deform warm-up step (discarded, state restored): finite %s, loss %.4g, %.1f s, "
+                  "gpu peak %s MB" % (wu["finite"], wu["loss"], wu["elapsed_s"],
+                                      "n/a" if peak is None else "%.0f" % peak))
 
     if args.dry_run:
         summary = trainer.fit(2)

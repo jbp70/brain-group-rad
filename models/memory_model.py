@@ -47,8 +47,9 @@ records, the fit and the hold-out gate unchanged.
 Group configs and norms (ablation-prereqs): `architecture` sets each stage's ``group`` flag from
 `ModelConfig.group_encoder` / `group_decoders` (A, B, E, none); the coefficients were fitted on A/B
 records only, so E / none predictions are extrapolations (fewer group-concat tensors). The model is
-norm-agnostic: ``--norm instance`` float32 moment / normalisation temporaries (layers.
-InstanceNormWithAffine under mixed_float16) are not modelled; measure them in a smoke.
+norm-agnostic: under mixed_float16 ``--norm instance`` uses the fused kernel path
+(`layers.instance_norm_fused`, ablation-oom-fixes), whose full-size tensors match the batch-norm
+path's (local measurements within ~2 %, .agents/tasks/ablation-oom-fixes/report.md).
 """
 import collections
 import json

@@ -45,7 +45,8 @@ RECIPE_ENV = ("GRAD_BALANCE", "BN_RECAL_BATCHES", "BN_RECAL_FREEZE", "SKIP_PROB"
               "FROZEN_INTEGRATION_GRID", "L4_SOURCE", "GROUP_ARGS", "SMOOTH", "STUB_WRITE_CKPT", "RECENTER", "RUNS",
               "NORM", "GROUP_CONFIG", "DEFORM_START", "DEFORM_RAMP", "CURRICULUM", "CURRICULUM_RAMP", "G_START",
               "G_RAMP", "G_ROT", "G_TRANS", "LR", "WD", "OPTIMIZER", "TASK_RATIO", "MAX_PAIRS", "LOWRES_METHOD",
-              "VAL_GROUP_SIZE", "GPU_POLL", "MIN_TASK_STEPS", "PROJECT_STEPS", "PROJECT_VAL_EVERY")
+              "VAL_GROUP_SIZE", "GPU_POLL", "MIN_TASK_STEPS", "PROJECT_STEPS", "PROJECT_VAL_EVERY",
+              "DEFORM_WARMUP_STEP")
 
 
 def _read(path):
@@ -2306,7 +2307,8 @@ class TestLevel1Scratch(unittest.TestCase):
                      "#SBATCH --output=%s/%%x-%%j.out" % LOGS, "#SBATCH --error=%s/%%x-%%j.err" % LOGS):
             self.assertIn(line + "\n", text)
         self.assertEqual(len(re.findall(r"(?m)^#SBATCH ", text)), 11)
-        for k in ("set -euo pipefail\n", "63.85 h", "229860", "STEPS = floor(229860 / (mean_step_s + v / VAL_EVERY))",
+        for k in ("set -euo pipefail\n", "63.85 h", "229860", "STEPS = (229860 - val_time) / (3/16 t_lin + 13/16 t_mix)",
+                  "floor(229860 / (3/16 t_lin + 13/16 t_mix + v / VAL_EVERY))", "DEFORM_WARMUP_STEP",
                   "10623341 13:54:14", "10624169 27:20:44", "10627751 22:36:02", "DO NOT submit without Jay's approval",
                   "at most two active jobs", "mkdir -p %s" % LOGS, "sbatch --job-name=r1scr_smk --time=05:00:00 --mem=128G slurm/r_level1_scratch.sh",
                   "sbatch --job-name=r1scr --time=48:00:00 --mem=128G slurm/r_level1_scratch.sh", "</dev/null"):
@@ -2348,7 +2350,20 @@ class TestLevel1Scratch(unittest.TestCase):
         self.assertEqual((a.min_pairs, a.max_pairs, a.val_image_chunk, a.val_pair_chunk, a.task_grad_norm),
                          ("n", 64, 1, 1, 12.0))
         self.assertIsNone(a.val_group_size)
+        self.assertTrue(a.deform_warmup_step)                      # ablation-oom-fixes failure 2
         joined = " ".join(argv)
+        self.assertEqual(joined.count("--deform-warmup-step true"), 1)
+        r, a2, argv2, _ = self.dry_main(STEPS="16000", RUN_NAME="r1_scratch", DEFORM_WARMUP_STEP="false")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(a2.deform_warmup_step)
+        self.assertNotIn("--deform-warmup-step", " ".join(argv2))
+        i = argv.index("--deform-warmup-step")
+        self.assertEqual(argv[:i] + argv[i + 2:], argv2)          # only the flag differs
+        r, _, _, _ = self.dry_main(STEPS="16000", DEFORM_WARMUP_STEP="yes")
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        r, a3, argv3, _ = self.dry_main(STEPS="16000", TASK_RATIO="rigid:1,affine:1")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(a3.deform_warmup_step)                    # linear-only: not emitted
         for k in ("--cascade-from", "--bn-recal", "--cascade-skip", "--init-weights", "--norm", "--synth-"):
             self.assertNotIn(k, joined, k)
         self.assertIn("--group-config B", joined)
