@@ -1,0 +1,124 @@
+[
+ {
+  "level": 2,
+  "task": "rigid",
+  "n": 2,
+  "norm": "batch",
+  "status": "ok",
+  "obj": 0.48076921701431274,
+  "grad_norm": 4.278520584106445,
+  "resident_mb": 110.185791015625,
+  "peak_mb": 1159.76416015625
+ },
+ {
+  "level": 2,
+  "task": "rigid",
+  "n": 3,
+  "norm": "batch",
+  "status": "ok",
+  "obj": 0.48076921701431274,
+  "grad_norm": 4.302288055419922,
+  "resident_mb": 112.857177734375,
+  "peak_mb": 1605.15380859375
+ },
+ {
+  "level": 2,
+  "task": "rigid",
+  "n": 2,
+  "norm": "instance",
+  "status": "ok",
+  "obj": 0.48076921701431274,
+  "grad_norm": 4.304497718811035,
+  "resident_mb": 110.153076171875,
+  "peak_mb": 1034.996826171875
+ },
+ {
+  "level": 2,
+  "task": "rigid",
+  "n": 3,
+  "norm": "instance",
+  "status": "ok",
+  "obj": 0.48076921701431274,
+  "grad_norm": 4.310476303100586,
+  "resident_mb": 112.834228515625,
+  "peak_mb": 1557.36279296875
+ },
+ {
+  "level": 2,
+  "task": "rigid",
+  "n": 2,
+  "norm": "in_old",
+  "status": "ok",
+  "obj": 0.48076921701431274,
+  "grad_norm": 4.41815710067749,
+  "resident_mb": 108.247802734375,
+  "peak_mb": 1285.93505859375
+ },
+ {
+  "level": 2,
+  "task": "rigid",
+  "n": 3,
+  "norm": "in_old",
+  "status": "ok",
+  "obj": 0.48076921701431274,
+  "grad_norm": 4.367117881774902,
+  "resident_mb": 108.247802734375,
+  "peak_mb": 1899.651611328125
+ },
+ {
+  "level": 2,
+  "task": "deform",
+  "n": 2,
+  "norm": "batch",
+  "status": "ok",
+  "obj": 0.0,
+  "grad_norm": 0.0,
+  "resident_mb": 204.2802734375,
+  "peak_mb": 3699.9384765625
+ },
+ {
+  "level": 2,
+  "task": "deform",
+  "n": 3,
+  "norm": "batch",
+  "status": "ok",
+  "obj": 0.0,
+  "grad_norm": 0.0,
+  "resident_mb": 267.0458984375,
+  "peak_mb": 5296.34912109375
+ },
+ {
+  "level": 2,
+  "task": "deform",
+  "n": 2,
+  "norm": "instance",
+  "status": "ok",
+  "obj": 0.0,
+  "grad_norm": 0.0,
+  "resident_mb": 182.318603515625,
+  "peak_mb": 3651.12451171875
+ },
+ {
+  "level": 2,
+  "task": "deform",
+  "n": 3,
+  "norm": "instance",
+  "status": "oom"
+ },
+ {
+  "level": 2,
+  "task": "deform",
+  "n": 2,
+  "norm": "in_old",
+  "status": "oom"
+ },
+ {
+  "level": 2,
+  "task": "deform",
+  "n": 3,
+  "norm": "in_old",
+  "status": "error",
+  "rc": 1,
+  "stderr_tail": "in_memory.py\", line 70, in child\n    o, g = step(x)\n  File \"/home/jbpatel/miniconda3/envs/tf_gpu/lib/python3.9/site-packages/tensorflow/python/util/traceback_utils.py\", line 153, in error_handler\n    raise e.with_traceback(filtered_tb) from None\n  File \"/home/jbpatel/miniconda3/envs/tf_gpu/lib/python3.9/site-packages/tensorflow/python/eager/execute.py\", line 54, in quick_execute\n    tensors = pywrap_tfe.TFE_Py_Execute(ctx._handle, device_name, op_name,\ntensorflow.python.framework.errors_impl.InvalidArgumentError: Graph execution error:\n\nCannot parse tensor from proto: dtype: DT_FLOAT\ntensor_shape {\n  dim {\n    size: 3\n  }\n  dim {\n    size: 128\n  }\n  dim {\n    size: 80\n  }\n  dim {\n    size: 112\n  }\n  dim {\n    size: 96\n  }\n}\n\n\t [[{{node AddN_23/tmp_var_zeros}}]] [Op:__inference_step_27750]\n"
+ }
+]
