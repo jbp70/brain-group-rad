@@ -231,6 +231,83 @@ def cmd_fields_to_matrices(a) -> int:
     return 0
 
 
+def recenter_matrices(fwd_vox: np.ndarray) -> tuple:
+    """Exact plain-mean re-centring of a linear group: F_i' = F_i M^-1 with M = mean_i F_i, so
+    mean_i F_i' = I (the plain average displacement, i.e. the evaluator's centrality, is zero) and
+    every pairwise map F_j' F_i'^-1 = F_j F_i^-1 is unchanged. Returns (F', M)."""
+    fv = np.asarray(fwd_vox, np.float64)
+    M = fv.mean(0)
+    return np.einsum("nij,jk->nik", fv, np.linalg.inv(M)), M
+
+
+def _is_rigid(fv: np.ndarray, tol: float = 1e-4) -> bool:
+    lin = fv[:, :3, :3]
+    return bool(np.abs(np.einsum("nij,nkj->nik", lin, lin) - np.eye(3)).max() < tol)
+
+
+def cmd_recenter_matrices(a) -> int:
+    """<pred>/<group>/fields/matrices.npz -> <out>/<group>/fields/matrices.npz re-centred (affine
+    groups only), plus a copy of <pred>/groups. The atlas is NOT copied: it moves with M^-1, so
+    evaluate with ATLAS=none (mean of the warped scans / majority vote, as the predicted atlas)."""
+    import shutil
+    srcs = sorted(glob.glob(os.path.join(a.pred, "*", "fields", "matrices.npz")))
+    srcs = [p for p in srcs if not os.path.basename(os.path.dirname(os.path.dirname(p))).startswith("_")]
+    if not srcs:
+        print("no <group>/fields/matrices.npz under %s" % a.pred, file=sys.stderr)
+        return 2
+    if os.path.abspath(a.out) == os.path.abspath(a.pred):
+        print("--out must differ from --pred", file=sys.stderr)
+        return 2
+    rows = []
+    for p in srcs:
+        g = os.path.basename(os.path.dirname(os.path.dirname(p)))
+        z = np.load(p, allow_pickle=False)
+        fv = np.asarray(z["fwd_vox"], np.float64)
+        if _is_rigid(fv) and not a.allow_rigid:
+            print("%s: the matrices are rigid; plain-mean re-centring would make them non-rigid "
+                  "(use --allow-rigid to force)" % g, file=sys.stderr)
+            return 2
+        new, M = recenter_matrices(fv)
+        inv = np.linalg.inv(new)
+        d = os.path.join(a.out, g, "fields")
+        os.makedirs(d, exist_ok=True)
+        keep = {k: z[k] for k in z.files if k not in ("fwd_vox", "inv_vox", "fwd_world", "inv_world", "note")}
+        out = dict(keep, fwd_vox=new, inv_vox=inv,
+                   note="re-centred: F_i' = F_i M^-1, M = mean_i F_i (plain mean); pairwise maps unchanged; "
+                        "fwd: atlas -> subject point map (x_subject = M x_atlas), vox = processed-grid voxels")
+        aff_path = os.path.join(os.path.dirname(p), "atlas.nii.gz")
+        if "fwd_world" in z.files:
+            # world versions with the grid affine implied by the original pair (A M_vox A^-1)
+            A = None
+            if os.path.isfile(aff_path):
+                import nibabel as nib
+                A = nib.load(aff_path).affine
+            if A is not None:
+                Ai = np.linalg.inv(A)
+                out.update(fwd_world=A @ new @ Ai, inv_world=A @ inv @ Ai)
+        np.savez(os.path.join(d, "matrices.npz"), **out)
+        sub = os.path.join(os.path.dirname(p), "predict.json")
+        if os.path.isfile(sub):
+            shutil.copyfile(sub, os.path.join(d, "predict.json"))
+        lin = M[:3, :3]
+        rows.append({"group": g, "n": len(fv), "M_translation_vox": float(np.linalg.norm(M[:3, 3])),
+                     "M_lin_dev": float(np.abs(lin - np.eye(3)).max()),
+                     "mean_after_dev": float(np.abs(new.mean(0) - np.eye(4)).max())})
+    gsrc = os.path.join(a.pred, "groups")
+    if os.path.isdir(gsrc):
+        gdst = os.path.join(a.out, "groups")
+        os.makedirs(gdst, exist_ok=True)
+        for f in os.listdir(gsrc):
+            if f.endswith(".txt") or f == "groups.csv":
+                shutil.copyfile(os.path.join(gsrc, f), os.path.join(gdst, f))
+    with open(os.path.join(a.out, "recenter.json"), "w") as f:
+        json.dump({"source": os.path.abspath(a.pred), "groups": rows}, f, indent=1)
+    dev = max(r["mean_after_dev"] for r in rows)
+    print("%d groups re-centred -> %s; max |mean F' - I| %.1e; M linear deviation max %.2e, translation max %.3f vox"
+          % (len(rows), a.out, dev, max(r["M_lin_dev"] for r in rows), max(r["M_translation_vox"] for r in rows)))
+    return 0 if dev < 1e-9 else 4
+
+
 HIGHER_IS_BETTER = ("lncc", "ncc", "dice")
 
 
@@ -404,6 +481,13 @@ def build_parser() -> argparse.ArgumentParser:
                    help="max allowed fit residual / inverse mismatch in voxels (default %(default)s)")
     m.add_argument("--delete-dense", action="store_true", help="remove *_fwd/_inv/_moved.nii.gz after a passing fit")
     m.set_defaults(func=cmd_fields_to_matrices)
+    r = sub.add_parser("recenter-matrices",
+                       help="exact plain-mean re-centring of linear (affine) groups: F_i M^-1, M = mean F_i")
+    r.add_argument("--pred", required=True, help="prediction root with <group>/fields/matrices.npz (+ groups/)")
+    r.add_argument("--out", required=True, help="new prediction root (e.g. <pred>_rc); evaluate with ATLAS=none")
+    r.add_argument("--allow-rigid", action="store_true",
+                   help="also re-centre rigid groups (the per-scan maps then stop being rigid)")
+    r.set_defaults(func=cmd_recenter_matrices)
     c = sub.add_parser("compare", help="side-by-side table of several methods (paired per patient)")
     c.add_argument("--root", required=True, help="evaluation root with <method>/_aggregate/per_group.csv")
     c.add_argument("--methods", nargs="+", required=True)

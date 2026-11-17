@@ -297,6 +297,66 @@ class TestMatrices(unittest.TestCase):
                                      "--delete-dense"]), 4)
         self.assertTrue(os.path.isfile(os.path.join(fd, "a_T1w_fwd.nii.gz")))
 
+    def test_recenter_matrices(self):
+        shape = (20, 22, 18)
+        rng = np.random.RandomState(7)
+        x, y, z = np.indices(shape).astype(np.float32)
+        c = (np.asarray(shape) - 1) / 2.0
+        r = np.sqrt(((x - c[0]) / 7) ** 2 + ((y - c[1]) / 8) ** 2 + ((z - c[2]) / 6) ** 2)
+        base = (np.clip(0.5 + 0.3 * np.cos(r * 5), 0.05, None) * (r < 1)).astype(np.float32)
+        lab0 = np.where(r < 1, np.where(x < c[0], 2, 41), 0).astype(np.uint16)
+        proc = os.path.join(self.tmp, "proc")
+        pred = os.path.join(self.tmp, "pred")
+        fd = os.path.join(pred, "PA", "fields")
+        os.makedirs(fd)
+        os.makedirs(os.path.join(pred, "groups"))
+        names, mats, rig = [], [], []
+        for i in range(3):
+            m = self._rigid(rng, shape)
+            rig.append(m.copy())
+            m[:3, :3] = m[:3, :3] @ np.diag(rng.uniform(0.93, 1.07, 3))
+            u = F.matrix_field(np.linalg.inv(m), shape)
+            n = "S%d_T1w" % i
+            os.makedirs(os.path.join(proc, n))
+            nib.save(nib.Nifti1Image(F.warp(base, u, 1), np.eye(4)), os.path.join(proc, n, "image.nii.gz"))
+            nib.save(nib.Nifti1Image(F.warp(lab0, u, 0), np.eye(4)), os.path.join(proc, n, "labels_synthseg.nii.gz"))
+            names.append(n)
+            mats.append(m)
+        np.savez(os.path.join(fd, "matrices.npz"), subjects=np.array(names), fwd_vox=np.stack(mats))
+        nib.save(nib.Nifti1Image(base, np.eye(4)), os.path.join(fd, "atlas.nii.gz"))
+        with open(os.path.join(pred, "groups", "PA.txt"), "w") as f:
+            f.write("\n".join(names) + "\n")
+        out = os.path.join(self.tmp, "pred_rc")
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(G.main(["recenter-matrices", "--pred", pred, "--out", out]), 0)
+        self.assertEqual(sorted(os.listdir(os.path.join(out, "PA", "fields"))), ["matrices.npz"])
+        self.assertTrue(os.path.isfile(os.path.join(out, "groups", "PA.txt")))
+        new = F.load_matrices(os.path.join(out, "PA", "fields", "matrices.npz"))
+        np.testing.assert_allclose(np.mean([new[n][0] for n in names], 0), np.eye(4), atol=1e-12)
+        for i, j in ((0, 1), (2, 0)):
+            np.testing.assert_allclose(new[names[j]][0] @ new[names[i]][1], mats[j] @ np.linalg.inv(mats[i]),
+                                       atol=1e-9)
+        # evaluation: pair metrics identical, centrality ~0 (and > 0 before)
+        res = {}
+        for tag, mpath in (("orig", os.path.join(fd, "matrices.npz")),
+                           ("rc", os.path.join(out, "PA", "fields", "matrices.npz"))):
+            o = os.path.join(self.tmp, "ev_" + tag)
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(eval_main(["run", "--processed-dir", proc, "--label-name", "synthseg", "--method", tag,
+                                            "--pairs", "all", "--matrices", mpath, "--out", o]), 0)
+            with open(os.path.join(o, "summary.json")) as f:
+                res[tag] = json.load(f)
+        self.assertGreater(res["orig"]["group"]["centrality_mean_mm"], 0.05)
+        self.assertLess(res["rc"]["group"]["centrality_mean_mm"], 1e-4)
+        for k in ("pair_dice", "pair_lncc"):
+            self.assertAlmostEqual(res["rc"]["pair_metrics"][k]["mean"], res["orig"]["pair_metrics"][k]["mean"],
+                                   places=6)
+        # rigid groups are refused unless --allow-rigid
+        np.savez(os.path.join(fd, "matrices.npz"), subjects=np.array(names), fwd_vox=np.stack(rig))
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(G.main(["recenter-matrices", "--pred", pred, "--out", out + "2"]), 2)
+            self.assertEqual(G.main(["recenter-matrices", "--pred", pred, "--out", out + "3", "--allow-rigid"]), 0)
+
     def test_evaluation_matrices_equal_dense(self):
         shape = (20, 22, 18)
         aff = np.eye(4)
