@@ -169,8 +169,11 @@ def cmd_extract(a):
     out = {"z_mm": z_mm.astype(np.float32), "z_index": ks.astype(np.int32), "spacing": np.asarray(spacing),
            "affine": aff, "candidates": np.asarray(cand), "candidate_subjects": np.asarray([subs[i]["subject"] for i in ci]),
            "n_subjects": np.int32(n)}
-    for key in ("disp_mean_mm", "rotation_deg", "translation_norm_mm", "scale_max_pct", "shear_max", "lost_frac"):
-        out["cand_" + key] = np.asarray([pert[d][key] if d in pert else np.nan for d in cand], np.float32)
+    for key in ("disp_mean_mm", "rotation_deg", "total_rotation_deg", "translation_norm_mm", "scale_max_pct",
+                "shear_max", "lost_frac"):
+        out["cand_" + key] = np.asarray([pert[d].get(key, np.nan) if d in pert else np.nan for d in cand], np.float32)
+    shared = [pert[d].get("shared_rotation_deg", 0.0) for d in dirs if d in pert]
+    out["shared_rotation_deg"] = np.float32(shared[0] if shared else 0.0)
     meta = {"processed_dir": os.path.abspath(a.processed_dir), "root": os.path.abspath(a.root),
             "label_name": a.label_name, "rows": [], "metrics": {}, "checks": {}}
 
@@ -357,7 +360,9 @@ def cmd_plot(a):
                 txt = "Dice %.3f" % m[a.label_metric]
             elif k < n_img and r == "identity" and a.annotate_inputs:
                 dm = float(d["cand_disp_mean_mm"][cases[k]])
-                rot = float(d["cand_rotation_deg"][cases[k]])
+                rot = float(d["cand_total_rotation_deg"][cases[k]]) if "cand_total_rotation_deg" in d else np.nan
+                if not np.isfinite(rot):
+                    rot = float(d["cand_rotation_deg"][cases[k]])
                 if np.isfinite(dm):
                     txt = "%.0f\u00b0, %.0f mm" % (rot, dm)
             if txt:

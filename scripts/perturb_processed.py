@@ -19,13 +19,18 @@ sphere, translation U(-t, t) mm per axis, log-scale U(-s, s) per axis, 3 shears 
 subject's brain centroid (labels > 0). Defaults = the AFFINE training ranges at every level
 (data_loading.params.DEFAULT_LINEAR_RANGES['affine']: 45 deg, 15 mm, ln 1.10, 0.05).
 
+--shared-rotation-deg A (default 0) adds ONE rotation G by exactly A degrees, the same for every
+subject (axis drawn from the seed, about the grid centre, no translation): P = G @ P_individual.
+Without it the group's central space stays near MNI (the individual draws average out); with it the
+central space is rotated by ~A degrees away from MNI.
+
 This resamples the processed image a second time (the processed LUMIR images were resampled once
 from native). Brain voxels mapped outside the 160 x 224 x 192 grid are lost (meta fov.lost_frac);
 the training augmentation has the same property.
 
     python scripts/perturb_processed.py --src $PROJ/data/processed/lumir_ants \
         --manifest $PROJ/data/npy_v3/export_manifest.csv --split val \
-        --out $PROJ/data/processed/lumir_ants_val_affpert45 --workers 8
+        --shared-rotation-deg 30 --out $PROJ/data/processed/lumir_ants_val_affpert45_rot30 --workers 8
 
 Python 3.8, numpy 1.21 / scipy 1.4 / nibabel 3.1 (tf10_nv.sif).
 """
@@ -84,6 +89,31 @@ def subject_id(src_dir, name):
     return name[:-4] if name.endswith("_T1w") else name
 
 
+def shared_rotation(seed, angle_deg, center):
+    """4x4 world rotation G (the SAME for every subject) by exactly ``angle_deg`` about an axis
+    uniform on the sphere drawn from the seed, about the fixed point ``center`` (no translation of
+    that point). Returns (G, axis)."""
+    import hashlib
+    h = hashlib.sha256(("%d:__shared_rotation__" % int(seed)).encode("utf-8")).hexdigest()
+    rng = np.random.RandomState(int(h[:8], 16))
+    axis = rng.normal(size=3)
+    axis /= np.linalg.norm(axis)
+    params = {"rotation_axis": axis.tolist(), "rotation_deg": float(angle_deg), "translation_mm": [0.0] * 3,
+              "log_scale": [0.0] * 3, "shear_xy_xz_yz": [0.0] * 3}
+    return perturbation_matrix(params, center), axis
+
+
+def rotation_angle_deg(A):
+    """Angle (deg) of the rotation factor R of the polar decomposition A = R S."""
+    from scipy.linalg import polar
+    R = polar(np.asarray(A, np.float64))[0]
+    return float(np.degrees(np.arccos(np.clip((np.trace(R) - 1.0) / 2.0, -1.0, 1.0))))
+
+
+def grid_center_world(aff, shape):
+    return (aff @ np.r_[(np.asarray(shape[:3], np.float64) - 1) / 2.0, 1.0])[:3]
+
+
 def _pull(vol, M, order, dtype):
     """out[v] = vol[M[:3,:3] v + M[:3,3]] (voxel map out -> in)."""
     return ndimage.affine_transform(vol, M[:3, :3], offset=M[:3, 3], output_shape=vol.shape, order=order,
@@ -96,7 +126,7 @@ def perturb_one(job):
     src_dir, out_dir = os.path.join(a.src, name), os.path.join(a.out, name)
     done = os.path.join(out_dir, "meta.json")
     cfg = {"seed": a.seed, "rotation_deg": a.rotation_deg, "translation_mm": a.translation_mm,
-           "log_scale": a.log_scale, "shear": a.shear}
+           "log_scale": a.log_scale, "shear": a.shear, "shared_rotation_deg": a.shared_rotation_deg}
     if os.path.isfile(done) and not a.overwrite:
         with open(done) as f:
             old = json.load(f)
@@ -121,7 +151,10 @@ def perturb_one(job):
     center = world.mean(0)
     subj = subject_id(src_dir, name)
     params = perturbation_params(cfg, subj)
-    P = perturbation_matrix(params, center)
+    P_ind = perturbation_matrix(params, center)
+    g_center = grid_center_world(aff, img.shape)
+    G, g_axis = shared_rotation(a.seed, a.shared_rotation_deg, g_center)
+    P = G @ P_ind                       # individual perturbation first, then the shared rotation
     # voxel pull map out -> in: aff^-1 P^-1 aff
     M = np.linalg.inv(aff) @ np.linalg.inv(P) @ aff
     # brain voxels after the map (forward push), FOV loss and displacement magnitude
@@ -145,6 +178,8 @@ def perturb_one(job):
     np.savetxt(os.path.join(out_dir, "perturbation_world.txt"), P, fmt="%.10f")
     rot = abs(params["rotation_deg"])
     summ = {"subject_dir": name, "subject": subj, "rotation_deg": rot,
+            "shared_rotation_deg": float(a.shared_rotation_deg),
+            "total_rotation_deg": rotation_angle_deg(P[:3, :3]),
             "translation_norm_mm": float(np.linalg.norm(params["translation_mm"])),
             "scale_max_pct": float(100.0 * np.max(np.abs(np.expm1(params["log_scale"])))),
             "shear_max": float(np.max(np.abs(params["shear_xy_xz_yz"]))),
@@ -154,8 +189,13 @@ def perturb_one(job):
                     "source_dir": os.path.abspath(src_dir)},
             "perturbation": {"config": cfg, "params": params, "about_mm": center.tolist(),
                              "matrix_world_ras": P.tolist(),
-                             "note": "out(y) = in(P^-1 y): P maps the source image to this image (RAS mm); "
-                                     "about_mm = source brain centroid (labels > 0)",
+                             "individual_matrix_world_ras": P_ind.tolist(),
+                             "shared": {"rotation_deg": float(a.shared_rotation_deg), "axis": g_axis.tolist(),
+                                        "about_mm": g_center.tolist(), "matrix_world_ras": G.tolist()},
+                             "note": "out(y) = in(P^-1 y): P = G @ P_individual maps the source image to this "
+                                     "image (RAS mm); P_individual about the source brain centroid "
+                                     "(labels > 0), G = shared rotation (same for every subject) about the "
+                                     "grid centre",
                              "parameterisation": "preprocessing.pipeline.perturbation_params/_matrix"},
             "interpolation": {"image": "trilinear (scipy order 1), clipped at 0", "labels": "nearest"},
             "fov": {"lost_frac": summ["lost_frac"], "label_voxels": lab_counts},
@@ -179,6 +219,10 @@ def main(argv=None):
     p.add_argument("--seed", type=int, default=2026)
     for k, v in AFFINE_TRAIN_RANGES.items():
         p.add_argument("--" + k.replace("_", "-"), type=float, default=v, help="half-width (default %(default).4g)")
+    p.add_argument("--shared-rotation-deg", type=float, default=0.0,
+                   help="rotation by exactly this angle applied to EVERY subject after its own perturbation "
+                        "(axis drawn from --seed, about the grid centre; moves the group's central space off "
+                        "MNI). Default 0 = none")
     p.add_argument("--workers", type=int, default=1)
     p.add_argument("--overwrite", action="store_true")
     a = p.parse_args(argv)
@@ -187,8 +231,9 @@ def main(argv=None):
         raise SystemExit("--out must differ from --src")
     names = select_dirs(a)
     os.makedirs(a.out, exist_ok=True)
-    print("%d subjects: %s -> %s (seed %d, rot %.1f deg, trans %.1f mm, log-scale %.4f, shear %.3f)"
-          % (len(names), a.src, a.out, a.seed, a.rotation_deg, a.translation_mm, a.log_scale, a.shear), flush=True)
+    print("%d subjects: %s -> %s (seed %d, rot %.1f deg, trans %.1f mm, log-scale %.4f, shear %.3f, "
+          "shared rotation %.1f deg)" % (len(names), a.src, a.out, a.seed, a.rotation_deg, a.translation_mm,
+                                         a.log_scale, a.shear, a.shared_rotation_deg), flush=True)
     jobs = [(a, n) for n in names]
     if a.workers > 1:
         import multiprocessing as mp

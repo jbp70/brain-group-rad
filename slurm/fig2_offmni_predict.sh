@@ -28,8 +28,8 @@
 #
 # Environment overrides (exported by sbatch):
 #   CKPT        default $PROJ/results/r1_v3_gB/ckpt/last (final model, v3 config B)
-#   PROCESSED   default $PROJ/data/processed/lumir_ants_val_affpert45
-#   OUT         default $PROJ/results/fig2_offmni/v3_gB_lumirval_affpert45
+#   PROCESSED   default $PROJ/data/processed/lumir_ants_val_affpert45_rot30
+#   OUT         default $PROJ/results/fig2_offmni/v3_gB_lumirval_affpert45_rot30
 #   LABEL_NAME  default synthseg
 #   TTA         default flip8 (final inference setting)
 #   RECENTER    default 2 (affine+deform only); empty = off
@@ -44,8 +44,8 @@ PROJ=${PROJ:-/autofs/space/crater_001/users/jn85/BrainRegProjects/GroupwiseReg}
 REPO=${REPO:-$PROJ/brain-group-rad}
 SIF=${SIF:-/autofs/space/crater_001/users/jn85/Singularity_Files/tf10_nv.sif}
 CKPT=${CKPT:-$PROJ/results/r1_v3_gB/ckpt/last}
-PROCESSED=${PROCESSED:-$PROJ/data/processed/lumir_ants_val_affpert45}
-OUT=${OUT:-$PROJ/results/fig2_offmni/v3_gB_lumirval_affpert45}
+PROCESSED=${PROCESSED:-$PROJ/data/processed/lumir_ants_val_affpert45_rot30}
+OUT=${OUT:-$PROJ/results/fig2_offmni/v3_gB_lumirval_affpert45_rot30}
 LABEL_NAME=${LABEL_NAME:-synthseg}
 TTA=${TTA:-flip8}
 RECENTER=${RECENTER-2}
