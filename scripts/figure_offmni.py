@@ -274,13 +274,46 @@ def _bbox(panels, thr, margin):
             slice(max(c.min() - margin, 0), c.max() + margin + 1))
 
 
-def label_rgb(labels, agree, lut_ids, lut_rgb, style):
-    idx = np.searchsorted(lut_ids, labels)
-    idx = np.clip(idx, 0, len(lut_ids) - 1)
+LABEL_STYLES = ("agreement", "plain", "agreement-map", "contours")
+LABEL_TITLES = {"agreement": "Label map", "plain": "Label map", "agreement-map": "Agreement",
+                "contours": "Label map"}
+
+
+def _lut_lookup(labels, lut_ids, lut_rgb):
+    idx = np.clip(np.searchsorted(lut_ids, labels), 0, len(lut_ids) - 1)
     rgb = lut_rgb[idx].astype(np.float32)
     rgb[lut_ids[idx] != labels] = 0.0
+    return rgb
+
+
+def label_rgb(labels, agree, lut_ids, lut_rgb, style, mean=None, vmax=1.0, cmap="magma"):
+    """[X, Y] majority labels / agreement (/ mean image) -> [X, Y, 3] RGB panel.
+
+    agreement      label colour x fraction of subjects agreeing with the majority label
+    plain          label colour of the majority label
+    agreement-map  agreement fraction in ``cmap`` (0 = black), background (majority label 0) black
+    contours       boundaries of the majority labels in label colour over the grey mean image
+    """
+    labels = np.asarray(labels)
+    agree = np.asarray(agree, np.float32)
+    if style == "agreement-map":
+        from matplotlib import cm
+        rgb = np.asarray(cm.get_cmap(cmap)(np.clip(agree, 0, 1)), np.float32)[..., :3]
+        rgb[labels == 0] = 0.0
+        return rgb
+    rgb = _lut_lookup(labels, lut_ids, lut_rgb)
     if style == "agreement":
-        rgb = rgb * np.asarray(agree, np.float32)[..., None]
+        rgb = rgb * agree[..., None]
+    elif style == "contours":
+        g = np.clip(np.asarray(mean, np.float32) / float(vmax), 0, 1)
+        edge = np.zeros(labels.shape, bool)
+        for ax in (0, 1):
+            for s in (1, -1):
+                edge |= labels != np.roll(labels, s, axis=ax)
+        edge &= labels > 0
+        out = np.repeat(g[..., None], 3, axis=-1)
+        out[edge] = rgb[edge]
+        rgb = out
     return np.clip(rgb, 0, 1)
 
 
@@ -310,7 +343,8 @@ def cmd_plot(a):
         imgs = [_display(d[r + "_images"][c][:, :, zi].astype(np.float32), a.neurological) for c in cases]
         mean = _display(d[r + "_mean"][:, :, zi], a.neurological)
         lab = label_rgb(d[r + "_labels"][:, :, zi], d[r + "_agree"][:, :, zi].astype(np.float32),
-                        lut_ids, lut_rgb, a.label_style)
+                        lut_ids, lut_rgb, a.label_style, mean=d[r + "_mean"][:, :, zi], vmax=a.vmax,
+                        cmap=a.agreement_cmap)
         lab = _display_rgb(lab, a.neurological)
         grid.append((imgs, mean, lab))
     if a.crop:
@@ -321,14 +355,18 @@ def cmd_plot(a):
     n_img = len(cases)
     gap = a.gap
     ratios = [1.0] * n_img + [gap, 1.0, 1.0]
+    cbar = a.label_style == "agreement-map"
+    if cbar:
+        ratios += [0.05, 0.07]                        # spacer + colour bar
     label_w = 0.22                                    # inches for the row titles
-    panel_w = (a.width_in - label_w) / sum(ratios)
+    panel_w = (a.width_in - label_w - (0.3 if cbar else 0.0)) / sum(ratios)
     panel_h = panel_w * h / float(w)
     head_h = 0.18 if a.column_titles else 0.02
     fig_h = head_h + panel_h * len(rows) * (1 + a.hspace) + 0.02
     fig = plt.figure(figsize=(a.width_in, fig_h))
     gs = gridspec.GridSpec(len(rows), len(ratios), figure=fig, width_ratios=ratios,
-                           left=label_w / a.width_in, right=1.0, bottom=0.01 / fig_h,
+                           left=label_w / a.width_in, right=1.0 - (0.3 / a.width_in if cbar else 0.0),
+                           bottom=0.01 / fig_h,
                            top=1.0 - head_h / fig_h, wspace=0.03, hspace=a.hspace)
     fs = a.fontsize
     for ri, (r, (imgs, mean, lab)) in enumerate(zip(rows, grid)):
@@ -351,7 +389,7 @@ def cmd_plot(a):
                 if k < n_img:
                     title = a.case_title % (k + 1) if a.case_title else ""
                 else:
-                    title = "Mean image" if col == n_img + 1 else "Label map"
+                    title = "Mean image" if col == n_img + 1 else LABEL_TITLES[a.label_style]
                 ax.set_title(title, fontsize=fs + 1, pad=2)
             txt = None
             if k == n_img and m.get(a.image_metric) is not None:
@@ -369,6 +407,14 @@ def cmd_plot(a):
                 ax.text(0.03, 0.03, txt, transform=ax.transAxes, color="white", fontsize=fs,
                         ha="left", va="bottom",
                         bbox=dict(boxstyle="square,pad=0.15", facecolor="black", edgecolor="none", alpha=0.65))
+    if cbar:
+        from matplotlib import cm, colors
+        cax = fig.add_subplot(gs[1:len(rows) - 1, len(ratios) - 1] if len(rows) > 2 else gs[:, len(ratios) - 1])
+        cb = fig.colorbar(cm.ScalarMappable(norm=colors.Normalize(0, 1), cmap=a.agreement_cmap), cax=cax)
+        cb.set_ticks([0, 0.5, 1])
+        cb.ax.tick_params(labelsize=fs, length=2, pad=1)
+        cb.outline.set_visible(False)
+        cb.set_label("Label agreement", fontsize=fs, labelpad=2)
     fig.savefig(a.out, dpi=a.dpi, facecolor="white")
     print("wrote %s (%.2f x %.2f in, %d dpi); z = %.0f mm, cases %s, rows %s"
           % (a.out, a.width_in, fig_h, a.dpi, z_mm[zi], [str(d["candidates"][c]) for c in cases], rows))
@@ -411,8 +457,11 @@ def build_parser():
     q.add_argument("--dpi", type=int, default=600)
     q.add_argument("--width-in", type=float, default=6.5, help="figure width (MIDL text width ~6.5 in)")
     q.add_argument("--vmax", type=float, default=0.9)
-    q.add_argument("--label-style", choices=("agreement", "plain"), default="agreement",
-                   help="agreement: label colour scaled by the fraction of subjects agreeing with the majority")
+    q.add_argument("--label-style", choices=LABEL_STYLES, default="agreement",
+                   help="agreement: majority label colour x fraction of subjects agreeing; plain: majority "
+                        "label colour; agreement-map: the agreement fraction alone (colour bar); contours: "
+                        "majority-label boundaries over the mean image")
+    q.add_argument("--agreement-cmap", default="magma", help="colour map of --label-style agreement-map")
     q.add_argument("--image-metric", default="template_lncc")
     q.add_argument("--label-metric", default="template_dice")
     q.add_argument("--neurological", action="store_true", help="subject's right on the right")
