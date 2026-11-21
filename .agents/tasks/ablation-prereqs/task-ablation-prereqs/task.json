@@ -1,7 +1,0 @@
-{
-  "task_id": "task-ablation-prereqs",
-  "task_description": "Code and launch scripts for three paper ablations: (1) group-block placement --group-config none|E (plus existing A|B) through model build, width presets, memory model, streaming inference, cascade and predict; (2) instance norm verified end to end (AMP, cascade, L1, streaming, predict) with recal skipped; (3) from-scratch full-resolution L1 launch script at matched GPU-hours (63.85 h). Plan: .agents/tasks/ablation-prereqs/plan.md; mapping: .agents/tasks/ablation-prereqs/linear-heads.md.",
-  "status": "pending",
-  "feature_order": ["FEAT-001", "FEAT-002", "FEAT-003"],
-  "blocked_reason": null
-}
