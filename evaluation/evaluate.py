@@ -34,7 +34,9 @@ and the atlas segmentation to the majority vote, as for any method without them.
 see fields.load_matrices); the dense fields are built from them in memory.
 
 Outputs in --out: per_subject.csv, per_pair.csv, per_label.csv, per_subject_label.csv (template
-Dice per subject and label: subject, template_dice_<label>, ...), summary.json (mean/std/median/
+Dice per subject and label: subject, template_dice_<label>, ...), per_subject_label_transfer.csv,
+per_subject_label_pair.csv (pair Dice per label averaged over the pairs with the subject as the
+moving image; only with pairs), summary.json (mean/std/median/
 min/max per metric + group metrics + inputs and convention), labels.txt.
 
     python -m evaluation check-convention --processed-dir P --fwd 'F/{subject}_fwd.nii.gz' \\
@@ -438,6 +440,25 @@ def cmd_run(a) -> int:
                [dict([("subject", subs[i]["subject"])]
                      + [("template_dice_%d" % lab, float(per_label[("template", i)][li]))
                         for li, lab in enumerate(lab_list)]) for i in range(n)])
+    # per-subject per-label transfer Dice, and pair Dice averaged over the pairs with subject i as
+    # the MOVING image (same per-subject convention as the pair statistics); NaN-aware means.
+    _write_csv(os.path.join(a.out, "per_subject_label_transfer.csv"),
+               [dict([("subject", subs[i]["subject"])]
+                     + [("transfer_dice_%d" % lab, float(per_label[("transfer", i)][li]))
+                        for li, lab in enumerate(lab_list)]) for i in range(n)])
+    if prow:
+        acc: Dict[int, List[np.ndarray]] = {}
+        for key, d in per_label.items():
+            if key[0] == "pair":
+                acc.setdefault(key[1], []).append(d)
+        prows = []
+        for i in sorted(acc):
+            st = np.stack(acc[i]).astype(np.float64)
+            cnt = np.isfinite(st).sum(axis=0)
+            mean = np.where(cnt > 0, np.nansum(st, axis=0) / np.maximum(cnt, 1), np.nan)
+            prows.append(dict([("subject", subs[i]["subject"]), ("n_pairs", len(acc[i]))]
+                              + [("pair_dice_%d" % lab, float(mean[li])) for li, lab in enumerate(lab_list)]))
+        _write_csv(os.path.join(a.out, "per_subject_label_pair.csv"), prows)
     summary = {"method": a.method, "n_subjects": n, "n_pairs": len(prow), "n_labels": len(lab_list),
                "identity": a.identity,
                "convention": None if (a.identity or a.matrices) else conv.as_dict(),
