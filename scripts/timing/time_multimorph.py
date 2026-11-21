@@ -39,6 +39,8 @@ def main():
     ap.add_argument("--seg-header", default="segmentation_path")
     ap.add_argument("--reps", type=int, default=2)
     ap.add_argument("--cpu-fallback", action="store_true")
+    ap.add_argument("--device", default="auto", choices=("auto", "cpu"),
+                    help="auto: CUDA first (then the CPU fallback); cpu: CPU only (one pass)")
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
     sys.path.insert(0, os.path.join(a.multimorph_dir, "src"))
@@ -95,6 +97,12 @@ def main():
             del out, fwd, inv, warped, atlas, wseg, aseg, image, seg
         return {"device": str(device), "model_load_s": t_load, "threads": torch.get_num_threads(), "reps": reps}
 
+    if a.device == "cpu":
+        result["runs"].append(time_on(torch.device("cpu"), 1))
+        with open(a.out, "w") as fh:
+            json.dump(result, fh, indent=1)
+        print("done -> %s" % a.out)
+        return
     try:
         result["runs"].append(time_on(torch.device("cuda"), a.reps))
     except RuntimeError as e:
