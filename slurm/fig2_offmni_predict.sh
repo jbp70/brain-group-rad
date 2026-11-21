@@ -37,6 +37,9 @@
 #   ROWS        default "rigid affine affine+deform"
 #   N_CHECK     default 4;  GRID_REF default $PROJ/data/target_grid/target_grid.json
 #   EXTRACT_ARGS  more flags for the extract step (e.g. "--n-candidates 10")
+#   CHECK_EXTRA   more flags for the check-streaming gates, e.g. "--tol-field-max-mm 0.002" when the
+#               measured float32 differences are rounding-sized (tiny mean, max just over the bound);
+#               record the reason. Never drop the gate.
 #
 #   sbatch slurm/fig2_offmni_predict.sh
 set -uo pipefail
@@ -54,6 +57,7 @@ ROWS=${ROWS:-"rigid affine affine+deform"}
 N_CHECK=${N_CHECK:-4}
 GRID_REF=${GRID_REF:-$PROJ/data/target_grid/target_grid.json}
 EXTRACT_ARGS=${EXTRACT_ARGS:-}
+CHECK_EXTRA=${CHECK_EXTRA:-}
 CHECK_CHUNKS="--chunk-l4 3 --chunk-l2 3 --chunk-l1 3"
 export TMPDIR=${SCRATCH_ROOT:-/scratch}/${SLURM_JOB_ID:-manual}
 mkdir -p "$TMPDIR" "$OUT/eval"
@@ -74,7 +78,7 @@ for B in $ROWS; do
     fi
     echo "=== 1 check-streaming float32 ($B, gate) $(date +%T) ==="
     # shellcheck disable=SC2086
-    "${GPU[@]}" predict.py check-streaming --checkpoint "$CKPT" --processed-dir "$PROCESSED" --label-name "$LABEL_NAME" --grid-reference "$GRID_REF" --precision float32 --n-subjects "$N_CHECK" $CHECK_CHUNKS --branches "$B" --out "$OUT/$R/check_streaming_f32.json" </dev/null || exit $?
+    "${GPU[@]}" predict.py check-streaming --checkpoint "$CKPT" --processed-dir "$PROCESSED" --label-name "$LABEL_NAME" --grid-reference "$GRID_REF" --precision float32 --n-subjects "$N_CHECK" $CHECK_CHUNKS $CHECK_EXTRA --branches "$B" --out "$OUT/$R/check_streaming_f32.json" </dev/null || exit $?
     FLAGS="--tta $TTA"
     if [ "$B" = "affine+deform" ] && [ -n "$RECENTER" ]; then FLAGS="$FLAGS --recenter $RECENTER"; fi
     echo "=== 2 predict.py run ($B, $FLAGS) $(date +%T) ==="
