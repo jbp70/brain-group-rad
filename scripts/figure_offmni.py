@@ -367,7 +367,8 @@ def cmd_plot(a):
                     txt = "%.0f\u00b0, %.0f mm" % (rot, dm)
             if txt:
                 ax.text(0.03, 0.03, txt, transform=ax.transAxes, color="white", fontsize=fs,
-                        ha="left", va="bottom")
+                        ha="left", va="bottom",
+                        bbox=dict(boxstyle="square,pad=0.15", facecolor="black", edgecolor="none", alpha=0.65))
     fig.savefig(a.out, dpi=a.dpi, facecolor="white")
     print("wrote %s (%.2f x %.2f in, %d dpi); z = %.0f mm, cases %s, rows %s"
           % (a.out, a.width_in, fig_h, a.dpi, z_mm[zi], [str(d["candidates"][c]) for c in cases], rows))
