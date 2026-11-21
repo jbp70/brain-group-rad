@@ -43,6 +43,66 @@ def git_head():
         return None
 
 
+def fields_only_rep(PR, CN, runner, args, images, shape, spacing, rounds):
+    """One timed run that only produces the canonical fwd / inv fields (host numpy), plus the
+    re-centering rounds when ``rounds`` > 0 (originals kept in RAM instead of $TMPDIR .npy files;
+    the subject's own image stands in for its moved image, which only feeds the atlas-mask
+    diagnostics of the record, not the correction)."""
+    import numpy as np
+    from inference import recenter as RC
+
+    class RamRecenterer(RC.Recenterer):
+        def __init__(self, *x, **k):
+            super(RamRecenterer, self).__init__(*x, **k)
+            self.mem = {}
+
+        def add(self, i, fwd, inv, moved):
+            self.mem[(int(i), "fwd")] = np.asarray(fwd, np.float32)
+            self.mem[(int(i), "inv")] = np.asarray(inv, np.float32)
+            self.sum += fwd
+            self.count += np.asarray(moved) > 0
+            self.seen[int(i)] = True
+
+        def load(self, i, kind):
+            return self.mem[(int(i), kind)]
+
+    n = images.shape[0]
+    rc = RamRecenterer(rounds, n, shape, spacing, os.environ.get("TMPDIR") or tempfile.gettempdir()) if rounds else None
+    out = {}
+
+    def sink(i0, i1, res):
+        for k in range(i1 - i0):
+            i = i0 + k
+            fwd_t, inv_t = CN.to_canonical(args.branches, PR._slice(res["A"], k), PR._slice(res["U1"], k),
+                                           PR._slice(res["U1_inv"], k), tuple(shape), tuple(spacing))
+            fwd, inv = fwd_t.numpy()[0], inv_t.numpy()[0]
+            if rc is not None:
+                rc.add(i, fwd, inv, images[i])
+            else:
+                out[i] = (fwd, inv)
+
+    t0 = time.time()
+    runner.run(images, args.branches, sink)
+    t_model = time.time() - t0
+    t1 = time.time()
+    if rc is not None:
+        final = {}
+
+        def keep(i, fwd_c, inv_c):
+            final[i] = (fwd_c, inv_c)
+            return images[i]
+        rc.run(keep, images)
+        out = final
+    t_rc = time.time() - t1
+    total = time.time() - t0
+    nonfinite = int(sum(np.count_nonzero(~np.isfinite(f)) + np.count_nonzero(~np.isfinite(v))
+                        for f, v in out.values()))
+    if rc is not None:
+        rc.close()
+    del out
+    return {"total_s": total, "model_s": t_model, "recenter_s": t_rc, "nonfinite": nonfinite}
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--checkpoint", required=True)
@@ -57,6 +117,10 @@ def main():
     ap.add_argument("--subjects-file", default=None)
     ap.add_argument("--reps", type=int, default=2)
     ap.add_argument("--label", default=None, help="method label stored in the JSON")
+    ap.add_argument("--fields-only", action="store_true",
+                    help="time only the generation of the full-resolution fwd / inv fields (in host "
+                         "memory; with --recenter K also the K correction rounds, fields kept in RAM): "
+                         "no image / label warping, no atlas")
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
     if bool(a.subjects_file) == bool(a.groups_dir):
@@ -113,10 +177,25 @@ def main():
               "definition": "images in memory -> full-res fwd/inv fields, moved images, warped labels, "
                             "atlas + atlas_seg (+ re-centering); no disk writes; model loaded once",
               "groups": []}
+    if a.fields_only:
+        result["definition"] = ("images in memory -> full-resolution fwd + inv fields in host memory "
+                                "(+ re-centering rounds on the fields, RAM); no image / label warping, no atlas; "
+                                "model loaded once")
     for g, f in groups:
         args.subjects_file = f
         subs, images, labels, shape, aff, spacing = PR._read_subjects(args, rec)
         reps = []
+        if a.fields_only:
+            for r in range(a.reps):
+                reps.append(fields_only_rep(PR, CN, runner, args, images, shape, spacing, a.recenter))
+                print("%s rep %d (fields only): %d images, total %.1f s (model %.1f, recenter %.1f)"
+                      % (g, r, len(subs), reps[-1]["total_s"], reps[-1]["model_s"], reps[-1]["recenter_s"]),
+                      flush=True)
+            result["groups"].append({"group": g, "n": len(subs), "reps": reps})
+            del images, labels
+            with open(a.out, "w") as fh:
+                json.dump(result, fh, indent=1)
+            continue
         for r in range(a.reps):
             rc = None
             rc_root = None

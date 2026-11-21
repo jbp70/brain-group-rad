@@ -25,6 +25,9 @@
 #   STEPS  subset of: ours ours_tta multimorph bm_tps (default all)
 #   CKPT   default $PROJ/results/r1_v3_gB/ckpt/last    PROCESSED  default $PROJ/data/processed/mindboggle
 #   OUT    default $PROJ/results/timing/deform_<job id>
+#   FIELDS_ONLY=1  time only the generation of the full-resolution fwd / inv fields (ours: + re-centering
+#          rounds on the fields; no image / label warping, no atlas) for every method
+#   MM_CPU_FALLBACK  1 (default) = one CPU pass of MultiMorph if CUDA runs out of memory; 0 = none
 set -uo pipefail
 PROJ=/autofs/space/crater_001/users/jn85/BrainRegProjects/GroupwiseReg
 REPO=${REPO:-$PROJ/brain-group-rad}
@@ -33,6 +36,10 @@ PROCESSED=${PROCESSED:-$PROJ/data/processed/mindboggle}
 GRID_REF=${GRID_REF:-$PROJ/data/target_grid/target_grid.json}
 REPS=${REPS:-2}
 STEPS=${STEPS:-"ours ours_tta multimorph bm_tps"}
+FIELDS_ONLY=${FIELDS_ONLY:-}
+MM_CPU_FALLBACK=${MM_CPU_FALLBACK:-1}
+FO=""; [ "$FIELDS_ONLY" = 1 ] && FO=--fields-only
+MMFB=""; [ "$MM_CPU_FALLBACK" = 1 ] && MMFB=--cpu-fallback
 OUT=${OUT:-$PROJ/results/timing/deform_${SLURM_JOB_ID:-manual}}
 TF_SIF=/autofs/space/crater_001/users/jn85/Singularity_Files/tf10_nv.sif
 PT_SIF=/autofs/space/crater_001/users/jn85/Singularity_Files/pt_nv.sif
@@ -62,15 +69,15 @@ for s in $STEPS; do
             tta=none; [ "$s" = ours_tta ] && tta=flip8
             "${TF[@]}" scripts/timing/time_ours.py --checkpoint "$CKPT" --processed-dir "$PROCESSED" \
                 --label-name dkt31aseg --grid-reference "$GRID_REF" --branches deform --tta "$tta" \
-                --recenter 2 --subjects-file "$SUBJ" --reps "$REPS" --label "$s" --out "$OUT/$s.json" </dev/null ;;
+                --recenter 2 --subjects-file "$SUBJ" --reps "$REPS" --label "$s" $FO --out "$OUT/$s.json" </dev/null ;;
         multimorph)
             "${PT[@]}" scripts/timing/time_multimorph.py --multimorph-dir "$MM" --csv "$MM/mindboggle_data.csv" \
-                --model "$MM/trained_models/model_cvpr.pt" --reps "$REPS" --cpu-fallback \
+                --model "$MM/trained_models/model_cvpr.pt" --reps "$REPS" $MMFB $FO \
                 --out "$OUT/multimorph.json" </dev/null ;;
         bm_tps)
             "${PT[@]}" scripts/timing/time_brainmorph.py --keymorph-dir "$BM/keymorph" \
                 --weights "$BM/weights/foundation-numkey512-numlevels6.pth.tar" --processed-dir "$PROCESSED" \
-                --label-name dkt31aseg --align tps_0 --subjects-file "$SUBJ" --reps "$REPS" \
+                --label-name dkt31aseg --align tps_0 --subjects-file "$SUBJ" --reps "$REPS" $FO \
                 --out "$OUT/bm_tps.json" </dev/null ;;
         *) echo "unknown step $s"; false ;;
     esac

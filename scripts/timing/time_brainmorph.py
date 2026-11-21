@@ -37,6 +37,32 @@ def gpu_name():
         return None
 
 
+def fields_only(subs, cache, align, geom, kp_fn, device, num_iters, chunk):
+    """The field part of RB.run: keypoints of every image, groupwise fit, full-resolution fwd / inv
+    fields of every subject (host numpy, as RB.run produces them); no warping, no atlas."""
+    t0 = time.time()
+    pts = []
+    for i, s in enumerate(subs):
+        img = cache[s["image"]][0]
+        with torch.no_grad():
+            p, _ = kp_fn(i, geom.pad_image(np.asarray(img, np.float32)))
+        pts.append(p.detach().float())
+    points = torch.cat(pts, 0)
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    t_kp = time.time() - t0
+    mean, _ = RB.groupwise(points, align, num_iters, None)
+    fields = []
+    for i in range(len(subs)):
+        tr = RB.SubjectTransform(align, points[i:i + 1], mean, geom, device, chunk, None)
+        fields.append(tr.fields())
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    total = time.time() - t0
+    del fields
+    return {"total_s": total, "keypoints_s": t_kp, "fit_and_fields_s": total - t_kp}
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--keymorph-dir", required=True)
@@ -54,6 +80,8 @@ def main():
     ap.add_argument("--subjects-file", default=None)
     ap.add_argument("--reps", type=int, default=2)
     ap.add_argument("--device", default="cuda")
+    ap.add_argument("--fields-only", action="store_true",
+                    help="time only keypoints + fit + full-resolution fwd / inv fields (no warping, no atlas)")
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
     if bool(a.subjects_file) == bool(a.groups_dir):
@@ -94,6 +122,17 @@ def main():
             img0, aff0 = cache[subs[0]["image"]]
             geom = RB.Geometry(img0.shape[:3], aff0, a.pad_to)
         reps = []
+        if a.fields_only:
+            result["definition"] = ("images in memory -> keypoints, groupwise fit, full-resolution fwd + inv "
+                                    "fields; no warping, no atlas; network loaded once")
+            for r in range(a.reps):
+                reps.append(fields_only(subs, cache, a.align, geom, kp_fn, a.device, a.num_iters, a.tps_chunk))
+                print("%s rep %d (fields only): %d images, total %.1f s (keypoints %.1f)"
+                      % (g, r, len(subs), reps[-1]["total_s"], reps[-1]["keypoints_s"]), flush=True)
+            result["groups"].append({"group": g, "n": len(subs), "reps": reps})
+            with open(a.out, "w") as fh:
+                json.dump(result, fh, indent=1)
+            continue
         for r in range(a.reps):
             out = tempfile.mkdtemp(prefix="g_", dir=tmp)
             if torch.cuda.is_available():

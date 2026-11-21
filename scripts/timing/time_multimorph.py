@@ -39,6 +39,9 @@ def main():
     ap.add_argument("--seg-header", default="segmentation_path")
     ap.add_argument("--reps", type=int, default=2)
     ap.add_argument("--cpu-fallback", action="store_true")
+    ap.add_argument("--fields-only", action="store_true",
+                    help="time only the forward pass (fwd + inv full-resolution fields) and the copy of "
+                         "the fields to the host; no image / segmentation warping, no atlas")
     ap.add_argument("--device", default="auto", choices=("auto", "cpu"),
                     help="auto: CUDA first (then the CPU fallback); cpu: CPU only (one pass)")
     ap.add_argument("--out", required=True)
@@ -64,9 +67,11 @@ def main():
     t_read = time.time() - t
     n = int(image_cpu.shape[1])
     result = {"method": "multimorph", "n": n, "img_size": list(img_size), "gpu": gpu_name(),
-              "torch": torch.__version__, "read_s": t_read,
-              "definition": "group in memory -> one forward pass (fwd + inv fields), warped images, atlas, "
-                            "warped segmentations + atlas_seg, fields copied to host; model loaded once",
+              "torch": torch.__version__, "read_s": t_read, "fields_only": bool(a.fields_only),
+              "definition": ("group in memory -> one forward pass (fwd + inv full-resolution fields) copied "
+                             "to host; no warping, no atlas" if a.fields_only else
+                             "group in memory -> one forward pass (fwd + inv fields), warped images, atlas, "
+                             "warped segmentations + atlas_seg, fields copied to host") + "; model loaded once",
               "runs": []}
 
     def time_on(device, n_reps):
@@ -82,12 +87,16 @@ def main():
             t0 = time.time()
             with torch.no_grad():
                 image = image_cpu.to(device)
-                seg = seg_cpu.to(device)
                 fwd, inv = model(image)
-                warped = warp_layer(image, fwd)
-                atlas = torch.mean(warped, dim=1, keepdim=True)
-                wseg, aseg = warp_segmentation(segmentations=seg, warps=fwd, interpolation_mode="nearest")
-                out = [x.cpu() for x in (fwd, inv, warped, atlas, wseg, aseg)]
+                if a.fields_only:
+                    out = [x.cpu() for x in (fwd, inv)]
+                    seg = warped = atlas = wseg = aseg = None
+                else:
+                    seg = seg_cpu.to(device)
+                    warped = warp_layer(image, fwd)
+                    atlas = torch.mean(warped, dim=1, keepdim=True)
+                    wseg, aseg = warp_segmentation(segmentations=seg, warps=fwd, interpolation_mode="nearest")
+                    out = [x.cpu() for x in (fwd, inv, warped, atlas, wseg, aseg)]
             if device.type == "cuda":
                 torch.cuda.synchronize()
             total = time.time() - t0
