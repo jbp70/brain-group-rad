@@ -117,6 +117,11 @@ def main():
     ap.add_argument("--subjects-file", default=None)
     ap.add_argument("--reps", type=int, default=2)
     ap.add_argument("--label", default=None, help="method label stored in the JSON")
+    ap.add_argument("--device", default="gpu", choices=("gpu", "cpu"))
+    ap.add_argument("--precision", default="checkpoint", choices=("checkpoint", "float32"),
+                    help="float32 for CPU runs (mixed_float16 has no fast CPU kernels)")
+    ap.add_argument("--threads", type=int, default=0,
+                    help="TF intra-op threads (0 = TF default); set before any TF op")
     ap.add_argument("--fields-only", action="store_true",
                     help="time only the generation of the full-resolution fwd / inv fields (in host "
                          "memory; with --recenter K also the K correction rounds, fields kept in RAM): "
@@ -140,7 +145,12 @@ def main():
         argv += ["--grid-reference", a.grid_reference]
     if a.recenter:
         argv += ["--recenter", str(a.recenter)]
+    argv += ["--device", a.device, "--precision", a.precision]
     args = cli.parse_args(argv)
+    if a.threads:
+        import tensorflow as tf
+        tf.config.threading.set_intra_op_parallelism_threads(a.threads)
+        tf.config.threading.set_inter_op_parallelism_threads(2)
     PR.setup_device(args)
     import numpy as np
     import tensorflow as tf
@@ -172,7 +182,9 @@ def main():
     runner = RN.StreamedRunner(loaded, store, chunks={"l1": args.chunk_l1, "l2": args.chunk_l2,
                                                       "l4": args.chunk_l4}, plan=plan, tta=tta_cfg)
     result = {"method": a.label or "ours", "branches": a.branches, "tta": a.tta, "recenter": a.recenter,
-              "checkpoint": a.checkpoint, "gpu": gpu_name(), "repo": git_head(), "model_load_s": t_load,
+              "checkpoint": a.checkpoint, "gpu": gpu_name() if a.device == "gpu" else None,
+              "device": a.device, "precision": a.precision, "threads": a.threads,
+              "repo": git_head(), "model_load_s": t_load,
               "store": {"kind": store.kind, "estimate_gb": est},
               "definition": "images in memory -> full-res fwd/inv fields, moved images, warped labels, "
                             "atlas + atlas_seg (+ re-centering); no disk writes; model loaded once",
