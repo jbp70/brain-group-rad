@@ -12,6 +12,7 @@ BLOCKS = ("single", "residual")
 CONV_NORMS = ("batch", "instance", "none")
 DENSE_NORMS = ("layer", "batch", "none")
 HEAD_ACTIVATIONS = ("relu", "none")
+LINEAR_POOLS = ("flatten", "gap")
 
 
 @dataclasses.dataclass
@@ -33,6 +34,12 @@ class ModelConfig:
     group_config: str = "A"
     # Group concat at the first dense layer too (doubles it: 10.3 M -> 20.6 M; design v3.2).
     dense_group_concat_first: bool = False
+    # Bottleneck -> dense vector of the linear decoder (.agents/tasks/linear-gap/):
+    #   'flatten' (default) 1x1 reductions, then flatten the 5x7x6xreductions[-1] bottleneck
+    #   'gap'     global average pooling of the encoder bottleneck [N, 5, 7, 6, filters[-1]] over
+    #             the spatial axes -> [N, filters[-1]]; no reductions are built (`reductions` is
+    #             ignored), the dense blocks and heads are unchanged.
+    linear_pool: str = "flatten"
     # Norm of the conv blocks (encoder and 1x1 reductions): 'batch' | 'instance' | 'none'.
     norm: str = "batch"
     # Norm of the dense blocks and the pre-head norm-act: 'layer' | 'batch' | 'none' (design 4.4,
@@ -111,6 +118,8 @@ class ModelConfig:
         if self.dense_group_concat_first and not self.group_decoders():
             raise ValueError("dense_group_concat_first needs grouped decoders (group_config A "
                              "or B), got group_config {!r}".format(self.group_config))
+        if self.linear_pool not in LINEAR_POOLS:
+            raise ValueError("linear_pool must be one of {}".format(LINEAR_POOLS))
         if self.block not in BLOCKS:
             raise ValueError("block must be one of {}".format(BLOCKS))
         if self.norm not in CONV_NORMS:

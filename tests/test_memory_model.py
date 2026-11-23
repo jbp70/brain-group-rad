@@ -628,5 +628,34 @@ class TestGroupConfigs(_Base):
         self.assertLess(p["none"], p["B"])
 
 
+class TestLinearPool(_Base):
+    """linear-gap: 'gap' changes only the parameter-driven resident term (no reductions, smaller
+    dense_0); the activation inventory never modelled the linear decoder, so phases per image are
+    unchanged, and 'flatten' keeps the pinned peaks of TestGroupConfigs."""
+
+    def test_resident_and_peaks(self):
+        base = dict(TestGroupConfigs.D12HS, group_config="B")
+        d_lin = (WP.count_params(base)["linear_decoder"]
+                 - WP.count_params(dict(base, linear_pool="gap"))["linear_decoder"])
+        self.assertGreater(d_lin, 8000000)
+        for level, task, n, ckpt, casc in ((4, "rigid", 32, "none", "none"),
+                                           (2, "deform", 16, "full", "frozen4"),
+                                           (1, "deform", 4, "full", "chain42")):
+            fl = MM.Workload(level, task, n, base, ckpt, True, 7, cascade=casc,
+                             lean_sampler=True, split_group_conv=True,
+                             tasks_run=("rigid", "affine", "deform"))
+            gp = fl.replace(model_config=dict(base, linear_pool="gap"))
+            touched_fac = 4.0 + 2.0                                  # grad + AMP cast (linear touched)
+            frozen_fac = 4.0 * MM.N_FROZEN[casc]
+            self.assertAlmostEqual(MM.resident_bytes(fl) - MM.resident_bytes(gp),
+                                   (12.0 + touched_fac + frozen_fac) * d_lin, places=3)
+            pf, pg = MM.predict(fl, self.co), MM.predict(gp, self.co)
+            self.assertEqual(pf["per_image_gib"], pg["per_image_gib"])
+            self.assertAlmostEqual(pf["peak_gib"] - pg["peak_gib"],
+                                   (MM.resident_bytes(fl) - MM.resident_bytes(gp)) / MM.GIB, places=9)
+            print("\n[memory] L%d %s d12hs B: peak flatten %.3f GiB, gap %.3f GiB"
+                  % (level, task, pf["peak_gib"], pg["peak_gib"]), file=sys.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

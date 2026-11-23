@@ -126,6 +126,8 @@
 #       env S4=2.5 S2=10 S1=15 SYNTH_PROB=0 STEPS_L2=16000 STEPS_L1=6000 EXTRA_ARGS_L2='--frozen-integration-grid current' GROUP_ARGS='--group-config X' RUN_NAME_L4=r4_abl_gX RUN_NAME_L2=r2_abl_gX RUN_NAME_L1=r1_abl_gX sbatch --job-name=bgr-abl-gX slurm/r_cascade.sh
 #     instance norm (config B):
 #       env S4=2.5 S2=10 S1=15 SYNTH_PROB=0 STEPS_L2=16000 STEPS_L1=6000 EXTRA_ARGS_L2='--frozen-integration-grid current' GROUP_ARGS='--group-config B' NORM=instance RUN_NAME_L4=r4_abl_in RUN_NAME_L2=r2_abl_in RUN_NAME_L1=r1_abl_in sbatch --job-name=bgr-abl-in slurm/r_cascade.sh
+#     global average pooling in the linear decoder (config B; .agents/tasks/linear-gap/report.md):
+#       env DATA=$PROJ/data/npy_v3 S4=2.5 S2=10 S1=15 SYNTH_PROB=0 STEPS_L2=16000 STEPS_L1=6000 EXTRA_ARGS_L2='--frozen-integration-grid current' GROUP_ARGS='--group-config B --linear-pool gap' RUN_NAME_L4=r4_v3_gB_gap RUN_NAME_L2=r2_v3_gB_gap RUN_NAME_L1=r1_v3_gB_gap sbatch --job-name=v3_gB_gap slurm/r_cascade.sh
 set -uo pipefail
 
 PROJ="${PROJ:-/autofs/space/crater_001/users/jn85/BrainRegProjects/GroupwiseReg}"

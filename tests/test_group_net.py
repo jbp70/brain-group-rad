@@ -171,16 +171,19 @@ class TestCopyRoundTrip(NetTestCase):
 class TestGroupBehaviour(NetTestCase):
     """Permutation equivariance and where group information enters (eval mode)."""
 
-    def _model(self, group_config, n=4, seed=0):
+    def _model(self, group_config, n=4, seed=0, linear_pool="flatten"):
         tf.random.set_seed(seed)
         x = images(4, n, seed=seed)
-        m = G.GroupRegLevelModel(4, ModelConfig(group_config=group_config)).build_model()
+        m = G.GroupRegLevelModel(4, ModelConfig(group_config=group_config,
+                                                linear_pool=linear_pool)).build_model()
         set_random_heads(m, x, np.random.default_rng(seed))
         return m, x
 
     def test_permutation_equivariance(self):
-        for cfg in ("A", "B", "none", "E"):
-            m, x = self._model(cfg, n=5)
+        # cfg "B-gap" / "A-gap": linear_pool 'gap' (linear-gap).
+        for cfg in ("A", "B", "none", "E", "B-gap", "A-gap"):
+            gc_, _, pool = cfg.partition("-")
+            m, x = self._model(gc_, n=5, linear_pool=pool or "flatten")
             perm = np.array([3, 0, 4, 1, 2])
             for task in ("rigid", "affine"):
                 o = m(x, task=task, training=False)
@@ -323,11 +326,16 @@ class TestGradients(NetTestCase):
                     ModelConfig(group_config="A", block="residual",
                                 filters=(8, 16, 16, 24, 32, 48)),
                     ModelConfig(group_config="B", dense_group_concat_first=True),
-                    ModelConfig(group_config="none"), ModelConfig(group_config="E")):
+                    ModelConfig(group_config="none"), ModelConfig(group_config="E"),
+                    # linear-gap: global average pooling instead of reductions + flatten.
+                    ModelConfig(group_config="B", linear_pool="gap"),
+                    ModelConfig(group_config="A", linear_pool="gap")):
             for task in ("affine", "rigid"):
-                with self.subTest(cfg=cfg.group_config, block=cfg.block, task=task):
+                with self.subTest(cfg=cfg.group_config, block=cfg.block, pool=cfg.linear_pool,
+                                  task=task):
                     nv, nk = self._check(cfg, task)
-                    self.assertGreater(nk, 10)
+                    # gap: no reduction kernels (6 encoder + 2 dense + 2 heads = 10).
+                    self.assertGreater(nk, 9 if cfg.linear_pool == "gap" else 10)
                     free_memory()
 
 

@@ -99,7 +99,7 @@ import math
 import re
 
 from data_loading import params as P
-from models.config import GROUP_CONFIGS, ModelConfig
+from models.config import GROUP_CONFIGS, LINEAR_POOLS, ModelConfig
 
 SYNTH_LABEL_SET_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
@@ -654,6 +654,12 @@ def build_parser():
     g.add_argument("--dense", type=int_list, default=_MC.dense)
     g.add_argument("--dropout", type=float, default=None, help="default 0.15, or 0.0 with --overfit-one-group")
     g.add_argument("--dense-group-concat-first", type=str2bool, default=_MC.dense_group_concat_first)
+    g.add_argument("--linear-pool", default=_MC.linear_pool, choices=list(LINEAR_POOLS),
+                   help="bottleneck -> dense vector of the rigid/affine decoder: 'flatten' (default; "
+                   "1x1 --reductions, then flatten 5x7x6 x last reduction) or 'gap' (global average "
+                   "pooling of the encoder bottleneck over 5x7x6 -> filters[-1] values; no "
+                   "reductions built, --reductions ignored; no coordinate channels). A cascade "
+                   "uses the same value at every level")
     g.add_argument("--negative-slope", type=float, default=_MC.negative_slope)
     g.add_argument("--translation-scale", type=float, default=_MC.translation_scale)
     g.add_argument("--centering-iters", type=int, default=_MC.centering_iters)
@@ -933,7 +939,8 @@ def deform_decoder_from_args(args):
 def model_config_from_args(args):
     return ModelConfig(filters=args.filters, reductions=args.reductions, dense=args.dense,
                        dropout=args.dropout, group_config=args.group_config,
-                       dense_group_concat_first=args.dense_group_concat_first, norm=args.norm,
+                       dense_group_concat_first=args.dense_group_concat_first,
+                       linear_pool=args.linear_pool, norm=args.norm,
                        dense_norm=args.dense_norm, head_activation=args.head_activation,
                        block=args.block,
                        negative_slope=args.negative_slope, bn_momentum=args.bn_momentum,

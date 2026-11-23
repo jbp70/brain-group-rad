@@ -89,6 +89,28 @@ class TestPresets(unittest.TestCase):
             self.assertEqual(c["A"][part], c["B"][part], part)
             self.assertLess(c["none"][part], c["B"][part], part)
 
+    def test_count_params_linear_pool_gap(self):
+        """linear-gap: 'gap' drops the 1x1 reductions and feeds f5 (not 5040) values to dense_0;
+        encoder and deform decoder unchanged. Exact difference for d12hs, configs A / B."""
+        d12hs = dict(filters=(16, 64, 128, 192, 256, 384), decoder_widths=(128, 96, 64, 16, 8))
+        for g in ("A", "B", "none", "E"):
+            fl = W.count_params(dict(deform_decoder=True, group_config=g, **d12hs))
+            gp = W.count_params(dict(deform_decoder=True, group_config=g, linear_pool="gap", **d12hs))
+            for part in ("encoder", "deform_decoder"):
+                self.assertEqual(fl[part], gp[part], (g, part))
+            mult = 2 if g in ("A", "B") else 1
+            red, cin = 0, 384
+            for r in (192, 96, 48, 24):                       # BN gamma/beta + 1x1 conv (+ bias)
+                red += 2 * cin + cin * mult * r + r
+                cin = r
+            # dense_0 (ungrouped): LayerNorm 2 d_in + d_in * 2048 (+ bias, unchanged)
+            dense0 = (2 * 5040 + 5040 * 2048) - (2 * 384 + 384 * 2048)
+            self.assertEqual(fl["linear_decoder"] - gp["linear_decoder"], red + dense0, g)
+        print("\n[presets] d12hs config B linear decoder: flatten %d, gap %d" % (
+            W.count_params(dict(group_config="B", **d12hs))["linear_decoder"],
+            W.count_params(dict(group_config="B", linear_pool="gap", **d12hs))["linear_decoder"]),
+            file=sys.stderr)
+
     def test_no_tensorflow(self):
         # Under the full suite other test modules import TF first, so check the imports of the
         # two modules themselves (bgr_preproc38 has no TF at all).
@@ -119,6 +141,14 @@ class TestModelConfigPositivity(unittest.TestCase):
                     decoder_widths=(8, 8, 8, 8, 8))
         d = ModelConfig().to_dict()                  # today's config.json format restores
         self.assertEqual(ModelConfig.from_dict(d), ModelConfig())
+        # linear-gap: config.json files written before linear_pool existed load as 'flatten'.
+        del d["linear_pool"]
+        self.assertEqual(ModelConfig.from_dict(d).linear_pool, "flatten")
+        gap = ModelConfig(linear_pool="gap")
+        self.assertEqual(ModelConfig.from_dict(gap.to_dict()), gap)
+        with self.assertRaises(ValueError) as cm:
+            ModelConfig(linear_pool="max")
+        self.assertIn("linear_pool", str(cm.exception))
 
 
 if __name__ == "__main__":

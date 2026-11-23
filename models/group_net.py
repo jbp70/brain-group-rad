@@ -29,6 +29,9 @@ Linear decoder (group blocks in configs A, B; all of it is after the bottleneck)
 ``dense_group_concat_first``) -> dense 512 (group) -> norm -> act -> dropout -> heads (float32)
 (dense-path norm = ``dense_norm``, LayerNorm by default; the pre-head act is dropped with
 ``head_activation='none'``):
+With ``linear_pool='gap'`` the reductions and the flatten are replaced by a global average pool
+of the bottleneck over 5x7x6 ([N, f5], float32 mean); the dense blocks and heads are unchanged
+(dense_0 input f5 instead of 5040).
 rotation+translation Dense(13) (zero kernel, identity bias) and scale/shear Dense(6) (zeros).
 Rigid: A_raw = [R | t]; affine: A_raw = [R K | t]. A = GroupCentering(A_raw).
 
@@ -132,7 +135,8 @@ class LinearDecoder(tf.keras.layers.Layer):
     """Rigid/affine decoder and heads (design 4.4). call(bottleneck, task) -> (A_raw, params, feats).
 
     Pre-activation blocks throughout: the flattened vector is the raw output of the last 1x1
-    reduction conv, and each dense block normalizes and activates its input. A final norm -> act
+    reduction conv ('gap': the spatial mean of the raw L6 conv output), and each dense block
+    normalizes and activates its input. A final norm -> act
     after the last dense layer feeds dropout and the heads (the rigid project's Dense -> act ->
     dropout -> head, in pre-activation form). The dense blocks and that pre-head norm-act use
     ``config.dense_norm`` (default 'layer', per-vector LayerNorm; design 4.4, v3.4).
@@ -146,10 +150,16 @@ class LinearDecoder(tf.keras.layers.Layer):
         self.config = config or ModelConfig()
         cfg = self.config
         g = cfg.group_decoders()
-        self.reductions = [_conv_block(cfg, r, 1, g, "reduction_%d" % i, kernel_size=1,
-                                       residual_ok=False)
-                           for i, r in enumerate(cfg.reductions)]
-        self.flatten = tf.keras.layers.Flatten(name="flatten")
+        self.pool = cfg.linear_pool
+        if self.pool == "gap":
+            # Global average pooling of the bottleneck replaces the reductions + flatten.
+            self.reductions = []
+            self.flatten = None
+        else:
+            self.reductions = [_conv_block(cfg, r, 1, g, "reduction_%d" % i, kernel_size=1,
+                                           residual_ok=False)
+                               for i, r in enumerate(cfg.reductions)]
+            self.flatten = tf.keras.layers.Flatten(name="flatten")
         self.dense_blocks = [
             L.GroupDenseBlock(u, group=(i > 0 or cfg.dense_group_concat_first) and g,
                               norm=cfg.dense_norm, negative_slope=cfg.negative_slope,
@@ -181,12 +191,25 @@ class LinearDecoder(tf.keras.layers.Layer):
                 head.build(tf.TensorShape([None, units]))
         super().build(input_shape)
 
+    @staticmethod
+    def _global_average_pool(x):
+        """[N, X, Y, Z, C] -> [N, C] mean over the spatial axes ('gap'). The mean is taken in
+        float32 (under mixed_float16 the bottleneck is float16; the cast makes the accumulation
+        float32 on every device, at negligible cost for a 5x7x6 bottleneck) and cast back to the
+        input dtype, so the dense blocks get the same dtype as from the flatten path."""
+        with tf.name_scope("gap"):
+            pooled = tf.reduce_mean(tf.cast(x, tf.float32), axis=[1, 2, 3])
+            return tf.cast(pooled, x.dtype)
+
     def call(self, x, task="rigid", training=None):
         if task not in TASKS:
             raise ValueError("task must be one of {}, got {!r}".format(TASKS, task))
-        for block in self.reductions:
-            x = block(x, training=training)
-        x = self.flatten(x)
+        if self.pool == "gap":
+            x = self._global_average_pool(x)
+        else:
+            for block in self.reductions:
+                x = block(x, training=training)
+            x = self.flatten(x)
         for block in self.dense_blocks:
             x = block(x, training=training)
         feat = self.head_norm_act(x, training=training)

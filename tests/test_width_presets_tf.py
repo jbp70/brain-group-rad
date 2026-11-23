@@ -53,6 +53,13 @@ class TestCountParams(unittest.TestCase):
         self.check(ModelConfig(deform_decoder=True, group_config="none", **NARROW), "none")
         self.check(ModelConfig(deform_decoder=True, group_config="E", **NARROW), "E")
         self.check(ModelConfig(block="residual", group_config="E", **NARROW), "res-E")
+        # linear-gap: no reductions, dense_0 input = filters[-1].
+        self.check(ModelConfig(deform_decoder=True, group_config="B", linear_pool="gap", **NARROW), "gap-B")
+        self.check(ModelConfig(group_config="A", linear_pool="gap", dense_group_concat_first=True,
+                               **NARROW), "gap-A-cf")
+        for name in W.PRESETS:
+            self.check(ModelConfig(deform_decoder=True, group_config="B", linear_pool="gap",
+                                   **W.preset_kwargs(name)), "gap-" + name)
 
 
 if __name__ == "__main__":

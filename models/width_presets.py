@@ -147,12 +147,16 @@ def count_params(model_config, deform_decoder=None):
         if cfg.block == "residual" and (f[i - 1] != f[i] or strides[i - 1] != 1):
             enc += _conv(f[i - 1], f[i], 1)
     # Linear decoder: 1x1 reductions (group in A/B), flatten, dense blocks, pre-head norm, heads.
+    # linear_pool 'gap': no reductions; the parameter-free global average pool gives f5 inputs.
     lin = 0
     cin = f[5]
-    for r in cfg.reductions:
-        lin += _group_block(cin, r, 1, gd, cfg.norm)
-        cin = r
-    d_in = BOTTLENECK_VOXELS * cin
+    if cfg.linear_pool == "gap":
+        d_in = cin
+    else:
+        for r in cfg.reductions:
+            lin += _group_block(cin, r, 1, gd, cfg.norm)
+            cin = r
+        d_in = BOTTLENECK_VOXELS * cin
     for i, units in enumerate(cfg.dense):
         group = (i > 0 or cfg.dense_group_concat_first) and gd
         lin += _norm_params(cfg.dense_norm, d_in) + d_in * (2 if group else 1) * units + units

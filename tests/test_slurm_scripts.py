@@ -2538,6 +2538,31 @@ class TestCascadeAblationKnobs(unittest.TestCase):
         self.assertIn("WARNING: FORCE_RECIPE_CHANGE=1", r.stderr)
         self.assertEqual((self.state()["group_args"], self.state()["norm"]), ("--group-config none", "batch"))
 
+    def test_linear_pool_gap_chain(self):
+        """linear-gap: the report's v3 B gap chain (GROUP_ARGS '--group-config B --linear-pool gap')
+        reaches every level's main.py and parses; GROUP_ARGS is recorded and a resume without
+        '--linear-pool gap' is refused."""
+        recipe = dict(S4="2.5", S2="10", S1="15", SYNTH_PROB="0", STEPS_L2="16000", STEPS_L1="6000",
+                      EXTRA_ARGS_L2="--frozen-integration-grid current",
+                      GROUP_ARGS="--group-config B --linear-pool gap", RUN_NAME_L4="r4_v3_gB_gap",
+                      RUN_NAME_L2="r2_v3_gB_gap", RUN_NAME_L1="r1_v3_gB_gap")
+        r, env, cmd = self.dry_levels(**recipe)
+        self.assertIn("group args '--group-config B --linear-pool gap' | norm batch |", r.stdout)
+        self.assertEqual(cmd[2]["EXTRA_ARGS"], "--group-config B --linear-pool gap --lambda-smooth 10 "
+                         "--frozen-integration-grid current")
+        for k, s, steps in ((4, 2.5, 16000), (2, 10.0, 16000), (1, 15.0, 6000)):
+            with self.subTest(level=k):
+                a = self.level_main(k, cmd[k])
+                self.assertEqual((a.level, a.group_config, a.linear_pool, a.lambda_smooth, a.steps),
+                                 (k, "B", "gap", s, steps))
+        r = self.run_cascade(stubs=False, STUB_FAIL_LEVEL="2", **recipe)
+        self.assertEqual(r.returncode, 7, r.stdout + r.stderr)
+        self.assertEqual(self.state("r4_v3_gB_gap")["group_args"], "--group-config B --linear-pool gap")
+        r = self.run_cascade(stubs=False, **dict(recipe, GROUP_ARGS="--group-config B"))
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertIn("group_args recorded '--group-config B --linear-pool gap' now '--group-config B'",
+                      r.stderr)
+
     def test_old_state_without_keys_resumes(self):
         r = self.run_cascade(stubs=False, STUB_FAIL_LEVEL="2")
         self.assertEqual(r.returncode, 7, r.stdout + r.stderr)
