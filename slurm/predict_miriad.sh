@@ -44,6 +44,8 @@
 #   GRID_REF    training-grid reference (default $PROJ/data/target_grid/target_grid.json)
 #   LEVELS      cascade levels (default empty: all levels of the checkpoint)
 #   EXTRA       more flags for `predict.py run`, e.g. "--precision float32"
+#   GROUP_REGEX group regex of write-groups (default: MIRIAD patient), e.g. ADNI tau PET:
+#               '^(\d{3}_S_\d{4})_(?:bl|fu)_PET$' with LABEL_NAME=mask N_CHECK=2
 #   SCRATCH_ROOT  parent of TMPDIR (default /scratch)
 #
 #   CKPT=$PROJ/results/<L1 run>/ckpt/last TASK=rigid sbatch slurm/predict_miriad.sh
@@ -66,6 +68,7 @@ GRID_REF=${GRID_REF:-$PROJ/data/target_grid/target_grid.json}
 LEVELS=${LEVELS:-}
 EXTRA=${EXTRA:-}
 KEEP_DENSE=${KEEP_DENSE:-0}
+GROUP_REGEX=${GROUP_REGEX:-}
 LEVEL_FLAGS=""
 if [ -n "$LEVELS" ]; then LEVEL_FLAGS="--levels $LEVELS"; fi
 export TMPDIR=${SCRATCH_ROOT:-/scratch}/${SLURM_JOB_ID:-manual}
@@ -75,7 +78,9 @@ echo "checkpoint $CKPT  task $TASK  name $NAME  out $OUT  levels ${LEVELS:-all}"
 RUN=(singularity exec --nv -B /autofs -B /scratch "$SIF" bash -c 'cd "$1" && shift && python "$@"' predict "$REPO")
 
 echo "=== 0 groups ==="
-"${RUN[@]}" -m evaluation.groups write-groups --processed-dir "$PROCESSED" --out-dir "$OUT/groups" </dev/null || exit $?
+GROUP_FLAGS=()
+if [ -n "$GROUP_REGEX" ]; then GROUP_FLAGS=(--group-regex "$GROUP_REGEX"); fi
+"${RUN[@]}" -m evaluation.groups write-groups --processed-dir "$PROCESSED" --out-dir "$OUT/groups" "${GROUP_FLAGS[@]}" </dev/null || exit $?
 if [ -n "$PATIENTS" ]; then
     LIST="$PATIENTS"
 else

@@ -1,0 +1,14 @@
+# ADNI tau PET (paper Figure 5): model inputs for groupwise rigid registration of baseline + follow-up.
+# Input rows = frame-averaged NATIVE static PETs from scripts/adni_tau_prepare.py (manifest
+# adni_tau_pet.csv, bias_corrected true -> no N4). Steps: SynthStrip, then NO registration:
+# registration.backend centroid only translates the brain-mask centroid onto the template brain-mask
+# centroid (native orientation kept), one world-space resampling onto the LUMIR 1 mm grid, p99.5
+# normalisation. These images only feed the network; SUVR is computed from the native static PETs
+# (scripts/adni_tau_suvr.py), so the resampling here does not enter the SUVR values.
+#   python -m preprocessing run --config preprocessing/config_adni_tau_pet.yaml \
+#       --manifest $P/data/manifests/adni_tau_pet.csv --out-root $P/data/processed
+target_dir: /autofs/space/crater_001/users/jn85/BrainRegProjects/GroupwiseReg/data/target_grid
+
+registration: {backend: centroid}
+
+outputs: {keep_work: false, save_mask: false, save_qc_png: false}

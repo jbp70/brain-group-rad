@@ -1,0 +1,15 @@
+# ADNI tau experiment (paper Figure 5): the baseline T1 of each patient (manifest adni_tau_t1.csv).
+# Steps: SynthStrip + N4, centroid backend (translation of the brain-mask centroid only, one
+# world-space resampling onto the LUMIR 1 mm grid), p99.5 normalisation; then SynthSeg --parc
+# (separate `synthseg` command) -> labels_synthseg.nii.gz on the same grid. The T1 is registered
+# rigidly (ANTs) to the patient's central PET mean by scripts/adni_tau_suvr.py; its SynthSeg labels
+# define the SUVR regions (reference = cerebellar cortex 8 + 47).
+#   python -m preprocessing run --config preprocessing/config_adni_tau_t1.yaml \
+#       --manifest $P/data/manifests/adni_tau_t1.csv --out-root $P/data/processed
+#   python -m preprocessing synthseg --config preprocessing/config_adni_tau_t1.yaml \
+#       --manifest $P/data/manifests/adni_tau_t1.csv --out-root $P/data/processed
+target_dir: /autofs/space/crater_001/users/jn85/BrainRegProjects/GroupwiseReg/data/target_grid
+
+registration: {backend: centroid}
+
+outputs: {keep_work: false, save_mask: false, save_qc_png: false}
